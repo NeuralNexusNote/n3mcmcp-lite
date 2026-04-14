@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "n3memorycore-trial": {
+      "type": "stdio",
+      "command": "n3mc-mcp-trial",
+      "args": []
+    }
+  }
+}

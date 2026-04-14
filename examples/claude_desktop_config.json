@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "n3memorycore-trial": {
+      "command": "n3mc-mcp-trial",
+      "args": [],
+      "env": {
+        "N3MC_REDIS_URL": "redis://localhost:6379/0"
+      }
+    }
+  }
+}

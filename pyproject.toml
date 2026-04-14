@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "n3memorycore-mcp-trial"
+version = "1.0.0-trial"
+description = "N3MemoryCore MCP Trial — ephemeral (Redis-backed, 24h TTL) hybrid (vector + BM25) memory for Claude and other MCP clients"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "NeuralNexusNote" },
+  { name = "ArnolfJp019" },
+]
+keywords = ["mcp", "memory", "rag", "claude", "anthropic", "redis", "redis-stack", "vector-search", "embedding", "trial"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  "mcp>=1.2.0",
+  "redis>=5.0.0",
+  "sentence-transformers>=2.7.0",
+  "numpy>=1.24",
+  "uuid-utils>=0.9.0",
+  "platformdirs>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+n3mc-mcp-trial = "n3mc_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/n3memorycore/n3memorycore-mcp-trial"
+Issues = "https://github.com/n3memorycore/n3memorycore-mcp-trial/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["n3mc_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
