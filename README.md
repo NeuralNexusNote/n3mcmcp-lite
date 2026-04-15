@@ -168,9 +168,12 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
-Tests target Redis DB index `15` (configurable via `N3MC_REDIS_TEST_URL`)
-and flush it before/after each test, so your production data is untouched
-— but they will refuse to run if Redis isn't reachable.
+Tests target Redis DB index `0` (configurable via `N3MC_REDIS_TEST_URL`)
+and `FLUSHDB` it before/after each test. RediSearch refuses to create
+indexes outside DB 0 (`Cannot create index on db != 0`), so a separate
+test DB isn't an option — run the test suite against a **dedicated**
+Redis container, never one that holds data you care about. Tests refuse
+to run if Redis isn't reachable.
 
 ## License
 

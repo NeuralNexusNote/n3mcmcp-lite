@@ -28,7 +28,7 @@ build on the MCP surface — with one deliberate tradeoff:
 | Storage engine  | Redis Stack (RediSearch)        | SQLite + sqlite-vec        |
 | Durability      | 7 d TTL, volatile              | Permanent, disk-persistent |
 | External deps   | User runs Redis Stack container | None (self-contained)      |
-| Target audience | Evaluation, short-lived tasks   | Ongoing projects           |
+| Target audience | Short-term projects, evaluation | Ongoing projects           |
 
 Why two builds? Claude Marketplace currently has no payment mechanism,
 so the Lite version exists to differentiate a "try it free" drop-in
@@ -124,7 +124,7 @@ Claude Desktop、Claude Code、その他 MCP 対応ツールなど、あらゆ�
 | ストレージエンジン | Redis Stack（RediSearch）            | SQLite + sqlite-vec           |
 | 耐久性             | 7d TTL・揮発                        | 永続（ディスク保存）          |
 | 外部依存           | ユーザーが Redis Stack コンテナを実行 | なし（セルフコンテイン）      |
-| 対象ユース        | 評価用途・短期タスク                 | 継続プロジェクト              |
+| 対象ユース        | 短期プロジェクト・評価用途           | 継続プロジェクト              |
 
 なぜ 2 版あるのか？現在の Claude Marketplace には課金機構が無いため、
 「お試し用の無料ドロップイン」と「ディスクに永続保存する有償版」を

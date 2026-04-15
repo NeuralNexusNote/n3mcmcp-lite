@@ -368,7 +368,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 ```
 
 - `redis_url` — 接続 URL。環境変数 `N3MC_REDIS_URL` がこのフィールドより優先。
-- `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 7 日）。下げるのは問題ないが、数日以上に上げると Lite の目的が崩れるためレビュー時に指摘される。
+- `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 7 日）。下げるのは問題ないが、1 週間を大きく超える値に上げると Lite の目的が崩れるためレビュー時に指摘される。
 - `search_result_limit` — `search_memory` が返す最大件数。
 - `context_char_limit` — 下流ツールのクライアント側トリミング用に予約（内部では未使用）。
 - `min_score` — このスコア未満の結果を除外（既定 `0.2`）。`0.0` で無効化。
@@ -447,9 +447,11 @@ pytest tests/ -q
 テストスイートの対象：
 - `tests/test_database.py` — RediSearch インデックス、CRUD、TTL、重複、BM25、KNN、シリアライズ。
 - `tests/test_processor.py` — コサイン類似度（コサイン距離から）、時間減衰、BM25 正規化、整形、埋め込み。
-- `tests/test_server.py` — 隔離された `config.json` とフラッシュ済み Redis DB インデックス 15 に対する MCP ツールディスパッチの E2E。
+- `tests/test_server.py` — 隔離された `config.json` とフラッシュ済み Redis DB インデックス 0 に対する MCP ツールディスパッチの E2E。
 
-Redis Stack が `N3MC_REDIS_TEST_URL`（既定 `redis://localhost:6379/15`）で到達不可の場合、テストは失敗ではなく自動スキップされる。
+Redis Stack が `N3MC_REDIS_TEST_URL`（既定 `redis://localhost:6379/0`）で到達不可の場合、テストは失敗ではなく自動スキップされる。
+
+> **⚠️ 破壊的なテスト DB**：RediSearch は DB 0 以外でインデックスを作成できません（`Cannot create index on db != 0`）。このためテストスイートは各テストの前後で DB 0 を `FLUSHDB` します。残したいデータが入っている Redis には `N3MC_REDIS_TEST_URL` を向けないでください — テスト専用コンテナを用意してください。
 
 ---
 

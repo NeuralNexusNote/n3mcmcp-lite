@@ -40,7 +40,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | External dependency    | User-run Redis Stack container            | None (self-contained)                  |
 | `time_decay` relevance | Near-always ≈ 1.0 (TTL < half-life)       | Meaningful (90-day half-life)          |
 | Re-indexing / repair   | `FT.CREATE` is idempotent; no migrations  | Schema + model migration markers       |
-| Intended use           | Evaluation, throwaway tasks, marketplace  | Ongoing projects                       |
+| Intended use           | Short-term projects, evaluation, marketplace | Ongoing projects                    |
 
 **Volatility contract:**
 - Every write to Redis sets a TTL equal to `ttl_seconds` (default 604 800 = 7 d).
@@ -368,7 +368,7 @@ Complete schema (missing fields auto-filled with defaults below):
 ```
 
 - `redis_url` — connection URL. `N3MC_REDIS_URL` env var overrides this field.
-- `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 7 d). Lowering it is fine; raising it beyond a few days defeats the purpose of the Lite and will be flagged during review.
+- `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 7 d). Lowering it is fine; raising it far beyond a week defeats the purpose of the Lite and will be flagged during review.
 - `search_result_limit` — max results returned by `search_memory`.
 - `context_char_limit` — reserved for client-side truncation by downstream tools; not used internally.
 - `min_score` — excludes results with score below this value (default `0.2`). Set to `0.0` to disable.
@@ -447,9 +447,11 @@ pytest tests/ -q
 The test suite covers:
 - `tests/test_database.py` — RediSearch index, CRUD, TTL, dedup, BM25, KNN, serialization.
 - `tests/test_processor.py` — cosine sim (from cosine distance), time decay, BM25 normalization, purification, embeddings.
-- `tests/test_server.py` — MCP tool dispatch end-to-end against an isolated `config.json` and a flushed Redis DB index 15.
+- `tests/test_server.py` — MCP tool dispatch end-to-end against an isolated `config.json` and a flushed Redis DB index 0.
 
-Tests auto-skip (not fail) if Redis Stack is not reachable at `N3MC_REDIS_TEST_URL` (default `redis://localhost:6379/15`).
+Tests auto-skip (not fail) if Redis Stack is not reachable at `N3MC_REDIS_TEST_URL` (default `redis://localhost:6379/0`).
+
+> **⚠️ Destructive test DB**: RediSearch can only create indexes on DB 0 (`Cannot create index on db != 0`), so the test suite FLUSHDBs DB 0 before and after every test. Do **not** point `N3MC_REDIS_TEST_URL` at a Redis instance that holds data you care about — run a dedicated container for testing.
 
 ---
 

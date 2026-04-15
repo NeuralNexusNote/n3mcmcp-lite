@@ -166,10 +166,13 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
-テストは Redis DB インデックス `15` を対象に動作し（環境変数
-`N3MC_REDIS_TEST_URL` で変更可能）、各テスト前後に `FLUSHDB` を行う
-ため本番データには触れません。ただし Redis に接続できない場合は
-テストは実行されずスキップされます。
+テストは Redis DB インデックス `0` を対象に動作し（環境変数
+`N3MC_REDIS_TEST_URL` で変更可能）、各テスト前後に `FLUSHDB` を行います。
+RediSearch は DB 0 以外でインデックスを作成できない
+（`Cannot create index on db != 0`）ため、別 DB への分離はできません。
+**残したいデータが入っている Redis をテストに使わないでください** —
+テスト専用の Redis コンテナを用意してください。Redis に接続できない
+場合、テストは実行されずスキップされます。
 
 ## ライセンス
 
