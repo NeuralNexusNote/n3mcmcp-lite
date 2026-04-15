@@ -28,12 +28,23 @@ build on the MCP surface — with one deliberate tradeoff:
 | Storage engine  | Redis Stack (RediSearch)        | SQLite + sqlite-vec        |
 | Durability      | 7 d TTL, volatile              | Permanent, disk-persistent |
 | External deps   | User runs Redis Stack container | None (self-contained)      |
-| Target audience | Short-term projects, evaluation | Ongoing projects           |
+| Target audience | Agentic loops, multi-agent collab, short-term projects | Long-term knowledge accumulation |
 
-Why two builds? Claude Marketplace currently has no payment mechanism,
-so the Lite version exists to differentiate a "try it free" drop-in
-from the durable, paid version that stores data indefinitely on the
-user's disk.
+Why two builds? **They target different workflows, not different price
+points.**
+
+- **Lite — project-scoped memory.** The 7-day TTL and volatile Redis
+  storage are active features. Agentic loops, multi-agent sessions,
+  and short-lived experiments benefit from memory that resets cleanly
+  (`docker restart`) or evaporates on its own. No pruning, no
+  contamination from abandoned context.
+- **Paid — continuous memory.** SQLite-backed persistence is the
+  feature, not the luxury. For long-term projects where the assistant
+  needs to remember decisions across months or years.
+
+Claude Marketplace currently has no payment mechanism, so the Lite is
+the build you can get from there today — but it is not a crippled
+version of the Paid build, it is a different tool.
 
 ## ⚠️ CRITICAL: Intended Use and AI-Centric Workflow
 
@@ -124,11 +135,22 @@ Claude Desktop、Claude Code、その他 MCP 対応ツールなど、あらゆ�
 | ストレージエンジン | Redis Stack（RediSearch）            | SQLite + sqlite-vec           |
 | 耐久性             | 7d TTL・揮発                        | 永続（ディスク保存）          |
 | 外部依存           | ユーザーが Redis Stack コンテナを実行 | なし（セルフコンテイン）      |
-| 対象ユース        | 短期プロジェクト・評価用途           | 継続プロジェクト              |
+| 対象ユース        | エージェントループ・マルチエージェント・短期プロジェクト | 長期的な知識蓄積             |
 
-なぜ 2 版あるのか？現在の Claude Marketplace には課金機構が無いため、
-「お試し用の無料ドロップイン」と「ディスクに永続保存する有償版」を
-差別化する目的で Lite 版を設けています。
+なぜ 2 版あるのか？**価格差ではなく、対象ワークフローが異なります。**
+
+- **Lite — プロジェクト境界内のメモリ**。7 日 TTL と揮発性 Redis は
+  積極的な特長です。エージェント的ループ、マルチエージェント会話、
+  短期的な実験では、メモリがクリーンにリセットされる（`docker restart`）
+  または自動蒸発することが有利に働きます。剪定不要、破棄済みコンテキスト
+  からの汚染なし。
+- **有償版 — 継続的なメモリ**。SQLite による永続化は「付加価値」では
+  なく「本質」。数ヶ月〜数年にわたってアシスタントに決定事項を記憶
+  させたい長期プロジェクト向け。
+
+現在の Claude Marketplace には課金機構が無いため、Marketplace から
+現時点で取得できるのは Lite 版ですが、これは有償版の機能制限版では
+なく、**別の用途を持つ別のツール**です。
 
 ## ⚠️ 重要：使用目的と AI 中心のワークフロー
 

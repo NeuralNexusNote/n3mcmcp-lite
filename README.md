@@ -16,9 +16,21 @@
 | **Lite (this repo)**   | Redis Stack (RediSearch)          | 7d TTL, volatile | Claude Marketplace   |
 | Paid                    | SQLite + sqlite-vec (local file)  | Permanent         | Separate distribution |
 
-Same MCP surface (five tools, same ranking formula) — the Lite simply
-throws entries away after 7 days and stores nothing on disk beyond a
-small `config.json`. Think of it as a test drive.
+Same MCP surface (five tools, same ranking formula). The 7-day TTL and
+volatile Redis storage are **design features, not limitations** —
+they make the Lite build the better fit for:
+
+- **Agentic code-generation loops** — failed attempts and abandoned
+  designs don't bleed into the next task; `docker restart redis-stack`
+  wipes the slate clean.
+- **Multi-agent collaboration** — decisions made during one task don't
+  contaminate unrelated follow-ups.
+- **Experimental / throwaway prototyping** — leave it alone and memory
+  evaporates in 7 days, no pruning needed.
+
+The Paid build targets the opposite use case: long-term knowledge
+accumulation where persistence is the feature. Pick the Lite for
+**project-scoped memory**; pick the Paid for **continuous memory**.
 
 ## What is this?
 
