@@ -455,7 +455,7 @@ Tests auto-skip (not fail) if Redis Stack is not reachable at `N3MC_REDIS_TEST_U
 
 ---
 
-## Appendix: Recommended Review Workflow
+## Appendix A: Recommended Review Workflow
 
 After an AI regenerates the implementation from this spec, review it in this order:
 
@@ -467,3 +467,16 @@ After an AI regenerates the implementation from this spec, review it in this ord
 6. **Redis-down test** — stop Redis, call any tool, confirm the server returns the "start Redis Stack" hint without crashing. Restart Redis, confirm tools work again without restarting the MCP process.
 
 These steps are operated by the human reviewer, not automated tests.
+
+---
+
+## Appendix B: Optional Extensions (not shipped)
+
+The Lite build intentionally stops at the hybrid + time-decay ranker described in §3.6. The following extensions are **not part of the shipped spec** — they are sketched here so a future AI or contributor has a clean starting map when the user decides to try them. None of them are required for the Lite build to behave correctly; each is a precision-vs-latency trade.
+
+- **Cross-encoder reranker** — after `hybrid_search` returns the top-N candidates, rerank them with a small cross-encoder (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`, ~130 MB, or `BAAI/bge-reranker-base`, ~278 MB). Expect **+100–300 ms CPU latency** per `search_memory` call on a modern laptop (top-50 rerank), in exchange for roughly **+1 precision point** on paraphrase-heavy queries. Drop-in point: between the fused-score sort and the `min_score` filter in `processor.hybrid_search`. Keep the existing score as a fallback when the reranker is disabled.
+- **Chunking on save** — when `save_memory` receives a body longer than ~2000 characters, split it into ~500-character sliding windows (with ~100-char overlap) and store each chunk as its own `mem:<uuid>` entry, all sharing a `source_id` field so `search_memory` can re-group hits. Adds write amplification but materially improves recall on long pastes (specs, articles, logs). Today the Lite build relies on the behavioral instruction *"extract each key fact as a separate short sentence"* instead — chunking would make that instruction optional.
+- **HyDE (Hypothetical Document Embeddings)** — before embedding the user's query, ask a small LLM to synthesize a hypothetical *answer* to the query, then embed that answer instead of (or in addition to) the raw query. Helps when queries are short/vague and memories are long/specific. Needs an LLM hop per search, so it is a poor fit for the Lite build's "no external API calls" promise unless a local model is already available.
+- **Japanese morphological analysis** — RediSearch's default tokenizer splits on whitespace and punctuation, so Japanese text (which has no inter-word spaces) collapses into roughly one BM25 token per sentence and keyword relevance degenerates to something close to "exact substring match." Pre-tokenize the `text` body at save time with a morphological analyzer — candidates: `fugashi` + `unidic-lite` (MeCab-based, ~50 MB), `SudachiPy` + `sudachidict-core` (~70 MB, multi-granularity A/B/C modes), or pure-Python `Janome` when binary dependencies are a problem — store the space-joined surface forms in a parallel `text_tokens` TEXT field, and point BM25 search at that field. Vector search is unaffected (the e5 embedding model handles Japanese natively) and the raw `text` field stays untouched for display. Expected cost: +5–20 ms per `save_memory` call; precision gain on Japanese queries is material, not marginal. For a mixed-language deployment this is closer to a requirement than a nice-to-have; English-only deployments can skip it safely.
+
+All four extensions are additive — none of them require changes to the Redis schema's existing fields or the TTL/dedup contracts (the Japanese tokenizer only **adds** a parallel field). A future implementer should treat them as separate feature flags, default-off, and benchmark each independently against the baseline ranker.
