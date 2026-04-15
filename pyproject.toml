@@ -43,8 +43,8 @@ dev = [
 n3mc-mcp-lite = "n3mc_mcp.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/n3memorycore/n3memorycore-mcp-lite"
-Issues = "https://github.com/n3memorycore/n3memorycore-mcp-lite/issues"
+Homepage = "https://github.com/NeuralNexusNote/n3mcmcp-lite"
+Issues = "https://github.com/NeuralNexusNote/n3mcmcp-lite/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["n3mc_mcp"]

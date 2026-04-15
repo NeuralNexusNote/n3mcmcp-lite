@@ -69,8 +69,8 @@ pip install n3memorycore-mcp-lite
 ソースから：
 
 ```bash
-git clone https://github.com/n3memorycore/n3memorycore-mcp-lite
-cd n3memorycore-mcp-lite
+git clone https://github.com/NeuralNexusNote/n3mcmcp-lite
+cd n3mcmcp-lite
 pip install -e .
 ```
 
