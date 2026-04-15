@@ -1,7 +1,7 @@
-# N3MemoryCore MCP v1.0.0-trial [Volatile Memory over MCP]
-> NeuralNexusNote™ プロダクト — **Trial（揮発型）版**
+# N3MemoryCore MCP v1.0.0-lite [Volatile Memory over MCP]
+> NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
-> **本版の位置付け**：N3MemoryCore MCP の無償 Trial 版。ストレージは **Redis Stack（RediSearch）**、各エントリに **24 時間の TTL**、それ以上の永続性はありません。お試し用の公開テスト版 — ディスクに永続保存する有償版との差別化を明確化しています。
+> **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版。ストレージは **Redis Stack（RediSearch）**、各エントリに **24 時間の TTL**、それ以上の永続性はありません。お試し用の公開テスト版 — ディスクに永続保存する有償版との差別化を明確化しています。
 >
 > **想定ユーザー**：Claude Desktop / Claude Code などあらゆる MCP 対応クライアントのユーザーで、24 時間の窓内で会話をまたいで検索可能な短期メモリを欲しい人。
 >
@@ -20,19 +20,19 @@
 
 - **ライセンス**：Apache License 2.0。詳細は `LICENSE` を参照。
 
-> **アンインストール**：`pip uninstall n3memorycore-mcp-trial` でパッケージを削除。`docker rm -f redis-stack` で Redis コンテナを停止・削除すれば保存済みメモリは即座に消えます。`${N3MC_DATA_DIR}`（またはプラットフォーム既定のデータディレクトリ）を削除すれば `config.json` も除去されます。MCP クライアント設定の `n3memorycore-trial` エントリも削除してください。
+> **アンインストール**：`pip uninstall n3memorycore-mcp-lite` でパッケージを削除。`docker rm -f redis-stack` で Redis コンテナを停止・削除すれば保存済みメモリは即座に消えます。`${N3MC_DATA_DIR}`（またはプラットフォーム既定のデータディレクトリ）を削除すれば `config.json` も除去されます。MCP クライアント設定の `n3memorycore-lite` エントリも削除してください。
 >
-> **バックアップは？** Trial 版は **バックアップを想定していません**。24 時間の滑り窓で消滅します。永続メモリが必要なら有償版を使ってください。
+> **バックアップは？** Lite 版は **バックアップを想定していません**。24 時間の滑り窓で消滅します。永続メモリが必要なら有償版を使ってください。
 
 > **実装に関する質問**：作者への問い合わせはできませんが、本仕様書を Claude に読み込ませて直接質問することで、Claude が実装やカスタマイズを支援できます。
 
 ---
 
-## Trial: Volatile Memory（揮発性メモリ）
+## Lite: Volatile Memory（揮発性メモリ）
 
-本節は Trial 版固有のトレードオフをまとめたものです。以降は有償版と同じ構造で記述し、AI による再生成を容易にしています。
+本節は Lite 版固有のトレードオフをまとめたものです。以降は有償版と同じ構造で記述し、AI による再生成を容易にしています。
 
-| 項目                   | Trial（本仕様）                              | 有償版（別仕様）                         |
+| 項目                   | Lite（本仕様）                              | 有償版（別仕様）                         |
 | ---------------------- | -------------------------------------------- | ---------------------------------------- |
 | ストレージエンジン     | Redis Stack（RediSearch モジュール）           | SQLite + sqlite-vec（ローカルファイル）    |
 | 耐久性                 | **エントリごと 24h TTL**・揮発                 | 永続・ディスク保存                       |
@@ -48,7 +48,7 @@
 - 失効は Redis に委任 — バックグラウンド掃除ジョブは動かない。
 - Redis コンテナをボリュームごと削除すれば全メモリが即座に消える。
 
-**24 時間を超えるセッション間保証はない。** 有償版と違い、Trial 仕様では「永続化ハック」を禁止する — TTL を回避するために RDB スナップショット・AOF リライト・外部ダンプを追加しないこと。永続性が必要なら有償版を使う。
+**24 時間を超えるセッション間保証はない。** 有償版と違い、Lite 仕様では「永続化ハック」を禁止する — TTL を回避するために RDB スナップショット・AOF リライト・外部ダンプを追加しないこと。永続性が必要なら有償版を使う。
 
 ---
 
@@ -71,14 +71,14 @@
    ```
 2. パッケージをインストール：
    ```bash
-   pip install n3memorycore-mcp-trial
+   pip install n3memorycore-mcp-lite
    ```
 3. MCP クライアント設定にサーバーを登録（[§8](#8-mcp-クライアント設定) 参照）。
 4. クライアントを再起動。初回ツール呼び出しは ~400 MB の埋め込みモデルのダウンロードとロードで 30–60 秒かかります。
 
 ### データバックアップ
 
-適用外。[Trial: Volatile Memory](#trial-volatile-memory揮発性メモリ) を参照 — 本版は意図的に揮発的です。`config.json`（`owner_id` / `local_id` UUID を含む）が唯一のディスク上の成果物で、再インストール時に同じオーナー ID を維持したい場合にのみコピーすれば十分です。
+適用外。[Lite: Volatile Memory](#lite-volatile-memory揮発性メモリ) を参照 — 本版は意図的に揮発的です。`config.json`（`owner_id` / `local_id` UUID を含む）が唯一のディスク上の成果物で、再インストール時に同じオーナー ID を維持したい場合にのみコピーすれば十分です。
 
 ---
 
@@ -86,7 +86,7 @@
 
 MCP クライアント向けに「気軽に試せる」メモリエンドポイントを提供する：ハイブリッド検索（ベクトル + RediSearch BM25）、数学的に正しいランキング、24 時間での自動ガベージコレクション。MCP サーバーは振る舞いの指示を配信し、接続中の LLM が各ターンの先頭で自動検索、応答後に自動保存を行う — クライアント側フック不要。
 
-Trial は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリスクでデモするために存在する。有償版にアップグレードすると、ストレージ層が Redis から SQLite に差し替わるだけで、MCP としての外向き仕様はそのまま維持される。
+Lite は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリスクでデモするために存在する。有償版にアップグレードすると、ストレージ層が Redis から SQLite に差し替わるだけで、MCP としての外向き仕様はそのまま維持される。
 
 > **⚠️ Python 確認**：インストール前に `python --version` で 3.10+ を確認すること。
 
@@ -103,8 +103,8 @@ Trial は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリ
 ## 2. パッケージ構成
 
 ```
-n3memorycore-mcp-trial/
-├── pyproject.toml                  # パッケージメタデータ、エントリポイント 'n3mc-mcp-trial'
+n3memorycore-mcp-lite/
+├── pyproject.toml                  # パッケージメタデータ、エントリポイント 'n3mc-mcp-lite'
 ├── n3mc_mcp/                       # Python パッケージ
 │   ├── __init__.py                 # バージョンマーカー
 │   ├── __main__.py                 # エントリポイント: python -m n3mc_mcp
@@ -140,8 +140,8 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 | ------------ | ---------------- | --------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------- |
 | `id` (PK)    | Redis ハッシュ    | レコード毎（UUIDv7、時刻順）             | **1 レコード**          | 各メモリの一意識別子 — 削除・重複判定に使用                                                    |
 | `owner_id`   | `config.json`    | 初回起動時（UUIDv4）                     | **オーナー**            | 誰のデータか — RediSearch の TAG フィルタで使用                                                |
-| `local_id`   | `config.json`    | 初回起動時（UUIDv4）                     | **エージェント / 導入** | インストールの UUIDv4 識別子。互換性のため保存（Trial のランキングでは未使用）。                |
-| `session_id` | メモリ内          | サーバープロセス起動時（UUIDv4）         | **サーバープロセス**    | どのサーバープロセスが書いたか（互換性のため保存、Trial のランキングでは未使用）。              |
+| `local_id`   | `config.json`    | 初回起動時（UUIDv4）                     | **エージェント / 導入** | インストールの UUIDv4 識別子。互換性のため保存（Lite のランキングでは未使用）。                |
+| `session_id` | メモリ内          | サーバープロセス起動時（UUIDv4）         | **サーバープロセス**    | どのサーバープロセスが書いたか（互換性のため保存、Lite のランキングでは未使用）。              |
 | `agent_id`   | Redis ハッシュ    | `save_memory` 呼び出し毎（自由文字列）   | **エージェント表示名**  | 人間向けラベル（例：`"claude-desktop"`、`"claude-code"`）。                                    |
 
 ### 3.2 埋め込み
@@ -172,11 +172,11 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 
 **以下は絶対に禁止（「性能」や「永続化」目的であっても）：**
 - `EXPIRE` なしの書き込み（＝無限 TTL）。
-- Trial メモリ寿命の延長のみを目的として、コンテナ削除後も生き残る Redis RDB / AOF 永続化設定を有効にすること。（ユーザーが自分の都合で Redis 設定を選ぶのは自由だが、仕様上はそれに依存しない。）
+- Lite メモリ寿命の延長のみを目的として、コンテナ削除後も生き残る Redis RDB / AOF 永続化設定を有効にすること。（ユーザーが自分の都合で Redis 設定を選ぶのは自由だが、仕様上はそれに依存しない。）
 - 読み込み時の TTL 再延長（`search_memory` 時の `TOUCH` や `EXPIRE`）。
 - 1 保存呼び出しを超える範囲でのライトバッファリング / 遅延パイプライン。
 
-**理由**：Trial の差別化は明示的な揮発性である。回避するとプロダクト区分が崩れる。
+**理由**：Lite の差別化は明示的な揮発性である。回避するとプロダクト区分が崩れる。
 
 ### 3.5 データレイアウト
 
@@ -236,11 +236,11 @@ RediSearch は正規化ベクトルに対し `cosine_distance ∈ [0, 2]` を返
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
-既定 `half_life_days = 90`。TTL が半減期より常に短いため、Trial ではほぼ常に ≈ 1.0 になる。有償版との式の互換性のため残す。
+既定 `half_life_days = 90`。TTL が半減期より常に短いため、Lite ではほぼ常に ≈ 1.0 になる。有償版との式の互換性のため残す。
 
 ### 3.7 トークナイズと句読点処理
 
-**トークナイザ**：RediSearch 内蔵のトークナイザ（空白＋句読点区切り、大文字小文字統一）。有償版で使われる Porter ステマーは本版では利用不可 — Trial は RediSearch 既定動作を明示的なトレードオフとして受け入れる。
+**トークナイザ**：RediSearch 内蔵のトークナイザ（空白＋句読点区切り、大文字小文字統一）。有償版で使われる Porter ステマーは本版では利用不可 — Lite は RediSearch 既定動作を明示的なトレードオフとして受け入れる。
 
 **クエリ整形** — ユーザー入力クエリは RediSearch へ送る前に `strip_fts_punctuation` を適用し、残った RediSearch 特殊文字をバックスラッシュでエスケープする。`content` はハッシュにそのまま保存する（RediSearch が動的にトークナイズする）。
 
@@ -266,7 +266,7 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 1. **設定読み込み**（`load_config()`）：
    - データディレクトリから `config.json` を読み込む。
-   - **ファイルが壊れている（JSON パースエラー）場合**：`stderr` に警告を出し、既定値にフォールバック。有償版と違い、Trial では DB からの回復を**試みない** — Redis は TTL 切れで空かもしれないため。新しい UUIDv4 ペアを生成して書き込む。
+   - **ファイルが壊れている（JSON パースエラー）場合**：`stderr` に警告を出し、既定値にフォールバック。有償版と違い、Lite では DB からの回復を**試みない** — Redis は TTL 切れで空かもしれないため。新しい UUIDv4 ペアを生成して書き込む。
    - `N3MC_REDIS_URL` 環境変数のオーバーライドを適用（ファイルより優先）。
    - 欠損フィールドは既定値で埋めて保存。
 
@@ -287,11 +287,11 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 ### 3.10 修復
 
-Trial 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ensure_index()` を呼ぶだけ。移行マーカー無し、FTS 再構築無し、再埋め込みループ無し — 存在している Redis レコードは RediSearch サイドチャネルですでにインデックス化されており、失効レコードは単に消えている。
+Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ensure_index()` を呼ぶだけ。移行マーカー無し、FTS 再構築無し、再埋め込みループ無し — 存在している Redis レコードは RediSearch サイドチャネルですでにインデックス化されており、失効レコードは単に消えている。
 
 返却形：成功時 `{"status": "ok", "message": "index ensured"}`、失敗時 `{"status": "error", "message": "<詳細>"}`。
 
-これは有償版（FTS 句読点移行・vec モデル版移行・未インデックス行修復ループ）からの意図的な簡略化。Trial では最古レコードが高々 24 時間なので、移行対象が存在しない。
+これは有償版（FTS 句読点移行・vec モデル版移行・未インデックス行修復ループ）からの意図的な簡略化。Lite では最古レコードが高々 24 時間なので、移行対象が存在しない。
 
 ---
 
@@ -305,9 +305,9 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 サーバーが広告する内容：
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-trial", version: "1.0.0-trial" }`
+- `serverInfo: { name: "n3memorycore-lite", version: "1.0.0-lite" }`
 - `capabilities.tools` with `listChanged: false`
-- `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Trial 用文面には「メモリは 24 時間で失効する」旨を明示する。**
+- `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 24 時間で失効する」旨を明示する。**
 
 ### 4.3 ツール
 
@@ -336,7 +336,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 指示は LLM に以下を要求する：
 
 1. **先に検索** — 各ユーザーターンの先頭で、意図を反映した簡潔なクエリで `search_memory` を呼ぶ。
-2. **交互ごとに保存** — 意味のある応答後に `save_memory` を呼び、意図の言い換えと結論（各 50–200 字）を保存。**Trial 文面では「24 時間で消える」旨を LLM に明示する。**
+2. **交互ごとに保存** — 意味のある応答後に `save_memory` を呼び、意図の言い換えと結論（各 50–200 字）を保存。**Lite 文面では「24 時間で消える」旨を LLM に明示する。**
 3. **長文貼り付けから抽出** — ユーザー貼り付けテキストを個別事実に分割、1 事実ごとに `save_memory`。
 4. **ノイズをスキップ** — 挨拶・確認質問・機械的な了解は保存しない。
 5. **明示要求を尊重** — 「これは保存しないで」「忘れて」に従う（`delete_memory` を使用）。
@@ -368,7 +368,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 ```
 
 - `redis_url` — 接続 URL。環境変数 `N3MC_REDIS_URL` がこのフィールドより優先。
-- `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 24 時間）。下げるのは問題ないが、数日以上に上げると Trial の目的が崩れるためレビュー時に指摘される。
+- `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 24 時間）。下げるのは問題ないが、数日以上に上げると Lite の目的が崩れるためレビュー時に指摘される。
 - `search_result_limit` — `search_memory` が返す最大件数。
 - `context_char_limit` — 下流ツールのクライアント側トリミング用に予約（内部では未使用）。
 - `min_score` — このスコア未満の結果を除外（既定 `0.2`）。`0.0` で無効化。
@@ -384,9 +384,9 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 | OS      | パス                                                         |
 | ------- | ------------------------------------------------------------ |
-| Windows | `%LOCALAPPDATA%\n3memorycore-trial\`                         |
-| macOS   | `~/Library/Application Support/n3memorycore-trial/`          |
-| Linux   | `~/.local/share/n3memorycore-trial/`                         |
+| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                         |
+| macOS   | `~/Library/Application Support/n3memorycore-lite/`          |
+| Linux   | `~/.local/share/n3memorycore-lite/`                         |
 
 データディレクトリ内のファイル：
 - `config.json` — 設定（唯一のディスク上成果物）
@@ -405,8 +405,8 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
-      "command": "n3mc-mcp-trial",
+    "n3memorycore-lite": {
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }
@@ -420,9 +420,9 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
+    "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-trial",
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }

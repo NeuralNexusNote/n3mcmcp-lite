@@ -1,6 +1,6 @@
-# N3MemoryCore MCP — Trial (Ephemeral)
+# N3MemoryCore MCP — Lite (Ephemeral)
 
-> A NeuralNexusNote™ product — **free Trial** build: ephemeral hybrid
+> A NeuralNexusNote™ product — **free Lite** build: ephemeral hybrid
 > (vector + BM25) memory exposed as a Model Context Protocol server, backed
 > by Redis Stack with a 24-hour TTL per entry.
 
@@ -9,20 +9,20 @@
 
 ---
 
-## Trial vs. Paid
+## Lite vs. Paid
 
 | Build                   | Storage                           | Durability        | Where                |
 | ----------------------- | --------------------------------- | ----------------- | -------------------- |
-| **Trial (this repo)**   | Redis Stack (RediSearch)          | 24h TTL, volatile | Claude Marketplace   |
+| **Lite (this repo)**   | Redis Stack (RediSearch)          | 24h TTL, volatile | Claude Marketplace   |
 | Paid                    | SQLite + sqlite-vec (local file)  | Permanent         | Separate distribution |
 
-Same MCP surface (five tools, same ranking formula) — the Trial simply
+Same MCP surface (five tools, same ranking formula) — the Lite simply
 throws entries away after 24 hours and stores nothing on disk beyond a
 small `config.json`. Think of it as a test drive.
 
 ## What is this?
 
-`n3memorycore-mcp-trial` is a local-only MCP server that gives Claude (and
+`n3memorycore-mcp-lite` is a local-only MCP server that gives Claude (and
 any other MCP-compatible client) short-lived memory across conversations.
 It stores text entries in a local Redis Stack instance with both a BM25
 full-text index and a 768-dimension vector index
@@ -51,7 +51,7 @@ preserved without any Claude Code hooks.
 
 ### 1. Start Redis Stack
 
-The Trial build requires Redis Stack (Redis + RediSearch module). The
+The Lite build requires Redis Stack (Redis + RediSearch module). The
 easiest way is Docker:
 
 ```bash
@@ -64,14 +64,14 @@ server will find it automatically.
 ### 2. Install the package
 
 ```bash
-pip install n3memorycore-mcp-trial
+pip install n3memorycore-mcp-lite
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/n3memorycore/n3memorycore-mcp-trial
-cd n3memorycore-mcp-trial
+git clone https://github.com/n3memorycore/n3memorycore-mcp-lite
+cd n3memorycore-mcp-lite
 pip install -e .
 ```
 
@@ -88,8 +88,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
-      "command": "n3mc-mcp-trial",
+    "n3memorycore-lite": {
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }
@@ -103,9 +103,9 @@ Add to your project's `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
+    "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-trial",
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }
@@ -114,15 +114,15 @@ Add to your project's `.mcp.json`:
 
 ## Data location
 
-The Trial build does not store a database on disk — memories live in
+The Lite build does not store a database on disk — memories live in
 Redis and expire automatically. Only a small `config.json` sits in the
 platform-standard user data directory:
 
 | OS      | Path                                                       |
 | ------- | ---------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3memorycore-trial\`                       |
-| macOS   | `~/Library/Application Support/n3memorycore-trial/`        |
-| Linux   | `~/.local/share/n3memorycore-trial/`                       |
+| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                       |
+| macOS   | `~/Library/Application Support/n3memorycore-lite/`        |
+| Linux   | `~/.local/share/n3memorycore-lite/`                       |
 
 Override with the `N3MC_DATA_DIR` environment variable.
 
@@ -157,7 +157,7 @@ final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay
 time_decay = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 90 days)
 ```
 
-Because entries expire after 24 hours, `time_decay` in the Trial build is
+Because entries expire after 24 hours, `time_decay` in the Lite build is
 always very close to 1.0.
 
 ## Development

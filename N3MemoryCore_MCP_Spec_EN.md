@@ -1,7 +1,7 @@
-# N3MemoryCore MCP v1.0.0-trial [Volatile Memory over MCP]
-> A NeuralNexusNote™ product — **Trial (ephemeral) build**
+# N3MemoryCore MCP v1.0.0-lite [Volatile Memory over MCP]
+> A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
-> **What is this variant?** The Trial build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **24-hour TTL**, and nothing persists beyond that window. Think of it as a public test drive — the paid build uses SQLite and stores memories permanently.
+> **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **24-hour TTL**, and nothing persists beyond that window. Think of it as a public test drive — the paid build uses SQLite and stores memories permanently.
 >
 > **Who is this for?** Users of any MCP-compatible LLM client (Claude Desktop, Claude Code, and others) who want searchable, short-lived memory shared across sessions within a 24-hour window.
 >
@@ -20,19 +20,19 @@ By using this software, you agree to the terms above.
 
 - **License**: Apache License 2.0. See the `LICENSE` file for details.
 
-> **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-trial` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3memorycore-trial` entry from your MCP client's config file.
+> **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-lite` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3memorycore-lite` entry from your MCP client's config file.
 >
-> **Backup?** The Trial build is **not designed to be backed up**. Entries vanish on a 24h rolling window; if you need durable memory, use the paid build.
+> **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 24h rolling window; if you need durable memory, use the paid build.
 
 > **For implementation questions**: While the author cannot be contacted for support, you can load this specification into Claude and ask questions directly — Claude can assist with implementation and customization.
 
 ---
 
-## Trial: Volatile Memory
+## Lite: Volatile Memory
 
-This section captures the tradeoffs unique to the Trial build; the rest of the specification deliberately reuses the paid-build structure so AI-driven regeneration stays simple.
+This section captures the tradeoffs unique to the Lite build; the rest of the specification deliberately reuses the paid-build structure so AI-driven regeneration stays simple.
 
-| Property               | Trial (this spec)                         | Paid (separate spec)                   |
+| Property               | Lite (this spec)                         | Paid (separate spec)                   |
 | ---------------------- | ----------------------------------------- | -------------------------------------- |
 | Storage engine         | Redis Stack (RediSearch module)           | SQLite + sqlite-vec (local file)       |
 | Durability             | **24 h TTL per entry**, ephemeral         | Permanent, disk-persistent             |
@@ -48,7 +48,7 @@ This section captures the tradeoffs unique to the Trial build; the rest of the s
 - Expiration is delegated to Redis; no background cleanup job runs.
 - Restarting the Redis container with its volume removed wipes all memory immediately.
 
-**No cross-session guarantee beyond 24 h.** Unlike the paid build, the Trial spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, use the paid variant.
+**No cross-session guarantee beyond 24 h.** Unlike the paid build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, use the paid variant.
 
 ---
 
@@ -71,14 +71,14 @@ This section captures the tradeoffs unique to the Trial build; the rest of the s
    ```
 2. Install the package:
    ```bash
-   pip install n3memorycore-mcp-trial
+   pip install n3memorycore-mcp-lite
    ```
 3. Register the server in your MCP client's config (see [§8](#8-mcp-client-configuration)).
 4. Restart the client. The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
 
 ### Data Backup
 
-Not applicable. See the [Trial: Volatile Memory](#trial-volatile-memory) section — the build is explicitly ephemeral. `config.json` (containing `owner_id` / `local_id` UUIDs) is the only on-disk artifact and can be copied if the user wants to keep the same owner identity across re-installs.
+Not applicable. See the [Lite: Volatile Memory](#lite-volatile-memory) section — the build is explicitly ephemeral. `config.json` (containing `owner_id` / `local_id` UUIDs) is the only on-disk artifact and can be copied if the user wants to keep the same owner identity across re-installs.
 
 ---
 
@@ -86,7 +86,7 @@ Not applicable. See the [Trial: Volatile Memory](#trial-volatile-memory) section
 
 Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector + RediSearch BM25), mathematically sound ranking, 24-hour automatic garbage collection. The MCP server delivers behavioral instructions so the connected LLM auto-searches at the start of each turn and auto-saves after each meaningful exchange — without requiring client-side hooks.
 
-The Trial exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; upgrading to the paid build swaps the storage layer from Redis to SQLite while preserving the MCP surface.
+The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; upgrading to the paid build swaps the storage layer from Redis to SQLite while preserving the MCP surface.
 
 > **⚠️ Python check**: Before installing, run `python --version` to verify Python 3.10+ is available.
 
@@ -103,8 +103,8 @@ The Trial exists to demonstrate the N3MemoryCore MCP surface on the Claude Marke
 ## 2. Package Structure
 
 ```
-n3memorycore-mcp-trial/
-├── pyproject.toml                  # Package metadata, entry point 'n3mc-mcp-trial'
+n3memorycore-mcp-lite/
+├── pyproject.toml                  # Package metadata, entry point 'n3mc-mcp-lite'
 ├── n3mc_mcp/                       # Python package
 │   ├── __init__.py                 # Version marker
 │   ├── __main__.py                 # Entry point: python -m n3mc_mcp
@@ -140,8 +140,8 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 | ------------ | --------------- | ---------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------- |
 | `id` (PK)    | Redis hash      | Per record (UUIDv7, time-ordered)  | **One record**       | Unique identifier for each memory — used for deletion and dedup                                    |
 | `owner_id`   | `config.json`   | First startup (UUIDv4)             | **Owner**            | Identifies whose data this is — used as a TAG filter in RediSearch                                 |
-| `local_id`   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Trial ranking.            |
-| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which server process wrote the record (stored for compatibility; not used in Trial ranking). |
+| `local_id`   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Lite ranking.            |
+| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which server process wrote the record (stored for compatibility; not used in Lite ranking). |
 | `agent_id`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`).                                   |
 
 ### 3.2 Embeddings
@@ -172,11 +172,11 @@ On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline
 
 **The following are absolutely prohibited (even for "performance" or "persistence" reasons):**
 - Writing records without an `EXPIRE` (i.e. infinite TTL).
-- Enabling Redis RDB / AOF persistence policies that would survive container removal for the sole purpose of extending Trial memory lifespan. (The user may, of course, choose any Redis configuration; the spec simply doesn't rely on it.)
+- Enabling Redis RDB / AOF persistence policies that would survive container removal for the sole purpose of extending Lite memory lifespan. (The user may, of course, choose any Redis configuration; the spec simply doesn't rely on it.)
 - Re-extending TTL on read (`TOUCH`, `EXPIRE` on `search_memory`).
 - Write buffering / deferred pipelines beyond the single save call.
 
-**Reason**: the Trial build's differentiation is explicit volatility; circumventing it erodes the product distinction.
+**Reason**: the Lite build's differentiation is explicit volatility; circumventing it erodes the product distinction.
 
 ### 3.5 Data Layout
 
@@ -236,11 +236,11 @@ RediSearch returns `cosine_distance ∈ [0, 2]` for normalized vectors. Clamping
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
-Default `half_life_days = 90`. Because TTL < half-life by construction, this term is almost always ≈ 1.0 in the Trial build. It is kept for formula parity with the paid build.
+Default `half_life_days = 90`. Because TTL < half-life by construction, this term is almost always ≈ 1.0 in the Lite build. It is kept for formula parity with the paid build.
 
 ### 3.7 Text Tokenization & Punctuation Handling
 
-**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the paid build is **not** available here; the Trial accepts RediSearch's default behaviour as a documented tradeoff.
+**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the paid build is **not** available here; the Lite accepts RediSearch's default behaviour as a documented tradeoff.
 
 **Query cleaning** — apply `strip_fts_punctuation` to the user's query string *before* submitting it to RediSearch, and backslash-escape remaining RediSearch special characters. Store raw `content` in the hash (RediSearch will tokenize it on the fly).
 
@@ -266,7 +266,7 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 1. **Load config** (`load_config()`):
    - Read `config.json` from the data directory.
-   - **If the file is corrupt (JSON parse error)**: log a warning to `stderr` and fall back to defaults. Unlike the paid build, the Trial does **not** attempt DB-based recovery — Redis may already be empty (TTL-expired). A fresh UUIDv4 pair is generated and written.
+   - **If the file is corrupt (JSON parse error)**: log a warning to `stderr` and fall back to defaults. Unlike the paid build, the Lite does **not** attempt DB-based recovery — Redis may already be empty (TTL-expired). A fresh UUIDv4 pair is generated and written.
    - Apply `N3MC_REDIS_URL` env-var override (takes precedence over the file).
    - If any field is missing, fill with defaults and persist.
 
@@ -287,11 +287,11 @@ Steps 1 and 3 must complete before the server accepts tool calls. Steps 2 and 4 
 
 ### 3.10 Repair
 
-The `repair_memory` tool in the Trial build is a **thin idempotent operation**: it calls `ensure_index()` again. There are no migration markers, no FTS rebuild, no re-embedding loop — Redis records that exist are already indexed by the RediSearch side-channel, and expired records are simply gone.
+The `repair_memory` tool in the Lite build is a **thin idempotent operation**: it calls `ensure_index()` again. There are no migration markers, no FTS rebuild, no re-embedding loop — Redis records that exist are already indexed by the RediSearch side-channel, and expired records are simply gone.
 
 Return shape: `{"status": "ok", "message": "index ensured"}`, or `{"status": "error", "message": "<detail>"}` on failure.
 
-This is a deliberate simplification versus the paid build (which runs FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Trial has nothing to migrate because the oldest record is at most 24 h old.
+This is a deliberate simplification versus the paid build (which runs FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 24 h old.
 
 ---
 
@@ -305,9 +305,9 @@ stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `std
 
 The server advertises:
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-trial", version: "1.0.0-trial" }`
+- `serverInfo: { name: "n3memorycore-lite", version: "1.0.0-lite" }`
 - `capabilities.tools` with `listChanged: false`
-- `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Trial instruction text explicitly tells the LLM that memory expires after 24 hours.**
+- `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 24 hours.**
 
 ### 4.3 Tools
 
@@ -336,7 +336,7 @@ Because MCP has no equivalent of Claude Code's `UserPromptSubmit` / `Stop` hooks
 The instructions require the LLM to:
 
 1. **Search first** — call `search_memory` at the start of every user turn with a concise query reflecting the user's intent.
-2. **Save after each exchange** — call `save_memory` after a meaningful response, with paraphrased intent and key conclusions (50–200 chars each). **Note**: the Trial text explicitly reminds the LLM that entries vanish after 24 h.
+2. **Save after each exchange** — call `save_memory` after a meaningful response, with paraphrased intent and key conclusions (50–200 chars each). **Note**: the Lite text explicitly reminds the LLM that entries vanish after 24 h.
 3. **Extract from long pastes** — split user-pasted text into discrete facts, one `save_memory` per fact.
 4. **Skip noise** — do not save greetings, clarifying questions, or mechanical acknowledgements.
 5. **Respect explicit requests** — honor "don't save this" and "forget that" (use `delete_memory`).
@@ -368,7 +368,7 @@ Complete schema (missing fields auto-filled with defaults below):
 ```
 
 - `redis_url` — connection URL. `N3MC_REDIS_URL` env var overrides this field.
-- `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 24 h). Lowering it is fine; raising it beyond a few days defeats the purpose of the Trial and will be flagged during review.
+- `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 24 h). Lowering it is fine; raising it beyond a few days defeats the purpose of the Lite and will be flagged during review.
 - `search_result_limit` — max results returned by `search_memory`.
 - `context_char_limit` — reserved for client-side truncation by downstream tools; not used internally.
 - `min_score` — excludes results with score below this value (default `0.2`). Set to `0.0` to disable.
@@ -384,9 +384,9 @@ By default, only `config.json` lives on disk:
 
 | OS      | Path                                                        |
 | ------- | ----------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3memorycore-trial\`                        |
-| macOS   | `~/Library/Application Support/n3memorycore-trial/`         |
-| Linux   | `~/.local/share/n3memorycore-trial/`                        |
+| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                        |
+| macOS   | `~/Library/Application Support/n3memorycore-lite/`         |
+| Linux   | `~/.local/share/n3memorycore-lite/`                        |
 
 Files inside the data directory:
 - `config.json` — configuration (the only on-disk artifact)
@@ -405,8 +405,8 @@ Override via the environment variable `N3MC_DATA_DIR` (absolute path). Redis sta
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
-      "command": "n3mc-mcp-trial",
+    "n3memorycore-lite": {
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }
@@ -420,9 +420,9 @@ Project-local `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
+    "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-trial",
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }

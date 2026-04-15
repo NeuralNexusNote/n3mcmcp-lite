@@ -1,5 +1,5 @@
 """
-N3MemoryCore MCP Server — Trial
+N3MemoryCore MCP Server — Lite
 ================================
 
 A Model Context Protocol (MCP) server that provides **ephemeral**
@@ -14,4 +14,4 @@ Tools:
   - repair_memory   : re-create the RediSearch index if missing
 """
 
-__version__ = "1.0.0-trial"
+__version__ = "1.0.0-lite"

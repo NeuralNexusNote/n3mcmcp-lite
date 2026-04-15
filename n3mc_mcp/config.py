@@ -1,5 +1,5 @@
 """
-Config management for the N3MemoryCore MCP **Trial** server.
+Config management for the N3MemoryCore MCP **Lite** server.
 
 Config is a JSON file in the user data directory. Missing fields are filled
 with defaults and UUIDs are auto-generated on first run. Unlike the paid
@@ -50,7 +50,7 @@ def load_config() -> dict:
                 loaded = json.load(f)
             cfg.update(loaded)
         except Exception as e:
-            print(f"[N3MC-Trial] WARNING: config.json parse error: {e}", file=sys.stderr)
+            print(f"[N3MC-Lite] WARNING: config.json parse error: {e}", file=sys.stderr)
 
     # Env var override for Redis URL (wins over file)
     env_url = os.environ.get("N3MC_REDIS_URL")
@@ -82,4 +82,4 @@ def save_config(cfg: dict) -> None:
         with path.open("w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"[N3MC-Trial] WARNING: failed to write config.json: {e}", file=sys.stderr)
+        print(f"[N3MC-Lite] WARNING: failed to write config.json: {e}", file=sys.stderr)

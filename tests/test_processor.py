@@ -1,5 +1,5 @@
 """
-Ranking math, purification, embedding tests for n3mc_mcp.processor (Trial build).
+Ranking math, purification, embedding tests for n3mc_mcp.processor (Lite build).
 """
 from n3mc_mcp.processor import (
     cosine_sim_from_distance,
@@ -30,7 +30,7 @@ class TestCosineSim:
         assert abs(cosine_sim_from_distance(0.3) - 0.7) < 1e-9
 
     def test_backwards_compat_alias(self):
-        # The Trial build exposes cosine_sim_from_l2 as an alias.
+        # The Lite build exposes cosine_sim_from_l2 as an alias.
         assert cosine_sim_from_l2(0.0) == cosine_sim_from_distance(0.0)
 
 

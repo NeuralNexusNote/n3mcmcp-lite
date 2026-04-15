@@ -1,6 +1,6 @@
-# N3MemoryCore MCP — Trial（揮発型）
+# N3MemoryCore MCP — Lite（揮発型）
 
-> NeuralNexusNote™ プロダクト — **無償 Trial** 版：Redis Stack を使った
+> NeuralNexusNote™ プロダクト — **無償 Lite** 版：Redis Stack を使った
 > 揮発性ハイブリッド（ベクトル + BM25）メモリを Model Context Protocol
 > サーバーとして提供します。各エントリは 24 時間で自動失効します。
 
@@ -9,20 +9,20 @@
 
 ---
 
-## Trial 版と有償版
+## Lite 版と有償版
 
 | 版                      | ストレージ                          | 耐久性           | 配布先              |
 | ----------------------- | ----------------------------------- | ---------------- | ------------------- |
-| **Trial（本リポジトリ）** | Redis Stack（RediSearch）            | 24h TTL・揮発   | Claude Marketplace  |
+| **Lite（本リポジトリ）** | Redis Stack（RediSearch）            | 24h TTL・揮発   | Claude Marketplace  |
 | 有償版                  | SQLite + sqlite-vec（ローカルファイル） | 永続            | 別途配布             |
 
 MCP としての外向き仕様（5 つのツール、ランキング式）は同じです。
-Trial 版は 24 時間で中身を捨てる＆ディスクにはごく小さな `config.json`
+Lite 版は 24 時間で中身を捨てる＆ディスクにはごく小さな `config.json`
 以外を残さない、試乗版の位置付けです。
 
 ## 概要
 
-`n3memorycore-mcp-trial` は、Claude をはじめとする任意の MCP 対応
+`n3memorycore-mcp-lite` は、Claude をはじめとする任意の MCP 対応
 クライアントに **短時間の** 会話メモリを与えるローカル専用 MCP サーバー
 です。Redis Stack 上に BM25 全文検索インデックスと 768 次元ベクトル
 インデックス（[`intfloat/e5-base-v2`](https://huggingface.co/intfloat/e5-base-v2)）
@@ -50,7 +50,7 @@ Trial 版は 24 時間で中身を捨てる＆ディスクにはごく小さな 
 
 ### 1. Redis Stack の起動
 
-Trial 版は Redis Stack（Redis + RediSearch モジュール）を必要とします。
+Lite 版は Redis Stack（Redis + RediSearch モジュール）を必要とします。
 Docker を使うのが最も簡単です：
 
 ```bash
@@ -63,14 +63,14 @@ docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 ### 2. パッケージのインストール
 
 ```bash
-pip install n3memorycore-mcp-trial
+pip install n3memorycore-mcp-lite
 ```
 
 ソースから：
 
 ```bash
-git clone https://github.com/n3memorycore/n3memorycore-mcp-trial
-cd n3memorycore-mcp-trial
+git clone https://github.com/n3memorycore/n3memorycore-mcp-lite
+cd n3memorycore-mcp-lite
 pip install -e .
 ```
 
@@ -87,8 +87,8 @@ pip install -e .
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
-      "command": "n3mc-mcp-trial",
+    "n3memorycore-lite": {
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }
@@ -102,9 +102,9 @@ pip install -e .
 ```json
 {
   "mcpServers": {
-    "n3memorycore-trial": {
+    "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-trial",
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }
@@ -113,15 +113,15 @@ pip install -e .
 
 ## データ保存先
 
-Trial 版はディスク上に DB を持ちません。メモリは Redis に保存され、
+Lite 版はディスク上に DB を持ちません。メモリは Redis に保存され、
 自動で失効します。ディスクには小さな `config.json` だけがプラット
 フォーム標準のユーザーデータディレクトリに置かれます：
 
 | OS      | パス                                                        |
 | ------- | ----------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3memorycore-trial\`                        |
-| macOS   | `~/Library/Application Support/n3memorycore-trial/`         |
-| Linux   | `~/.local/share/n3memorycore-trial/`                        |
+| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                        |
+| macOS   | `~/Library/Application Support/n3memorycore-lite/`         |
+| Linux   | `~/.local/share/n3memorycore-lite/`                        |
 
 環境変数 `N3MC_DATA_DIR` で上書き可能です。
 
@@ -155,7 +155,7 @@ final_score = (0.7 × cosine_similarity + 0.3 × keyword_relevance) × time_deca
 time_decay = 2 ^ (-経過日数 / half_life_days)   (既定の半減期: 90日)
 ```
 
-Trial 版はエントリが 24 時間で消えるため、実際の `time_decay` は常に
+Lite 版はエントリが 24 時間で消えるため、実際の `time_decay` は常に
 1.0 に近い値になります。
 
 ## 開発

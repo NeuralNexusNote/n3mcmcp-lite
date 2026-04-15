@@ -1,7 +1,7 @@
 """
-Redis-backed storage layer for the N3MemoryCore MCP **Trial** server.
+Redis-backed storage layer for the N3MemoryCore MCP **Lite** server.
 
-The Trial variant is deliberately ephemeral:
+The Lite variant is deliberately ephemeral:
   - Every entry is written with a 24h (configurable) TTL.
   - No SQLite file, no migrations, no integrity checks.
   - Redis Stack (RediSearch + RedisJSON) is required — the user runs

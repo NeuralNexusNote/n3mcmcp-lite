@@ -1,7 +1,7 @@
 """
 Processing layer: embedding generation, ranking, text purification.
 
-In the Trial (Redis) build, vector distance comes back as **cosine
+In the Lite (Redis) build, vector distance comes back as **cosine
 distance** directly from RediSearch (not L2), so the converter is a trivial
 ``1 - distance`` — we keep the old name ``cosine_sim_from_l2`` available as
 a compatibility shim for anyone importing it, but the preferred name is

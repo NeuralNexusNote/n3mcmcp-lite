@@ -1,5 +1,5 @@
 """
-N3MemoryCore MCP **Trial** server — stdio transport.
+N3MemoryCore MCP **Lite** server — stdio transport.
 
 Exposes five tools (same shape as the paid variant):
   search_memory, save_memory, list_memories, delete_memory, repair_memory
@@ -8,7 +8,7 @@ Storage is Redis Stack (RediSearch) with a 24h TTL per entry. No persistence.
 
 Usage:
     python -m n3mc_mcp          # stdio server
-    n3mc-mcp-trial              # via installed console script
+    n3mc-mcp-lite              # via installed console script
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def _startup() -> None:
 
     if not ping(_CLIENT):
         print(
-            f"[N3MC-Trial] WARNING: cannot reach Redis at {redis_url}. "
+            f"[N3MC-Lite] WARNING: cannot reach Redis at {redis_url}. "
             f"Start Redis Stack first:\n"
             f"    docker run -p 6379:6379 redis/redis-stack-server:latest",
             file=sys.stderr,
@@ -69,22 +69,22 @@ def _startup() -> None:
     try:
         ensure_index(_CLIENT)
     except Exception as e:
-        print(f"[N3MC-Trial] WARNING: failed to ensure RediSearch index: {e}", file=sys.stderr)
+        print(f"[N3MC-Lite] WARNING: failed to ensure RediSearch index: {e}", file=sys.stderr)
 
     # Preload embedding model so the first tool call isn't slow.
     try:
         from .processor import get_model
         get_model()
     except Exception as e:
-        print(f"[N3MC-Trial] Model preload warning: {e}", file=sys.stderr)
+        print(f"[N3MC-Lite] Model preload warning: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
 # MCP server definition
 # ---------------------------------------------------------------------------
 app: Server = Server(
-    name="n3memorycore-trial",
-    version="1.0.0-trial",
+    name="n3memorycore-lite",
+    version="1.0.0-lite",
     instructions=SERVER_INSTRUCTIONS,
 )
 
@@ -101,7 +101,7 @@ async def list_tools() -> list[types.Tool]:
                 "Hybrid (vector + BM25) search over stored memories. "
                 "Call this at the start of every user turn with a concise "
                 "query representing the user's intent. "
-                "NOTE: Trial memories expire 24h after they were saved."
+                "NOTE: Lite memories expire 24h after they were saved."
             ),
             inputSchema={
                 "type": "object",
@@ -125,7 +125,7 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Persist a short memory entry (50-200 chars ideal). "
                 "Call once per distinct fact. Exact and near-duplicates are auto-rejected. "
-                "Trial entries expire after 24 hours."
+                "Lite entries expire after 24 hours."
             ),
             inputSchema={
                 "type": "object",
@@ -175,7 +175,7 @@ async def list_tools() -> list[types.Tool]:
             name="repair_memory",
             description=(
                 "Re-create the RediSearch index if missing. Kept for parity "
-                "with the paid variant; the Trial build has no migrations."
+                "with the paid variant; the Lite build has no migrations."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -232,7 +232,7 @@ def _tool_search(args: dict) -> list[types.TextContent]:
     if not results:
         return [types.TextContent(type="text", text="(no matching memories)")]
 
-    lines = ["# N3MemoryCore Trial — Relevant Memories", ""]
+    lines = ["# N3MemoryCore Lite — Relevant Memories", ""]
     for r in results:
         score = r.get("score", 0)
         content = r.get("content", "")
@@ -308,7 +308,7 @@ def _tool_list(args: dict) -> list[types.TextContent]:
     if not rows:
         return [types.TextContent(type="text", text="(no memories stored)")]
 
-    lines = [f"# Recent memories ({len(rows)} of {total}) — Trial: 24h TTL", ""]
+    lines = [f"# Recent memories ({len(rows)} of {total}) — Lite: 24h TTL", ""]
     for r in rows:
         ts = (r.get("timestamp") or "")[:19]
         agent = r.get("agent_id") or "-"
@@ -330,7 +330,7 @@ def _tool_delete(args: dict) -> list[types.TextContent]:
 
 
 def _tool_repair(_args: dict) -> list[types.TextContent]:
-    """Trial variant: simply re-ensure the RediSearch index exists."""
+    """Lite variant: simply re-ensure the RediSearch index exists."""
     try:
         ensure_index(_CLIENT)
     except Exception as e:

@@ -1,8 +1,8 @@
-N3MemoryCore MCP Trial Server (n3memorycore-mcp-trial)
+N3MemoryCore MCP Lite Server (n3memorycore-mcp-lite)
 Copyright 2026 NeuralNexusNote / ArnolfJp019
 
 This product is part of the NeuralNexusNote project and is distributed as
-the free "Trial" (ephemeral / Redis-backed) build of N3MemoryCore.
+the free "Lite" (ephemeral / Redis-backed) build of N3MemoryCore.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this software except in compliance with the License.

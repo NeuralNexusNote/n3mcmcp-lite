@@ -1,5 +1,5 @@
 """
-Redis store unit tests for n3mc_mcp.database (Trial build).
+Redis store unit tests for n3mc_mcp.database (Lite build).
 
 These require a live Redis Stack — see conftest.py.
 """

@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "n3memorycore-trial": {
+    "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-trial",
+      "command": "n3mc-mcp-lite",
       "args": []
     }
   }

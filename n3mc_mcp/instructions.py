@@ -6,15 +6,15 @@ These instructions implement the "auto-save" strategy: the client is told
 to call ``search_memory`` at the start of each turn and ``save_memory``
 after each meaningful exchange.
 
-The Trial build's storage is **ephemeral** (Redis with 24h TTL), so the
+The Lite build's storage is **ephemeral** (Redis with 24h TTL), so the
 instructions emphasise that expectation to the LLM client.
 """
 
 SERVER_INSTRUCTIONS = """\
-N3MemoryCore — Trial (Ephemeral Memory)
+N3MemoryCore — Lite (Ephemeral Memory)
 
 This MCP server gives you hybrid-search memory (vector + BM25) backed by
-Redis Stack. It is the free *Trial* build of N3MemoryCore: every entry
+Redis Stack. It is the free *Lite* build of N3MemoryCore: every entry
 expires 24 hours after it was saved. Treat it as a short-lived scratchpad,
 not a long-term store.
 

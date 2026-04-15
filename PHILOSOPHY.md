@@ -17,13 +17,13 @@ that speak MCP — can attach to it and gain memory across sessions.
 - **Client-agnostic** — the same store is reachable from every MCP
   client the user connects to it.
 
-## 🎁 Trial vs. Paid
+## 🎁 Lite vs. Paid
 
-This repository is the **Trial** build. It is free, intended for the
+This repository is the **Lite** build. It is free, intended for the
 Claude Marketplace distribution, and behaves identically to the paid
 build on the MCP surface — with one deliberate tradeoff:
 
-| Aspect          | Trial (this repo)               | Paid                       |
+| Aspect          | Lite (this repo)               | Paid                       |
 | --------------- | ------------------------------- | -------------------------- |
 | Storage engine  | Redis Stack (RediSearch)        | SQLite + sqlite-vec        |
 | Durability      | 24 h TTL, volatile              | Permanent, disk-persistent |
@@ -31,7 +31,7 @@ build on the MCP surface — with one deliberate tradeoff:
 | Target audience | Evaluation, short-lived tasks   | Ongoing projects           |
 
 Why two builds? Claude Marketplace currently has no payment mechanism,
-so the Trial version exists to differentiate a "try it free" drop-in
+so the Lite version exists to differentiate a "try it free" drop-in
 from the durable, paid version that stores data indefinitely on the
 user's disk.
 
@@ -79,7 +79,7 @@ Migrating to MCP inverts the coupling:
 | Transport          | CLI subprocess + FastAPI HTTP           | stdio JSON-RPC                                   |
 | Save trigger       | Hook executes automatically             | LLM calls `save_memory` (guided by instructions) |
 | Process model      | Two processes (CLI + resident server)   | Single process per client                        |
-| Distribution       | Git clone + Claude Code setup           | `pip install n3memorycore-mcp-trial`             |
+| Distribution       | Git clone + Claude Code setup           | `pip install n3memorycore-mcp-lite`             |
 
 Auto-save is preserved: the MCP server delivers behavioral `instructions`
 during the `initialize` handshake, telling the connected LLM when to
@@ -90,7 +90,7 @@ client.
 ## Project Details
 
 - **Architecture** — AI-generated Python package implementing the N3 MCP
-  protocol. Storage layer is swappable; the Trial uses Redis Stack, the
+  protocol. Storage layer is swappable; the Lite uses Redis Stack, the
   Paid build uses SQLite.
 - **Focus** — Hands-free memory continuity across every MCP-capable tool.
 - **License** — Apache License 2.0 — free to use, modify, and redistribute
@@ -113,13 +113,13 @@ Claude Desktop、Claude Code、その他 MCP 対応ツールなど、あらゆ�
 - **クライアント非依存** — ユーザーが接続するあらゆる MCP クライアント
   から同一のストアに到達可能。
 
-## 🎁 Trial 版と有償版
+## 🎁 Lite 版と有償版
 
-本リポジトリは **Trial 版** です。無償で、Claude Marketplace 配布を
+本リポジトリは **Lite 版** です。無償で、Claude Marketplace 配布を
 想定しており、MCP 的な外向き仕様は有償版と同一 — ただし以下の意図的な
 トレードオフがあります：
 
-| 観点               | Trial（本リポジトリ）               | 有償版                        |
+| 観点               | Lite（本リポジトリ）               | 有償版                        |
 | ------------------ | ----------------------------------- | ----------------------------- |
 | ストレージエンジン | Redis Stack（RediSearch）            | SQLite + sqlite-vec           |
 | 耐久性             | 24h TTL・揮発                        | 永続（ディスク保存）          |
@@ -128,7 +128,7 @@ Claude Desktop、Claude Code、その他 MCP 対応ツールなど、あらゆ�
 
 なぜ 2 版あるのか？現在の Claude Marketplace には課金機構が無いため、
 「お試し用の無料ドロップイン」と「ディスクに永続保存する有償版」を
-差別化する目的で Trial 版を設けています。
+差別化する目的で Lite 版を設けています。
 
 ## ⚠️ 重要：使用目的と AI 中心のワークフロー
 
@@ -174,7 +174,7 @@ MCP への移行は結合を逆転させます：
 | 通信               | CLI サブプロセス + FastAPI HTTP          | stdio JSON-RPC                                      |
 | 保存トリガー       | フックが自動実行                         | LLM が `save_memory` を呼ぶ（instructions で誘導）  |
 | プロセス構成       | 2 プロセス（CLI + 常駐サーバー）         | クライアントごとに 1 プロセス                       |
-| 配布               | Git clone + Claude Code セットアップ     | `pip install n3memorycore-mcp-trial`                |
+| 配布               | Git clone + Claude Code セットアップ     | `pip install n3memorycore-mcp-lite`                |
 
 自動保存は失われていません。MCP サーバーは `initialize` ハンドシェイク
 時に**振る舞いの指示**を配信し、接続中の LLM に「いつ検索し、いつ
@@ -184,7 +184,7 @@ MCP への移行は結合を逆転させます：
 ## プロジェクト詳細
 
 - **アーキテクチャ** — N3 MCP プロトコルを AI が生成した Python
-  パッケージ実装。ストレージ層は差し替え可能で、Trial は Redis Stack、
+  パッケージ実装。ストレージ層は差し替え可能で、Lite は Redis Stack、
   有償版は SQLite を使用。
 - **重点** — あらゆる MCP 対応ツールをまたいだ、ハンズフリーなメモリ
   継続性。

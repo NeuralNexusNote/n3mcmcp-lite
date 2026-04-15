@@ -1,14 +1,14 @@
 """
-Path resolution for the N3MemoryCore MCP **Trial** server.
+Path resolution for the N3MemoryCore MCP **Lite** server.
 
-Trial is ephemeral (Redis-backed, 24h TTL) and therefore owns no database
+Lite is ephemeral (Redis-backed, 24h TTL) and therefore owns no database
 file. Only the local ``config.json`` (owner_id / local_id / ranking
 parameters / Redis URL) lives on disk.
 
 Default location:
-  - Windows:  %LOCALAPPDATA%\\n3memorycore-trial
-  - macOS:    ~/Library/Application Support/n3memorycore-trial
-  - Linux:    ~/.local/share/n3memorycore-trial
+  - Windows:  %LOCALAPPDATA%\\n3memorycore-lite
+  - macOS:    ~/Library/Application Support/n3memorycore-lite
+  - Linux:    ~/.local/share/n3memorycore-lite
 
 Override via the environment variable ``N3MC_DATA_DIR``.
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-_APP_NAME = "n3memorycore-trial"
+_APP_NAME = "n3memorycore-lite"
 
 
 def data_dir() -> Path:

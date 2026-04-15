@@ -1,5 +1,5 @@
 """
-N3MemoryCore MCP **Trial** — test fixtures.
+N3MemoryCore MCP **Lite** — test fixtures.
 
 These tests require a running Redis Stack instance (RediSearch module).
 If Redis is not reachable at ``N3MC_REDIS_TEST_URL`` (or the default
@@ -37,7 +37,7 @@ if not _redis_available(_TEST_REDIS_URL):
     pytest.skip(
         f"Redis Stack not reachable at {_TEST_REDIS_URL}; "
         "start it with `docker run -p 6379:6379 redis/redis-stack-server:latest` "
-        "to run the Trial tests.",
+        "to run the Lite tests.",
         allow_module_level=True,
     )
 

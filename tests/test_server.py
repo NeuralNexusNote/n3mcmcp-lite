@@ -1,5 +1,5 @@
 """
-MCP Trial server / tool integration tests.
+MCP Lite server / tool integration tests.
 
 These tests exercise the tool dispatch path end-to-end against a Redis
 Stack test DB (see conftest.py). We do NOT spin up stdio transport —
