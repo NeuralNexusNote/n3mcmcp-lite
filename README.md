@@ -177,6 +177,15 @@ test DB isn't an option — run the test suite against a **dedicated**
 Redis container, never one that holds data you care about. Tests refuse
 to run if Redis isn't reachable.
 
+## Extending the Lite build
+
+`pip install n3memorycore-mcp-lite` installs the runtime only — the design spec is **not** shipped with the package. If you want to modify behavior (change the ranking formula, drop in a cross-encoder reranker, plug in a Japanese morphological tokenizer, etc.), download the spec from GitHub first:
+
+- [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — full design document (English)
+- [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 日本語版
+
+Appendix B of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. The spec gives an AI (or human) enough context to edit the code without breaking the TTL, dedup, or RediSearch contracts. Extending the package by reading only the installed source is possible but much harder — the spec is the source of truth for design intent.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](./LICENSE).
