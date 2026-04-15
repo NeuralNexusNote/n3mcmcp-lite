@@ -137,7 +137,7 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
   "redis_url": "redis://localhost:6379/0",
   "ttl_seconds": 604800,
   "dedup_threshold": 0.95,
-  "half_life_days": 90,
+  "half_life_days": 3,
   "bm25_min_threshold": 0.1,
   "search_result_limit": 20,
   "min_score": 0.2,
@@ -152,11 +152,13 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
 ```
 final_score = (0.7 × cosine_similarity + 0.3 × keyword_relevance) × time_decay
 
-time_decay = 2 ^ (-経過日数 / half_life_days)   (既定の半減期: 90日)
+time_decay = 2 ^ (-経過日数 / half_life_days)   (既定の半減期: 3 日)
 ```
 
-Lite 版はエントリが 7 日で消えるため、実際の `time_decay` は常に
-1.0 に近い値になります。
+既定の半減期 3 日は TTL（7 日）より短く設定されており、Lite 版でも
+`time_decay` は実際に効きます。新鮮なメモリは 1.0、3 日経過で 0.5、
+7 日経過（失効直前）で ≈ 0.20 となり、直近の文脈がランキング上位に
+押し出されます。
 
 ## 開発
 

@@ -38,7 +38,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | Durability             | **7 d TTL per entry**, ephemeral         | Permanent, disk-persistent             |
 | Disk footprint         | Only `config.json` (< 1 KB)               | `n3memory.db` grows with history       |
 | External dependency    | User-run Redis Stack container            | None (self-contained)                  |
-| `time_decay` relevance | Near-always ≈ 1.0 (TTL < half-life)       | Meaningful (90-day half-life)          |
+| `time_decay` relevance | Meaningful (3-day half-life; fresh=1.0, 7d≈0.20) | Meaningful (90-day half-life) |
 | Re-indexing / repair   | `FT.CREATE` is idempotent; no migrations  | Schema + model migration markers       |
 | Intended use           | Short-term projects, evaluation, marketplace | Ongoing projects                    |
 
@@ -236,7 +236,7 @@ RediSearch returns `cosine_distance ∈ [0, 2]` for normalized vectors. Clamping
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
-Default `half_life_days = 90`. Because TTL < half-life by construction, this term is almost always ≈ 1.0 in the Lite build. It is kept for formula parity with the paid build.
+Default `half_life_days = 3` — deliberately shorter than the 7-day TTL so that `time_decay` is actually informative in the Lite build: a fresh entry scores 1.0, a 3-day-old one exactly 0.5, and a 7-day-old (near-expiry) one ≈ 0.20. This pushes recent context ahead in ranking. This is a Lite-specific tuning; the paid build keeps a 90-day half-life to match its permanent horizon.
 
 ### 3.7 Text Tokenization & Punctuation Handling
 
@@ -358,7 +358,7 @@ Complete schema (missing fields auto-filled with defaults below):
   "redis_url":              "redis://localhost:6379/0",
   "ttl_seconds":            604800,
   "dedup_threshold":        0.95,
-  "half_life_days":         90,
+  "half_life_days":         3,
   "bm25_min_threshold":     0.1,
   "search_result_limit":    20,
   "context_char_limit":     3000,

@@ -126,7 +126,7 @@ def hybrid_search(
     Perform hybrid vector + BM25 search against Redis and return ranked results.
     Returns list of dicts: {id, content, score, timestamp}
     """
-    half_life_days = config.get("half_life_days", 90)
+    half_life_days = config.get("half_life_days", 3)
     bm25_min_threshold = config.get("bm25_min_threshold", 0.1)
     search_result_limit = config.get("search_result_limit", 20)
     min_score = config.get("min_score", 0.2)

@@ -38,7 +38,7 @@
 | 耐久性                 | **エントリごと 7d TTL**・揮発                 | 永続・ディスク保存                       |
 | ディスク使用量         | `config.json` のみ（< 1 KB）                   | `n3memory.db` が履歴と共に増加             |
 | 外部依存               | ユーザー実行の Redis Stack コンテナ           | なし（セルフコンテイン）                 |
-| `time_decay` の実効値  | 常に ≈ 1.0（TTL < 半減期）                    | 有意に効く（既定半減期 90 日）           |
+| `time_decay` の実効値  | 有意に効く（既定半減期 3 日：新鮮=1.0、7 日経過 ≈ 0.20） | 有意に効く（既定半減期 90 日）         |
 | 再インデックス / 修復  | `FT.CREATE` が冪等・マイグレーションなし       | スキーマ＋モデル移行マーカーあり         |
 | 想定用途               | 評価・使い捨てタスク・マーケットプレース       | 継続プロジェクト                         |
 
@@ -236,7 +236,7 @@ RediSearch は正規化ベクトルに対し `cosine_distance ∈ [0, 2]` を返
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
-既定 `half_life_days = 90`。TTL が半減期より常に短いため、Lite ではほぼ常に ≈ 1.0 になる。有償版との式の互換性のため残す。
+既定 `half_life_days = 3` — 7 日の TTL より意図的に短く設定しており、Lite でも `time_decay` が実際に効く。新鮮なエントリは 1.0、3 日経過で 0.5、7 日経過（失効直前）で ≈ 0.20 となり、直近の文脈がランキング上位に押し出される。これは Lite 固有のチューニングで、永続化を前提とする有償版は 90 日の半減期を維持する。
 
 ### 3.7 トークナイズと句読点処理
 
@@ -358,7 +358,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
   "redis_url":              "redis://localhost:6379/0",
   "ttl_seconds":            604800,
   "dedup_threshold":        0.95,
-  "half_life_days":         90,
+  "half_life_days":         3,
   "bm25_min_threshold":     0.1,
   "search_result_limit":    20,
   "context_char_limit":     3000,

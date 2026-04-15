@@ -138,7 +138,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "redis_url": "redis://localhost:6379/0",
   "ttl_seconds": 604800,
   "dedup_threshold": 0.95,
-  "half_life_days": 90,
+  "half_life_days": 3,
   "bm25_min_threshold": 0.1,
   "search_result_limit": 20,
   "min_score": 0.2,
@@ -154,11 +154,13 @@ variable (takes precedence over the config file).
 ```
 final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay
 
-time_decay = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 90 days)
+time_decay = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 3 days)
 ```
 
-Because entries expire after 7 days, `time_decay` in the Lite build is
-always very close to 1.0.
+With a default 3-day half-life (shorter than the 7-day TTL), `time_decay`
+is meaningful in the Lite build: a fresh memory scores 1.0, a 3-day-old
+one exactly 0.5, and a 7-day-old (near-expiry) entry ≈ 0.20 — pushing
+recent context ahead in the ranking.
 
 ## Development
 

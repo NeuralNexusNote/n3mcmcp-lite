@@ -30,7 +30,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "redis_url": DEFAULT_REDIS_URL,
     "ttl_seconds": DEFAULT_TTL_SECONDS,
     "dedup_threshold": 0.95,
-    "half_life_days": 90,
+    "half_life_days": 3,
     "bm25_min_threshold": 0.1,
     "search_result_limit": 20,
     "context_char_limit": 3000,
