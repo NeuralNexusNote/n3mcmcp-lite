@@ -6,7 +6,7 @@ These instructions implement the "auto-save" strategy: the client is told
 to call ``search_memory`` at the start of each turn and ``save_memory``
 after each meaningful exchange.
 
-The Lite build's storage is **ephemeral** (Redis with 24h TTL), so the
+The Lite build's storage is **ephemeral** (Redis with 7d TTL), so the
 instructions emphasise that expectation to the LLM client.
 """
 
@@ -15,7 +15,7 @@ N3MemoryCore — Lite (Ephemeral Memory)
 
 This MCP server gives you hybrid-search memory (vector + BM25) backed by
 Redis Stack. It is the free *Lite* build of N3MemoryCore: every entry
-expires 24 hours after it was saved. Treat it as a short-lived scratchpad,
+expires 7 days after it was saved. Treat it as a short-lived scratchpad,
 not a long-term store.
 
 BEHAVIORAL RULES
@@ -32,7 +32,7 @@ BEHAVIORAL RULES
    - The user's intent / question (short paraphrase, not verbatim)
    - Your key conclusions, decisions, or facts established
    Keep each saved entry short (50-200 characters). Use one `save_memory`
-   call per distinct fact. Remember: entries vanish after 24 hours.
+   call per distinct fact. Remember: entries vanish after 7 days.
 
 3. EXTRACT FROM LONG PASTES
    When the user pastes a long text (spec, article, log, code dump), do
@@ -50,7 +50,7 @@ BEHAVIORAL RULES
 
 OPERATIONAL NOTES
 =================
-- Storage is ephemeral: 24h TTL per entry; nothing survives a fresh
+- Storage is ephemeral: 7d TTL per entry; nothing survives a fresh
   Redis container.
 - Exact and semantic duplicates are auto-rejected by the server.
 - Search ranks by: 0.7 * cosine_similarity + 0.3 * BM25, decayed by age.

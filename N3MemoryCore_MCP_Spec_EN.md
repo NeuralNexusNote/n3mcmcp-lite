@@ -1,9 +1,9 @@
 # N3MemoryCore MCP v1.0.0-lite [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
-> **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **24-hour TTL**, and nothing persists beyond that window. Think of it as a public test drive — the paid build uses SQLite and stores memories permanently.
+> **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as a public test drive — the paid build uses SQLite and stores memories permanently.
 >
-> **Who is this for?** Users of any MCP-compatible LLM client (Claude Desktop, Claude Code, and others) who want searchable, short-lived memory shared across sessions within a 24-hour window.
+> **Who is this for?** Users of any MCP-compatible LLM client (Claude Desktop, Claude Code, and others) who want searchable, short-lived memory shared across sessions within a 7-day window.
 >
 > **Transport**: Model Context Protocol over stdio (JSON-RPC). Tested on Windows 11 with Python 3.12 and Redis Stack 7.x.
 
@@ -22,7 +22,7 @@ By using this software, you agree to the terms above.
 
 > **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-lite` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3memorycore-lite` entry from your MCP client's config file.
 >
-> **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 24h rolling window; if you need durable memory, use the paid build.
+> **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, use the paid build.
 
 > **For implementation questions**: While the author cannot be contacted for support, you can load this specification into Claude and ask questions directly — Claude can assist with implementation and customization.
 
@@ -35,7 +35,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | Property               | Lite (this spec)                         | Paid (separate spec)                   |
 | ---------------------- | ----------------------------------------- | -------------------------------------- |
 | Storage engine         | Redis Stack (RediSearch module)           | SQLite + sqlite-vec (local file)       |
-| Durability             | **24 h TTL per entry**, ephemeral         | Permanent, disk-persistent             |
+| Durability             | **7 d TTL per entry**, ephemeral         | Permanent, disk-persistent             |
 | Disk footprint         | Only `config.json` (< 1 KB)               | `n3memory.db` grows with history       |
 | External dependency    | User-run Redis Stack container            | None (self-contained)                  |
 | `time_decay` relevance | Near-always ≈ 1.0 (TTL < half-life)       | Meaningful (90-day half-life)          |
@@ -43,12 +43,12 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | Intended use           | Evaluation, throwaway tasks, marketplace  | Ongoing projects                       |
 
 **Volatility contract:**
-- Every write to Redis sets a TTL equal to `ttl_seconds` (default 86 400 = 24 h).
+- Every write to Redis sets a TTL equal to `ttl_seconds` (default 604 800 = 7 d).
 - Both the primary record (`mem:<uuid>`) and its exact-duplicate guard key (`mem:sha:<sha1>`) share the same TTL and expire together.
 - Expiration is delegated to Redis; no background cleanup job runs.
 - Restarting the Redis container with its volume removed wipes all memory immediately.
 
-**No cross-session guarantee beyond 24 h.** Unlike the paid build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, use the paid variant.
+**No cross-session guarantee beyond 7 d.** Unlike the paid build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, use the paid variant.
 
 ---
 
@@ -84,7 +84,7 @@ Not applicable. See the [Lite: Volatile Memory](#lite-volatile-memory) section �
 
 ## 1. Vision
 
-Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector + RediSearch BM25), mathematically sound ranking, 24-hour automatic garbage collection. The MCP server delivers behavioral instructions so the connected LLM auto-searches at the start of each turn and auto-saves after each meaningful exchange — without requiring client-side hooks.
+Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector + RediSearch BM25), mathematically sound ranking, 7-day automatic garbage collection. The MCP server delivers behavioral instructions so the connected LLM auto-searches at the start of each turn and auto-saves after each meaningful exchange — without requiring client-side hooks.
 
 The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; upgrading to the paid build swaps the storage layer from Redis to SQLite while preserving the MCP surface.
 
@@ -162,7 +162,7 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 
 **Connection**: constructed from `redis_url` (config field) or the `N3MC_REDIS_URL` environment variable (env wins). Default: `redis://localhost:6379/0`. `decode_responses=False` — the client must handle binary embedding payloads.
 
-**TTL**: every `HSET` of `mem:<uuid>` is followed (atomically via `PIPELINE`) by `EXPIRE mem:<uuid> <ttl_seconds>`. The sibling `mem:sha:<sha1>` guard is written with `SET ... EX <ttl_seconds>` in the same pipeline. Default TTL is 86 400 s (24 h).
+**TTL**: every `HSET` of `mem:<uuid>` is followed (atomically via `PIPELINE`) by `EXPIRE mem:<uuid> <ttl_seconds>`. The sibling `mem:sha:<sha1>` guard is written with `SET ... EX <ttl_seconds>` in the same pipeline. Default TTL is 604 800 s (7 d).
 
 **Pipeline atomicity**: the three commands (`HSET`, `EXPIRE`, `SET`) ship as one pipeline, so partial-failure interleavings that could produce a record without a TTL or a sha-guard without a record are not possible.
 
@@ -191,7 +191,7 @@ mem:<uuid>                  HASH
     agent_id        string      TAG
     session_id      string      TAG
     embedding       bytes       FLOAT32 * 768 little-endian
-    TTL                         ttl_seconds (default 86 400)
+    TTL                         ttl_seconds (default 604 800)
 
 mem:sha:<sha1>              STRING
     value = the associated mem id
@@ -291,7 +291,7 @@ The `repair_memory` tool in the Lite build is a **thin idempotent operation**: i
 
 Return shape: `{"status": "ok", "message": "index ensured"}`, or `{"status": "error", "message": "<detail>"}` on failure.
 
-This is a deliberate simplification versus the paid build (which runs FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 24 h old.
+This is a deliberate simplification versus the paid build (which runs FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 7 d old.
 
 ---
 
@@ -307,7 +307,7 @@ The server advertises:
 - `protocolVersion: "2024-11-05"`
 - `serverInfo: { name: "n3memorycore-lite", version: "1.0.0-lite" }`
 - `capabilities.tools` with `listChanged: false`
-- `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 24 hours.**
+- `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
 
 ### 4.3 Tools
 
@@ -336,7 +336,7 @@ Because MCP has no equivalent of Claude Code's `UserPromptSubmit` / `Stop` hooks
 The instructions require the LLM to:
 
 1. **Search first** — call `search_memory` at the start of every user turn with a concise query reflecting the user's intent.
-2. **Save after each exchange** — call `save_memory` after a meaningful response, with paraphrased intent and key conclusions (50–200 chars each). **Note**: the Lite text explicitly reminds the LLM that entries vanish after 24 h.
+2. **Save after each exchange** — call `save_memory` after a meaningful response, with paraphrased intent and key conclusions (50–200 chars each). **Note**: the Lite text explicitly reminds the LLM that entries vanish after 7 d.
 3. **Extract from long pastes** — split user-pasted text into discrete facts, one `save_memory` per fact.
 4. **Skip noise** — do not save greetings, clarifying questions, or mechanical acknowledgements.
 5. **Respect explicit requests** — honor "don't save this" and "forget that" (use `delete_memory`).
@@ -356,7 +356,7 @@ Complete schema (missing fields auto-filled with defaults below):
   "owner_id":               "<UUIDv4 auto-generated>",
   "local_id":               "<UUIDv4 auto-generated>",
   "redis_url":              "redis://localhost:6379/0",
-  "ttl_seconds":            86400,
+  "ttl_seconds":            604800,
   "dedup_threshold":        0.95,
   "half_life_days":         90,
   "bm25_min_threshold":     0.1,
@@ -368,7 +368,7 @@ Complete schema (missing fields auto-filled with defaults below):
 ```
 
 - `redis_url` — connection URL. `N3MC_REDIS_URL` env var overrides this field.
-- `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 24 h). Lowering it is fine; raising it beyond a few days defeats the purpose of the Lite and will be flagged during review.
+- `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 7 d). Lowering it is fine; raising it beyond a few days defeats the purpose of the Lite and will be flagged during review.
 - `search_result_limit` — max results returned by `search_memory`.
 - `context_char_limit` — reserved for client-side truncation by downstream tools; not used internally.
 - `min_score` — excludes results with score below this value (default `0.2`). Set to `0.0` to disable.
@@ -460,7 +460,7 @@ After an AI regenerates the implementation from this spec, review it in this ord
 1. **Data flow trace** — ask the AI to read the code and trace the end-to-end path from a `save_memory` tool call to the Redis pipeline's `EXECUTE`, and from a `search_memory` call back to the tool response. Confirm no silent data loss, and confirm TTL is set on every write.
 2. **Spec ↔ code comparison** — walk each tool (§4.3) one-by-one, comparing the input schema and behavior in this document to the implementation.
 3. **TTL test** — save an entry with a short `ttl_seconds` (e.g. 5) via a direct config override, wait, and confirm both `mem:<uuid>` and `mem:sha:<sha1>` are gone (proves §3.3 and §3.4 compliance).
-4. **Cross-session test (within 24 h)** — save in session 1, restart the MCP server (not Redis), search in session 2. Confirm the saved entry is retrievable.
+4. **Cross-session test (within 7 d)** — save in session 1, restart the MCP server (not Redis), search in session 2. Confirm the saved entry is retrievable.
 5. **Dedup test** — save the same content twice; confirm the second call returns `status: "duplicate"`. Save near-paraphrases; confirm near-duplicate rejection.
 6. **Redis-down test** — stop Redis, call any tool, confirm the server returns the "start Redis Stack" hint without crashing. Restart Redis, confirm tools work again without restarting the MCP process.
 

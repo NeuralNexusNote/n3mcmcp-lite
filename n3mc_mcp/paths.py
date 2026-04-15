@@ -1,7 +1,7 @@
 """
 Path resolution for the N3MemoryCore MCP **Lite** server.
 
-Lite is ephemeral (Redis-backed, 24h TTL) and therefore owns no database
+Lite is ephemeral (Redis-backed, 7d TTL) and therefore owns no database
 file. Only the local ``config.json`` (owner_id / local_id / ranking
 parameters / Redis URL) lives on disk.
 

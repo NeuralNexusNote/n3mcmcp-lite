@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "n3memorycore-mcp-lite"
 version = "1.0.0-lite"
-description = "N3MemoryCore MCP Lite — ephemeral (Redis-backed, 24h TTL) hybrid (vector + BM25) memory for Claude and other MCP clients"
+description = "N3MemoryCore MCP Lite — ephemeral (Redis-backed, 7d TTL) hybrid (vector + BM25) memory for Claude and other MCP clients"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

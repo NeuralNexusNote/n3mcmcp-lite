@@ -2,7 +2,7 @@
 Redis-backed storage layer for the N3MemoryCore MCP **Lite** server.
 
 The Lite variant is deliberately ephemeral:
-  - Every entry is written with a 24h (configurable) TTL.
+  - Every entry is written with a 7d (configurable) TTL.
   - No SQLite file, no migrations, no integrity checks.
   - Redis Stack (RediSearch + RedisJSON) is required — the user runs
     ``docker run -p 6379:6379 redis/redis-stack-server:latest``.
@@ -162,7 +162,7 @@ def insert_memory(
     local_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     session_id: Optional[str] = None,
-    ttl_seconds: int = 86400,
+    ttl_seconds: int = 604800,
 ) -> None:
     """Insert a memory record with TTL. Embedding is required for vector search."""
     try:

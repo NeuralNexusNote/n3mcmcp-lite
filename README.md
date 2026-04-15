@@ -2,7 +2,7 @@
 
 > A NeuralNexusNote™ product — **free Lite** build: ephemeral hybrid
 > (vector + BM25) memory exposed as a Model Context Protocol server, backed
-> by Redis Stack with a 24-hour TTL per entry.
+> by Redis Stack with a 7-day TTL per entry.
 
 > 🇯🇵 **[日本語版はこちら](./README_JP.md)**
 > 🛡️ **[Development Philosophy](./PHILOSOPHY.md)**
@@ -13,11 +13,11 @@
 
 | Build                   | Storage                           | Durability        | Where                |
 | ----------------------- | --------------------------------- | ----------------- | -------------------- |
-| **Lite (this repo)**   | Redis Stack (RediSearch)          | 24h TTL, volatile | Claude Marketplace   |
+| **Lite (this repo)**   | Redis Stack (RediSearch)          | 7d TTL, volatile | Claude Marketplace   |
 | Paid                    | SQLite + sqlite-vec (local file)  | Permanent         | Separate distribution |
 
 Same MCP surface (five tools, same ranking formula) — the Lite simply
-throws entries away after 24 hours and stores nothing on disk beyond a
+throws entries away after 7 days and stores nothing on disk beyond a
 small `config.json`. Think of it as a test drive.
 
 ## What is this?
@@ -37,7 +37,7 @@ storage.
 | Tool             | Purpose                                                       |
 | ---------------- | ------------------------------------------------------------- |
 | `search_memory`  | Hybrid (vector + BM25) search, ranked & time-decayed          |
-| `save_memory`    | Persist a short entry (24h TTL, dedup: exact + near-duplicate) |
+| `save_memory`    | Persist a short entry (7d TTL, dedup: exact + near-duplicate) |
 | `list_memories`  | Most-recent entries, newest first                             |
 | `delete_memory`  | Remove a specific entry by id                                 |
 | `repair_memory`  | Re-create the RediSearch index if missing                     |
@@ -136,7 +136,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "owner_id": "<uuid>",
   "local_id": "<uuid>",
   "redis_url": "redis://localhost:6379/0",
-  "ttl_seconds": 86400,
+  "ttl_seconds": 604800,
   "dedup_threshold": 0.95,
   "half_life_days": 90,
   "bm25_min_threshold": 0.1,
@@ -157,7 +157,7 @@ final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay
 time_decay = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 90 days)
 ```
 
-Because entries expire after 24 hours, `time_decay` in the Lite build is
+Because entries expire after 7 days, `time_decay` in the Lite build is
 always very close to 1.0.
 
 ## Development

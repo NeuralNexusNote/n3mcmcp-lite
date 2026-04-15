@@ -4,7 +4,7 @@ N3MemoryCore MCP **Lite** server — stdio transport.
 Exposes five tools (same shape as the paid variant):
   search_memory, save_memory, list_memories, delete_memory, repair_memory
 
-Storage is Redis Stack (RediSearch) with a 24h TTL per entry. No persistence.
+Storage is Redis Stack (RediSearch) with a 7d TTL per entry. No persistence.
 
 Usage:
     python -m n3mc_mcp          # stdio server
@@ -101,7 +101,7 @@ async def list_tools() -> list[types.Tool]:
                 "Hybrid (vector + BM25) search over stored memories. "
                 "Call this at the start of every user turn with a concise "
                 "query representing the user's intent. "
-                "NOTE: Lite memories expire 24h after they were saved."
+                "NOTE: Lite memories expire 7d after they were saved."
             ),
             inputSchema={
                 "type": "object",
@@ -125,7 +125,7 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Persist a short memory entry (50-200 chars ideal). "
                 "Call once per distinct fact. Exact and near-duplicates are auto-rejected. "
-                "Lite entries expire after 24 hours."
+                "Lite entries expire after 7 days."
             ),
             inputSchema={
                 "type": "object",
@@ -248,7 +248,7 @@ def _tool_save(args: dict) -> list[types.TextContent]:
         return [types.TextContent(type="text", text="save_memory: empty content")]
 
     agent_id = args.get("agent_id")
-    ttl_seconds = int(_CONFIG.get("ttl_seconds", 86400))
+    ttl_seconds = int(_CONFIG.get("ttl_seconds", 604800))
     text = purify(content)
 
     # Exact dedup (sha1 key)
@@ -308,7 +308,7 @@ def _tool_list(args: dict) -> list[types.TextContent]:
     if not rows:
         return [types.TextContent(type="text", text="(no memories stored)")]
 
-    lines = [f"# Recent memories ({len(rows)} of {total}) — Lite: 24h TTL", ""]
+    lines = [f"# Recent memories ({len(rows)} of {total}) — Lite: 7d TTL", ""]
     for r in rows:
         ts = (r.get("timestamp") or "")[:19]
         agent = r.get("agent_id") or "-"

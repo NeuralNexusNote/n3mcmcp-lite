@@ -22,7 +22,7 @@ from typing import Any
 from .paths import config_path
 
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
-DEFAULT_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "owner_id": None,

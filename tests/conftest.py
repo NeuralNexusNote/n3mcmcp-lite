@@ -67,7 +67,7 @@ def base_config():
         "owner_id": f"test-owner-{uuid.uuid4()}",
         "local_id": f"test-local-{uuid.uuid4()}",
         "redis_url": _TEST_REDIS_URL,
-        "ttl_seconds": 86400,
+        "ttl_seconds": 604800,
         "dedup_threshold": 0.95,
         "half_life_days": 90,
         "bm25_min_threshold": 0.1,

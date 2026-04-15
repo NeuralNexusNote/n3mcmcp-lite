@@ -2,7 +2,7 @@
 
 > NeuralNexusNote™ プロダクト — **無償 Lite** 版：Redis Stack を使った
 > 揮発性ハイブリッド（ベクトル + BM25）メモリを Model Context Protocol
-> サーバーとして提供します。各エントリは 24 時間で自動失効します。
+> サーバーとして提供します。各エントリは 7 日で自動失効します。
 
 > 🇺🇸 **[English README](./README.md)**
 > 🛡️ **[開発ポリシー](./PHILOSOPHY.md)**
@@ -13,11 +13,11 @@
 
 | 版                      | ストレージ                          | 耐久性           | 配布先              |
 | ----------------------- | ----------------------------------- | ---------------- | ------------------- |
-| **Lite（本リポジトリ）** | Redis Stack（RediSearch）            | 24h TTL・揮発   | Claude Marketplace  |
+| **Lite（本リポジトリ）** | Redis Stack（RediSearch）            | 7d TTL・揮発   | Claude Marketplace  |
 | 有償版                  | SQLite + sqlite-vec（ローカルファイル） | 永続            | 別途配布             |
 
 MCP としての外向き仕様（5 つのツール、ランキング式）は同じです。
-Lite 版は 24 時間で中身を捨てる＆ディスクにはごく小さな `config.json`
+Lite 版は 7 日で中身を捨てる＆ディスクにはごく小さな `config.json`
 以外を残さない、試乗版の位置付けです。
 
 ## 概要
@@ -36,7 +36,7 @@ Lite 版は 24 時間で中身を捨てる＆ディスクにはごく小さな `
 | ツール           | 用途                                                           |
 | ---------------- | -------------------------------------------------------------- |
 | `search_memory`  | ハイブリッド検索（ベクトル + BM25、時間減衰ランキング）        |
-| `save_memory`    | 短いエントリを保存（24h TTL、完全一致・近似重複は自動拒否）    |
+| `save_memory`    | 短いエントリを保存（7d TTL、完全一致・近似重複は自動拒否）    |
 | `list_memories`  | 直近のエントリを新しい順に一覧                                 |
 | `delete_memory`  | 特定のエントリを id で削除                                     |
 | `repair_memory`  | 欠損時に RediSearch インデックスを作り直す                     |
@@ -135,7 +135,7 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
   "owner_id": "<uuid>",
   "local_id": "<uuid>",
   "redis_url": "redis://localhost:6379/0",
-  "ttl_seconds": 86400,
+  "ttl_seconds": 604800,
   "dedup_threshold": 0.95,
   "half_life_days": 90,
   "bm25_min_threshold": 0.1,
@@ -155,7 +155,7 @@ final_score = (0.7 × cosine_similarity + 0.3 × keyword_relevance) × time_deca
 time_decay = 2 ^ (-経過日数 / half_life_days)   (既定の半減期: 90日)
 ```
 
-Lite 版はエントリが 24 時間で消えるため、実際の `time_decay` は常に
+Lite 版はエントリが 7 日で消えるため、実際の `time_decay` は常に
 1.0 に近い値になります。
 
 ## 開発
