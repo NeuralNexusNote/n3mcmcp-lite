@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.0.0-lite [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.1.0-lite [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as a public test drive — the paid build uses SQLite and stores memories permanently.
@@ -140,9 +140,9 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 | ------------ | --------------- | ---------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------- |
 | `id` (PK)    | Redis hash      | Per record (UUIDv7, time-ordered)  | **One record**       | Unique identifier for each memory — used for deletion and dedup                                    |
 | `owner_id`   | `config.json`   | First startup (UUIDv4)             | **Owner**            | Identifies whose data this is — used as a TAG filter in RediSearch                                 |
-| `local_id`   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Lite ranking.            |
+| `local_id` (agent_id)   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Lite ranking.            |
 | `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which server process wrote the record (stored for compatibility; not used in Lite ranking). |
-| `agent_id`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`).                                   |
+| `agent_name`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`).                                   |
 
 ### 3.2 Embeddings
 
@@ -188,7 +188,7 @@ mem:<uuid>                  HASH
     timestamp_epoch number      unix seconds (SORTABLE)
     owner_id        string      TAG
     local_id        string      TAG
-    agent_id        string      TAG
+    agent_name        string      TAG
     session_id      string      TAG
     embedding       bytes       FLOAT32 * 768 little-endian
     TTL                         ttl_seconds (default 604 800)
@@ -203,7 +203,7 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
         timestamp_epoch NUMERIC SORTABLE
         owner_id        TAG
         local_id        TAG
-        agent_id        TAG
+        agent_name        TAG
         session_id      TAG
         embedding       VECTOR FLAT 6 TYPE FLOAT32 DIM 768 DISTANCE_METRIC COSINE
 ```
@@ -305,7 +305,7 @@ stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `std
 
 The server advertises:
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-lite", version: "1.0.0-lite" }`
+- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0-lite" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
 
@@ -316,7 +316,7 @@ Five tools are exposed via `tools/list` (same names as the paid build):
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
 | `search_memory` | `query: string, limit?: int`              | Hybrid (vector + BM25) search, time-decayed ranking. Returns markdown. |
-| `save_memory`   | `content: string, agent_id?: string`      | Exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. |
+| `save_memory`   | `content: string, agent_name?: string`      | Exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. |
 | `list_memories` | `limit?: int (default 20)`                | Most-recent entries, newest first. Returns markdown.                   |
 | `delete_memory` | `id: string`                              | `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically.                    |
 | `repair_memory` | —                                         | `ensure_index()`; see [§3.10](#310-repair).                            |

@@ -16,7 +16,7 @@ Data layout
       timestamp_epoch number      unix seconds (sortable)
       owner_id        string      user/tenant uuid
       local_id        string      install uuid
-      agent_id        string      "claude" / "user" / ""
+      agent_name        string      "claude" / "user" / ""
       session_id      string      per-process uuid
       embedding       bytes       float32 * 768 (little-endian)
 
@@ -84,7 +84,7 @@ def ensure_index(client: Redis) -> None:
         NumericField("timestamp_epoch", sortable=True),
         TagField("owner_id"),
         TagField("local_id"),
-        TagField("agent_id"),
+        TagField("agent_name"),
         TagField("session_id"),
         VectorField(
             "embedding",
@@ -160,7 +160,7 @@ def insert_memory(
     owner_id: str,
     embedding: Optional[list[float]],
     local_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
     session_id: Optional[str] = None,
     ttl_seconds: int = 604800,
 ) -> None:
@@ -180,7 +180,7 @@ def insert_memory(
         "timestamp_epoch": ts_epoch,
         "owner_id": owner_id or "",
         "local_id": local_id or "",
-        "agent_id": agent_id or "",
+        "agent_name": agent_name or "",
         "session_id": session_id or "",
     }
     if embedding is not None:
@@ -244,7 +244,7 @@ def get_all_memories(
     q = (
         Query(q_str)
         .sort_by("timestamp_epoch", asc=False)
-        .return_fields("id", "content", "timestamp", "agent_id")
+        .return_fields("id", "content", "timestamp", "agent_name")
         .paging(0, limit)
         .dialect(2)
     )
@@ -255,7 +255,7 @@ def get_all_memories(
             "id": _strip_key_prefix(_as_str(getattr(doc, "id", ""))),
             "content": _as_str(getattr(doc, "content", "")),
             "timestamp": _as_str(getattr(doc, "timestamp", "")),
-            "agent_id": _as_str(getattr(doc, "agent_id", "")),
+            "agent_name": _as_str(getattr(doc, "agent_name", "")),
         })
     return rows
 

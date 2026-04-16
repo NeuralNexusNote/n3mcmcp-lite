@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.0.0-lite [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.1.0-lite [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。お試し用の公開テスト版 — ディスクに永続保存する有償版との差別化を明確化しています。
@@ -140,9 +140,9 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 | ------------ | ---------------- | --------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------- |
 | `id` (PK)    | Redis ハッシュ    | レコード毎（UUIDv7、時刻順）             | **1 レコード**          | 各メモリの一意識別子 — 削除・重複判定に使用                                                    |
 | `owner_id`   | `config.json`    | 初回起動時（UUIDv4）                     | **オーナー**            | 誰のデータか — RediSearch の TAG フィルタで使用                                                |
-| `local_id`   | `config.json`    | 初回起動時（UUIDv4）                     | **エージェント / 導入** | インストールの UUIDv4 識別子。互換性のため保存（Lite のランキングでは未使用）。                |
+| `local_id` (agent_id)   | `config.json`    | 初回起動時（UUIDv4）                     | **エージェント / 導入** | インストールの UUIDv4 識別子。互換性のため保存（Lite のランキングでは未使用）。                |
 | `session_id` | メモリ内          | サーバープロセス起動時（UUIDv4）         | **サーバープロセス**    | どのサーバープロセスが書いたか（互換性のため保存、Lite のランキングでは未使用）。              |
-| `agent_id`   | Redis ハッシュ    | `save_memory` 呼び出し毎（自由文字列）   | **エージェント表示名**  | 人間向けラベル（例：`"claude-desktop"`、`"claude-code"`）。                                    |
+| `agent_name`   | Redis ハッシュ    | `save_memory` 呼び出し毎（自由文字列）   | **エージェント表示名**  | 人間向けラベル（例：`"claude-desktop"`、`"claude-code"`）。                                    |
 
 ### 3.2 埋め込み
 
@@ -188,7 +188,7 @@ mem:<uuid>                  HASH
     timestamp_epoch number      unix 秒（SORTABLE）
     owner_id        string      TAG
     local_id        string      TAG
-    agent_id        string      TAG
+    agent_name        string      TAG
     session_id      string      TAG
     embedding       bytes       FLOAT32 × 768（リトルエンディアン）
     TTL                         ttl_seconds（既定 604 800）
@@ -203,7 +203,7 @@ n3mc_idx                    RediSearch インデックス、ON HASH PREFIX 1 mem
         timestamp_epoch NUMERIC SORTABLE
         owner_id        TAG
         local_id        TAG
-        agent_id        TAG
+        agent_name        TAG
         session_id      TAG
         embedding       VECTOR FLAT 6 TYPE FLOAT32 DIM 768 DISTANCE_METRIC COSINE
 ```
@@ -305,7 +305,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 サーバーが広告する内容：
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-lite", version: "1.0.0-lite" }`
+- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0-lite" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 7 日で失効する」旨を明示する。**
 
@@ -316,7 +316,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
 | `search_memory` | `query: string, limit?: int`              | ハイブリッド（ベクトル + BM25）検索、時間減衰ランキング。markdown を返す。 |
-| `save_memory`   | `content: string, agent_id?: string`      | 完全 + 近似の重複判定後、HSET + EXPIRE。`ttl_seconds` を含む JSON を返す。 |
+| `save_memory`   | `content: string, agent_name?: string`      | 完全 + 近似の重複判定後、HSET + EXPIRE。`ttl_seconds` を含む JSON を返す。 |
 | `list_memories` | `limit?: int (既定 20)`                   | 直近エントリを新しい順。markdown を返す。                                 |
 | `delete_memory` | `id: string`                              | `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` をアトミックに実行。               |
 | `repair_memory` | —                                         | `ensure_index()` を実行。[§3.10](#310-修復) 参照。                         |

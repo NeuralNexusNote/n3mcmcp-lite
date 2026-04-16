@@ -84,7 +84,7 @@ def _startup() -> None:
 # ---------------------------------------------------------------------------
 app: Server = Server(
     name="n3memorycore-lite",
-    version="1.0.0-lite",
+    version="1.1.0-lite",
     instructions=SERVER_INSTRUCTIONS,
 )
 
@@ -134,7 +134,7 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "The memory content to save.",
                     },
-                    "agent_id": {
+                    "agent_name": {
                         "type": "string",
                         "description": "Optional agent identifier (e.g. 'claude', 'user').",
                     },
@@ -247,7 +247,7 @@ def _tool_save(args: dict) -> list[types.TextContent]:
     if not content:
         return [types.TextContent(type="text", text="save_memory: empty content")]
 
-    agent_id = args.get("agent_id")
+    agent_name = args.get("agent_name")
     ttl_seconds = int(_CONFIG.get("ttl_seconds", 604800))
     text = purify(content)
 
@@ -288,7 +288,7 @@ def _tool_save(args: dict) -> list[types.TextContent]:
         _CONFIG["owner_id"],
         qvec,
         _CONFIG.get("local_id"),
-        agent_id,
+        agent_name,
         _SESSION_ID,
         ttl_seconds=ttl_seconds,
     )
@@ -311,7 +311,7 @@ def _tool_list(args: dict) -> list[types.TextContent]:
     lines = [f"# Recent memories ({len(rows)} of {total}) — Lite: 7d TTL", ""]
     for r in rows:
         ts = (r.get("timestamp") or "")[:19]
-        agent = r.get("agent_id") or "-"
+        agent = r.get("agent_name") or "-"
         content = (r.get("content") or "")[:120]
         lines.append(f"- `{r.get('id','')}` {ts} [{agent}] {content}")
     return [types.TextContent(type="text", text="\n".join(lines))]
