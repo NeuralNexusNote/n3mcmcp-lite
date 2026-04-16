@@ -1,5 +1,9 @@
 # N3MemoryCore MCP — Lite（揮発型）
 
+> **N3MC-MCP-Lite は、Claude Code / Cursor / Windsurf などの
+> MCP 対応エディタが利用する "外部メモリサーバー" です。**
+> MCP Server として動作し、AI が会話やコード文脈を保存・検索できます。
+
 > NeuralNexusNote™ プロダクト — **無償 Lite** 版：Redis Stack を使った
 > 揮発性ハイブリッド（ベクトル + BM25）メモリを Model Context Protocol
 > サーバーとして提供します。各エントリは 7 日で自動失効します。

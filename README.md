@@ -1,5 +1,10 @@
 # N3MemoryCore MCP — Lite (Ephemeral)
 
+> **N3MC-MCP-Lite is an "external memory server" used by MCP-compatible
+> editors such as Claude Code, Cursor, and Windsurf.**
+> It runs as an MCP Server so AI can save and search conversation and
+> code context across sessions.
+
 > A NeuralNexusNote™ product — **free Lite** build: ephemeral hybrid
 > (vector + BM25) memory exposed as a Model Context Protocol server, backed
 > by Redis Stack with a 7-day TTL per entry.
