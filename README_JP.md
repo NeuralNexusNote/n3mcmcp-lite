@@ -111,7 +111,12 @@ pip install -e .
 
 ### Claude Code
 
-プロジェクトの `.mcp.json`：
+**`.mcp.json` はこのリポジトリに同梱されています。** リポジトリを
+クローンしてパッケージをインストールするだけで、Claude Code が
+自動的に接続されます — 手動設定は不要です。
+
+`pip install n3memorycore-mcp-lite`（クローンなし）でインストール
+した場合は、プロジェクトの `.mcp.json` に以下を追加してください：
 
 ```json
 {

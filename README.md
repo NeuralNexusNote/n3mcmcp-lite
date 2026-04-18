@@ -115,7 +115,12 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ### Claude Code
 
-Add to your project's `.mcp.json`:
+**`.mcp.json` is already included in this repository.** Clone the repo,
+install the package, and Claude Code connects automatically — no manual
+configuration needed.
+
+If you installed via `pip install n3memorycore-mcp-lite` (without cloning),
+add the following to your project's `.mcp.json`:
 
 ```json
 {

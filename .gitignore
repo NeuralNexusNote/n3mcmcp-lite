@@ -210,3 +210,6 @@ config.json
 
 # N3MC local memory (personal data)
 .memory/
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
