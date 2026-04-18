@@ -1,0 +1,20 @@
+{
+  "name": "neuralnexusnote",
+  "owner": {
+    "name": "NeuralNexusNote",
+    "email": "arnolfjp019@gmail.com"
+  },
+  "metadata": {
+    "description": "Memory-focused MCP servers from NeuralNexusNote",
+    "version": "1.1.0"
+  },
+  "plugins": [
+    {
+      "name": "n3memorycore-lite",
+      "source": "./plugins/n3memorycore-lite",
+      "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory for Claude Code, backed by Redis Stack. Requires a Redis Stack container running on localhost:6379 and uv (for uvx) on PATH.",
+      "category": "memory",
+      "tags": ["memory", "rag", "redis", "vector-search", "bm25", "embedding", "ephemeral"]
+    }
+  ]
+}
