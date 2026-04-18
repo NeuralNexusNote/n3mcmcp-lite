@@ -76,11 +76,7 @@ docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 
 ### 2. パッケージのインストール
 
-```bash
-pip install n3memorycore-mcp-lite
-```
-
-ソースから：
+ソースからインストールしてください（PyPI 配布は未公開です）：
 
 ```bash
 git clone https://github.com/NeuralNexusNote/n3mcmcp-lite
@@ -115,8 +111,8 @@ pip install -e .
 クローンしてパッケージをインストールするだけで、Claude Code が
 自動的に接続されます — 手動設定は不要です。
 
-`pip install n3memorycore-mcp-lite`（クローンなし）でインストール
-した場合は、プロジェクトの `.mcp.json` に以下を追加してください：
+他のプロジェクトから利用する場合は、そのプロジェクトの `.mcp.json`
+に以下を追加してください：
 
 ```json
 {
@@ -197,12 +193,12 @@ RediSearch は DB 0 以外でインデックスを作成できない
 
 ## Lite 版の拡張・改造
 
-`pip install n3memorycore-mcp-lite` はランタイムのみをインストールし、設計仕様書は**同梱されません**。振る舞いを改造したい場合（ランキング式の変更、クロスエンコーダ・リランカーの差し込み、日本語形態素解析の追加など）は、まず GitHub から仕様書をダウンロードしてください：
+振る舞いを改造したい場合（ランキング式の変更、クロスエンコーダ・リランカーの差し込み、日本語形態素解析の追加など）は、本リポジトリに同梱された設計仕様書を参照してください：
 
 - [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 完全な設計ドキュメント（日本語）
 - [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — English version
 
-仕様書の付録 B にオプション拡張（クロスエンコーダ・リランカー、保存時チャンキング、HyDE、日本語形態素解析）の差し込み位置と候補ライブラリを記載しています。仕様書があれば AI（あるいは人間）が TTL・重複判定・RediSearch 契約を壊さずにコードを編集できます。インストール済みソースのみを読んで拡張することも可能ですが、設計意図の正確な理解には仕様書が必要です。
+仕様書の付録 B にオプション拡張（クロスエンコーダ・リランカー、保存時チャンキング、HyDE、日本語形態素解析）の差し込み位置と候補ライブラリを記載しています。仕様書があれば AI（あるいは人間）が TTL・重複判定・RediSearch 契約を壊さずにコードを編集できます — 設計意図の一次情報源です。
 
 ## ライセンス
 

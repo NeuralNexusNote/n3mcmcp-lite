@@ -80,11 +80,7 @@ server will find it automatically.
 
 ### 2. Install the package
 
-```bash
-pip install n3memorycore-mcp-lite
-```
-
-Or from source:
+Install from source (PyPI distribution is not yet available):
 
 ```bash
 git clone https://github.com/NeuralNexusNote/n3mcmcp-lite
@@ -119,8 +115,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 install the package, and Claude Code connects automatically — no manual
 configuration needed.
 
-If you installed via `pip install n3memorycore-mcp-lite` (without cloning),
-add the following to your project's `.mcp.json`:
+For other projects, add the following to that project's `.mcp.json`:
 
 ```json
 {
@@ -201,12 +196,12 @@ to run if Redis isn't reachable.
 
 ## Extending the Lite build
 
-`pip install n3memorycore-mcp-lite` installs the runtime only — the design spec is **not** shipped with the package. If you want to modify behavior (change the ranking formula, drop in a cross-encoder reranker, plug in a Japanese morphological tokenizer, etc.), download the spec from GitHub first:
+If you want to modify behavior (change the ranking formula, drop in a cross-encoder reranker, plug in a Japanese morphological tokenizer, etc.), start from the design spec shipped in this repository:
 
 - [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — full design document (English)
 - [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 日本語版
 
-Appendix B of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. The spec gives an AI (or human) enough context to edit the code without breaking the TTL, dedup, or RediSearch contracts. Extending the package by reading only the installed source is possible but much harder — the spec is the source of truth for design intent.
+Appendix B of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. The spec gives an AI (or human) enough context to edit the code without breaking the TTL, dedup, or RediSearch contracts — it is the source of truth for design intent.
 
 ## License
 
