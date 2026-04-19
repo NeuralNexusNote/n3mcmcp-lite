@@ -84,7 +84,7 @@ def _startup() -> None:
 # ---------------------------------------------------------------------------
 app: Server = Server(
     name="n3memorycore-lite",
-    version="1.1.0-lite",
+    version="1.1.0",
     instructions=SERVER_INSTRUCTIONS,
 )
 

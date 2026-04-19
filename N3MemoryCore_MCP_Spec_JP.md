@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.1.0-lite [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.1.0 [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。お試し用の公開テスト版 — ディスクに永続保存する有償版との差別化を明確化しています。
@@ -69,11 +69,21 @@
    ```bash
    docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
    ```
-2. パッケージをインストール：
-   ```bash
-   pip install n3memorycore-mcp-lite
-   ```
-3. MCP クライアント設定にサーバーを登録（[§8](#8-mcp-クライアント設定) 参照）。
+2. パッケージをインストール（いずれか一つ）：
+   - **pip**（グローバルまたは venv）：
+     ```bash
+     pip install n3memorycore-mcp-lite
+     ```
+   - **uvx**（事前インストール不要・分離環境 — [`uv`](https://docs.astral.sh/uv/) が必要）：
+     ```bash
+     uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+     ```
+   - **Claude Code プラグインマーケットプレイス**（pip/uvx コマンドを手動で打つ必要なし — プラグインが `uvx` 起動を設定するが、`uv` は PATH に必要）：
+     ```
+     /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
+     /plugin install n3memorycore-lite@neuralnexusnote
+     ```
+3. MCP クライアント設定にサーバーを登録（[§8](#8-mcp-クライアント設定) 参照）。プラグインマーケットプレイス経由でインストールした場合はこのステップ不要 — プラグインが自動登録します。
 4. クライアントを再起動。初回ツール呼び出しは ~400 MB の埋め込みモデルのダウンロードとロードで 30–60 秒かかります。
 
 ### データバックアップ
@@ -305,7 +315,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 サーバーが広告する内容：
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0-lite" }`
+- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 7 日で失効する」旨を明示する。**
 
@@ -415,7 +425,18 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 ### Claude Code
 
-プロジェクトの `.mcp.json`：
+等価な導入方法が 3 通りあります。いずれか一つを選択すること（併用不可）。
+
+**(a) プラグインマーケットプレイス（推奨 — 手動設定ファイル不要）**
+
+```
+/plugin marketplace add NeuralNexusNote/n3mcmcp-lite
+/plugin install n3memorycore-lite@neuralnexusnote
+```
+
+プラグインに同梱された `plugin.json` が `uvx --from n3memorycore-mcp-lite n3mc-mcp-lite` 経由でサーバーを起動する。`uv` が PATH にあることが前提。
+
+**(b) プロジェクトの `.mcp.json`（手動 — リポジトリをクローン、または pip インストール済みの場合）**
 
 ```json
 {
@@ -424,6 +445,20 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
       "type": "stdio",
       "command": "n3mc-mcp-lite",
       "args": []
+    }
+  }
+}
+```
+
+**(c) プロジェクトの `.mcp.json` を uvx 経由で（事前インストール不要）**
+
+```json
+{
+  "mcpServers": {
+    "n3memorycore-lite": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-mcp-lite"]
     }
   }
 }

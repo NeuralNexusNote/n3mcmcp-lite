@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.1.0-lite [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.1.0 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as a public test drive — the paid build uses SQLite and stores memories permanently.
@@ -69,11 +69,21 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
    ```bash
    docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
    ```
-2. Install the package:
-   ```bash
-   pip install n3memorycore-mcp-lite
-   ```
-3. Register the server in your MCP client's config (see [§8](#8-mcp-client-configuration)).
+2. Install the package (choose one):
+   - **pip** (global or venv):
+     ```bash
+     pip install n3memorycore-mcp-lite
+     ```
+   - **uvx** (zero-install, isolated env — requires [`uv`](https://docs.astral.sh/uv/)):
+     ```bash
+     uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+     ```
+   - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin configures `uvx` launch for you, but `uv` must still be on PATH):
+     ```
+     /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
+     /plugin install n3memorycore-lite@neuralnexusnote
+     ```
+3. Register the server in your MCP client's config (see [§8](#8-mcp-client-configuration)). Skip this step when installing via the plugin marketplace — the plugin registers the server automatically.
 4. Restart the client. The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
 
 ### Data Backup
@@ -305,7 +315,7 @@ stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `std
 
 The server advertises:
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0-lite" }`
+- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
 
@@ -415,7 +425,18 @@ Override via the environment variable `N3MC_DATA_DIR` (absolute path). Redis sta
 
 ### Claude Code
 
-Project-local `.mcp.json`:
+Three equivalent paths are supported. Pick one; do not combine.
+
+**(a) Plugin marketplace (recommended — no manual config file)**
+
+```
+/plugin marketplace add NeuralNexusNote/n3mcmcp-lite
+/plugin install n3memorycore-lite@neuralnexusnote
+```
+
+The plugin ships a `plugin.json` that launches the server via `uvx --from n3memorycore-mcp-lite n3mc-mcp-lite`. Requires `uv` on PATH.
+
+**(b) Project-local `.mcp.json` (manual, when cloning the repo or pip-installing)**
 
 ```json
 {
@@ -424,6 +445,20 @@ Project-local `.mcp.json`:
       "type": "stdio",
       "command": "n3mc-mcp-lite",
       "args": []
+    }
+  }
+}
+```
+
+**(c) Project-local `.mcp.json` via uvx (no prior install needed)**
+
+```json
+{
+  "mcpServers": {
+    "n3memorycore-lite": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-mcp-lite"]
     }
   }
 }
