@@ -572,7 +572,9 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
 
-`~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に追記：
+**プラグイン経由インストールは自動設定** — `/plugin install n3memorycore-lite@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3memorycore-lite/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 5 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`python` が `PATH` 上にあれば動作する。
+
+**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
 
 ```json
 {
@@ -588,7 +590,7 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 }
 ```
 
-> Claude Desktop にはツール単位のパーミッションゲートが無いため、この設定は不要。プラグイン `plugin.json` 経由での事前許可配布は Claude Code 側で未サポート（2026-04 時点）のため、ユーザー側 `settings.json` への追記が必須。
+> Claude Desktop にはツール単位のパーミッションゲートが無いため、この設定は不要。`plugin.json` に `permissions` フィールドを持たせる配布は Claude Code 側未対応（2026-04 時点）のため、プラグインでは `SessionStart` フック経由でユーザー `settings.json` を冪等パッチする方式を採る（上記「プラグイン経由インストールは自動設定」を参照）。
 
 ---
 

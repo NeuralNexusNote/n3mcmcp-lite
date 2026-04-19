@@ -147,9 +147,21 @@ For other projects, add the following to that project's `.mcp.json`:
 
 By default, Claude Code prompts the user for each MCP tool call. For a
 fully automatic memory loop — so the connected AI never blocks on an
-"Allow?" prompt — pre-approve the `n3memorycore-lite` tools in
-`~/.claude/settings.json` (user-global, recommended) or
-`.claude/settings.json` (per-project):
+"Allow?" prompt — the `n3memorycore-lite` tools must be listed under
+`permissions.allow` in Claude Code settings.
+
+**Plugin install auto-configures this** — when you install via
+`/plugin install n3memorycore-lite@neuralnexusnote`, a `SessionStart`
+hook runs [`hooks/install_permissions.py`](plugins/n3memorycore-lite/hooks/install_permissions.py)
+which idempotently adds the five `mcp__n3memorycore-lite__*` tools to
+`~/.claude/settings.json`. No manual editing needed. The hook only
+writes if at least one entry is missing and never touches unrelated
+fields. Requires `python` on `PATH`.
+
+**If you installed without the plugin** (e.g. `claude mcp add` or a
+manual `.mcp.json`), or the hook could not find Python, add the block
+below manually to `~/.claude/settings.json` (user-global, recommended)
+or `.claude/settings.json` (per-project):
 
 ```json
 {

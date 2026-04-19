@@ -575,7 +575,9 @@ Restart the client after editing the config. Ensure Redis Stack is running *befo
 
 By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3memorycore-lite` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
 
-Add to `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
+**Plugin install auto-configures this** — installing via `/plugin install n3memorycore-lite@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3memorycore-lite/hooks/install_permissions.py)) that idempotently adds the five `mcp__n3memorycore-lite__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing, leaves unrelated fields untouched, and requires `python` on `PATH`.
+
+**If you installed without the plugin** (`claude mcp add`, manual `.mcp.json`, or Python is not available), add the block below manually to `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
 
 ```json
 {
@@ -591,7 +593,7 @@ Add to `~/.claude/settings.json` (user-global — recommended) or `.claude/setti
 }
 ```
 
-> Claude Desktop has no per-tool permission gate, so this step is unnecessary there. Shipping pre-approvals via a plugin's `plugin.json` is not supported by Claude Code (as of 2026-04), so user-side `settings.json` editing is required.
+> Claude Desktop has no per-tool permission gate, so this step is unnecessary there. Claude Code does not (as of 2026-04) accept a `permissions` field in `plugin.json`, so the plugin ships a `SessionStart` hook that idempotently patches the user's `settings.json` (see "Plugin install auto-configures this" above).
 
 ---
 
