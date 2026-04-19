@@ -573,10 +573,14 @@ Restart the client after editing the config. Ensure Redis Stack is running *befo
 
 ---
 
-## 9. Testing
+## 9. Testing (pytest)
+
+> **Purpose**: Repeatable automated regression tests that complement the manual Evidence Report in §10. Layers are split by responsibility; the MCP tool E2E is the last line of defence.
+
+### How to run
 
 ```bash
-# 1. Start Redis Stack
+# 1. Start Redis Stack (RediSearch can only index DB 0)
 docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 
 # 2. Install with dev deps and run pytest
@@ -584,14 +588,105 @@ pip install -e ".[dev]"
 pytest tests/ -q
 ```
 
-The test suite covers:
-- `tests/test_database.py` — RediSearch index, CRUD, TTL, dedup, BM25, KNN, serialization.
-- `tests/test_processor.py` — cosine sim (from cosine distance), time decay, BM25 normalization, purification, embeddings.
-- `tests/test_server.py` — MCP tool dispatch end-to-end against an isolated `config.json` and a flushed Redis DB index 0.
-
 Tests auto-skip (not fail) if Redis Stack is not reachable at `N3MC_REDIS_TEST_URL` (default `redis://localhost:6379/0`).
 
 > **⚠️ Destructive test DB**: RediSearch can only create indexes on DB 0 (`Cannot create index on db != 0`), so the test suite FLUSHDBs DB 0 before and after every test. Do **not** point `N3MC_REDIS_TEST_URL` at a Redis instance that holds data you care about — run a dedicated container for testing.
+
+### Directory layout
+
+```
+n3mcmcp-lite/
+└── tests/
+    ├── conftest.py          # Shared fixtures: isolated data dir, Redis URL override, dummy vectors
+    ├── test_database.py     # Layer 1: Redis / RediSearch unit tests (CRUD, schema, TTL, dedup, BM25, KNN)
+    ├── test_processor.py    # Layer 2: ranking math, embeddings, purify, chunking, reranker
+    └── test_server.py       # Layer 3: MCP tool dispatch E2E (isolated `config.json` + flushed DB 0)
+```
+
+### Layer 1: `tests/test_database.py` (34 tests)
+
+| Test class | What it covers | Area |
+|---|---|---|
+| `TestIndexSetup` | RediSearch index creation, idempotent re-run, adding missing fields | Schema management |
+| `TestInsertAndRetrieve` | INSERT→COUNT, hash integrity, insertion without embedding, `parent_id` storage | CRUD |
+| `TestDedup` | Exact SHA collisions, near-similarity threshold, parent-doc SHA guard | De-duplication |
+| `TestDelete` | Single delete, parent→chunk cascade, `docsha:` guard cleanup | Transactional safety |
+| `TestTTL` | 7-day TTL set on save, `EXPIRE` refresh on search hits, expiry-driven disappearance | TTL |
+| `TestFTS` | Punctuation stripping, BM25 scores, short queries, CJK-bigram hits | FTS / Japanese |
+| `TestVectorSearch` | KNN results, empty-DB search, `owner_id` filter, `-@parent_id:{*}` exclusion | KNN search |
+| `TestCjkBigramExpand` | Bigram expansion for hiragana / katakana / kanji mixes, boundary handling | Tokenization |
+| `TestAccessCount` | `access_count` HINCRBY, only top-N increments, cap enforcement | Auto importance |
+| `TestSerialization` | Vector binary round-trip, f32 LE packing | Serialization |
+| `TestSha1` | SHA1 hex, empty string, non-ASCII UTF-8, long input | Digest |
+
+### Layer 2: `tests/test_processor.py` (42 tests)
+
+| Test class | What it covers | Area |
+|---|---|---|
+| `TestCosineSim` | Identical→1.0, orthogonal→0.0, negative clamp, RediSearch distance→similarity | Distance conversion |
+| `TestTimeDecay` | Now→1.0, half-life, floor, malformed timestamp→1.0 | Half-life |
+| `TestKeywordRelevance` | Below-threshold cutoff, normalization, zero max value | BM25 normalization |
+| `TestFinalScore` | `(cos·0.7 + bm25·0.3)·decay·b_local`, `b_local` clamp | Ranking formula |
+| `TestAccessCountBoost` | `stored_importance + access_boost`, 0.5–2.0 clamp, disabled flag | Auto importance |
+| `TestLexicalRerank` | Term coverage, phrase boost, short-content preference, zero-overlap non-penalty | Lightweight reranker |
+| `TestPurification` | Multi-line code block → `[code omitted]`, inline code preserved, multiple blocks | Purification |
+| `TestChunkText` | Below-threshold→single, long→split+overlap, boundary alignment | Parent-chunk |
+| `TestEmbedding` | `passage:` / `query:` prefixes, vector dimensionality, same-text similarity | Embedding |
+
+### Layer 3: `tests/test_server.py` (15 tests)
+
+| Test class | What it covers | Area |
+|---|---|---|
+| `TestToolRegistration` | Five tools registered, schema types, description non-empty | MCP registration |
+| `TestSaveAndSearch` | Save→search round-trip, exact-duplicate rejection, empty-content rejection | Single chunk |
+| `TestListAndDelete` | Three recent entries listed, delete non-existent id | List / delete |
+| `TestRepair` | `repair_memory` on empty DB → ok | Repair |
+| `TestUnknownTool` | Unknown tool name → error string | Dispatch |
+| `TestParentDocRecall` | Verbatim recall of fictional "Shiranui" city doc, chunk→parent collapse, `[doc×N]` rendering, parent→chunk cascade delete | Parent document (§3.11) |
+
+### Example runs
+
+```bash
+# Full suite
+pytest tests/ -q
+
+# Single layer
+pytest tests/test_database.py -v
+
+# Skip slow embedding tests
+pytest tests/ -v -k "not TestEmbedding"
+```
+
+> **⚠️ Relationship to the Evidence Report**: A failing automated test does **not** block the §10 sign-off. The Evidence Report is the sole pass/fail gate for implementation completeness. The automated suite is an optional regression aid and must not trigger an endless fix-and-retry loop during the first build.
+
+---
+
+## 10. Self-Evaluation (Evidence Report)
+
+> Once implementation is complete, the AI runs the following checks autonomously and reports each item at ⭐⭐⭐⭐⭐. This is not a post-generation one-shot scorecard: it assumes the §9 pytest suite is green. MCP Lite is judged on *best-in-class behavior given the Redis-Stack + 7-day-TTL constraint set*.
+
+1. **Latency & process health**: Call `search_memory` from an MCP client and measure both the first call (which includes model load) and subsequent calls. Target: **≤3.0 s first call / ≤0.5 s steady state on CPU**. Also confirm that calling any tool while Redis Stack is down does **not** crash the server — it must return the "start Redis Stack" hint.
+
+2. **Real-person recall test (historical data)**: Save a passage about a real historical figure via `save_memory`, then search for that figure's name with `search_memory`. Pass criterion: the saved record appears in the **top-3 results**.
+   - Japanese example: "坂本龍馬" (Sakamoto Ryoma)
+   - English example: "Abraham Lincoln"
+
+3. **Fictional-setting test (creative world-building / parent-document contract)**: Save a passage **≥400 characters** containing made-up names/places/terms via `save_memory`, then retrieve it with `search_memory`. Pass criterion: **every section of the saved text is restored byte-for-byte**. Per §3.11's parent-chunk design, even though search hits land on chunks, the response must substitute the verbatim full text fetched from `doc:<parent_id>`. Code blocks inside a Claude response are replaced with `[code omitted]` per the purification contract.
+   - Japanese example: "Floating city Shiranui (fictional setting sheet)"
+   - English example: any fictional character, city, or proper noun
+
+4. **FTS punctuation + CJK tolerance test**: Save Japanese text containing brackets or punctuation (e.g. `架空の惑星「アルファ9」の気温設定`) via `save_memory`, then search with a query that drops the brackets (e.g. `アルファ9 気温`). Pass criterion: the record shows up in the **top-3 results**. This verifies that §3.7's punctuation stripping and CJK bigram expansion are applied consistently on both the save side and the query side.
+
+5. **Complete-recording test**: Confirm that any non-empty input is recorded — the legacy "skip if under N chars", "skip boilerplate", and "noise pattern" filters must **not** exist.
+   - A 2-character string (e.g. `はい` / `ok`) passed to `save_memory` **is saved**.
+   - Stock replies (`ok`, `yes`, `thanks`) passed to `save_memory` **are saved** (exact/near duplicates may be rejected server-side — if so, retry with a different string).
+   - Empty or whitespace-only input is rejected with `empty content`.
+
+6. **Fully-automatic save test (behavioral-instruction compliance)**: Verify that the client-side Claude honours the §5 behavioral instructions.
+   1. Record the DB count via `list_memories` before the test.
+   2. Have at least a **3-turn** substantive conversation with Claude (technical Q&A round trips). Do **not** ask Claude to save anything explicitly during the run.
+   3. After the conversation ends, re-check `list_memories` and confirm that for each turn Claude wrote a 50–200-character entry containing **intent paraphrase + key conclusion**.
+   4. **Pass criterion**: Claude called `save_memory` on its own volition for most turns, long pastes were split into per-fact entries (not one blob), and trivial greetings / clarifying questions were skipped (§5 rule #4).
 
 ---
 
@@ -619,3 +714,94 @@ The Lite build intentionally stops at the hybrid + time-decay ranker described i
 - **Japanese morphological analysis** — the shipping build already supplements RediSearch's default tokenizer with CJK bigram expansion (see [§3.7](#37-text-tokenization--punctuation-handling)), which covers the basic case. For further precision, pre-tokenize the body at save time with a morphological analyzer — candidates: `fugashi` + `unidic-lite` (MeCab-based, ~50 MB), `SudachiPy` + `sudachidict-core` (~70 MB, multi-granularity A/B/C modes), or pure-Python `Janome` when binary dependencies are a problem — store the space-joined surface forms in a parallel `text_tokens` TEXT field and point BM25 search at that field. Vector search is unaffected (e5 handles Japanese natively) and the raw body stays untouched for display. Expected cost: +5–20 ms per `save_memory` call; the delta versus bigram expansion shows up most on compound words and inflected forms.
 
 All three extensions are additive — none of them require changes to the Redis schema's existing fields or the TTL/dedup contracts (the morphological tokenizer only **adds** a parallel field). A future implementer should treat them as separate feature flags, default-off, and benchmark each independently against the baseline ranker.
+
+---
+
+## Appendix C: Recommended AI-Assisted Workflow
+
+> **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code (or your preferred MCP client). The AI does not advance to the next phase on its own. Unlike the Free build, which is driven by slash commands, the MCP Lite build is driven by **MCP tool calls** (`save_memory` / `search_memory` / `list_memories` / `delete_memory` / `repair_memory`).
+
+| Phase | What you do | Model |
+|---|---|---|
+| 1. Implementation | Paste the prompt to kick off the build | **Sonnet** (fast) |
+| 2. Debugging | Paste three prompts **in order** to verify | **Sonnet** |
+| 3. Quality review | Paste the review prompt | **Opus** (deep reasoning) |
+
+---
+
+### Phase 1: Implementation (Sonnet)
+
+Set the model to **Sonnet** and paste:
+
+```
+Please build n3mcmcp-lite from this spec (N3MemoryCore_MCP_Spec_EN.md).
+Redis Stack is already running in Docker. Run it as an MCP stdio server
+and register the five tools (save_memory / search_memory / list_memories
+/ delete_memory / repair_memory).
+```
+
+Sonnet handles package scaffolding, RediSearch index creation, MCP tool registration, and stdio launch automatically. When it finishes, move on to phase 2 ("it runs" ≠ "it matches the spec" — do not stop here).
+
+---
+
+### Phase 2: Debugging (Sonnet)
+
+Stay on **Sonnet** and paste the following three prompts **one at a time, in order**.
+
+**① Data-flow trace** (check that nothing is silently dropped)
+```
+For n3mcmcp-lite:
+Read the code and trace the end-to-end data flow from a save_memory tool
+call all the way to the Redis pipeline's EXECUTE, and from a search_memory
+call back to the tool response. Verify that TTL is set on every write and
+that the parent-document fallback (§3.11) is not lost mid-flight. Fix any
+issues you find.
+```
+
+**② Spec-to-code comparison** (find behaviors documented but not implemented)
+```
+For n3mcmcp-lite:
+Walk the input schema and behavior of each MCP tool in §4.3 one by one,
+and compare it against the actual implementation. Also walk the parent-
+chunk contract in §3.11 line by line (verbatim restoration, parent→chunk
+cascade delete, [doc×N] rendering). Flag anything documented but not
+implemented and fix it.
+```
+
+**③ Cross-session test** (confirm data survives an MCP restart)
+```
+For n3mcmcp-lite:
+From an MCP client, save an entry with save_memory in session 1, restart
+the MCP server (keep Redis running), then run search_memory in session 2
+and confirm the entry is retrievable. Fix anything that prevents this.
+```
+
+When all three are done, proceed to phase 3.
+
+---
+
+### Phase 3: Quality review (Opus)
+
+Switch the model to **Opus** and paste:
+
+```
+Please review n3mcmcp-lite and fix anything that needs fixing.
+
+On a scale of 1–10, what score does n3mcmcp-lite earn as (a) a memory
+device exposed over MCP and (b) a RAG system? Split the evaluation:
+memory device (save / 7-day TTL / dedup / parent-document verbatim
+contract) vs. RAG (hybrid search / CJK bigram / lightweight reranker /
+time decay / auto importance). Generate a scorecard.
+```
+
+Opus will actually call the MCP tools and produce a two-axis scorecard: **memory device** (persistence, TTL, dedup, parent doc) vs. **RAG** (retrieval precision, ranking, noise resistance).
+
+> **Note**: the MCP Lite build ships a lightweight reranker and CJK bigram expansion by default, so the RAG ceiling sits slightly higher than in the Free build. Even so, the following are not implemented, and **the RAG score is unlikely to exceed 8:**
+> - Morphological analysis (MeCab / SudachiPy, etc.) for stricter word boundaries (see Appendix B)
+> - A full cross-encoder reranker (see Appendix B)
+> - Language-specialized embedding models (e.g. `multilingual-e5-large`)
+> - Query-expansion techniques such as HyDE (see Appendix B)
+>
+> Soft grading robs you of improvement opportunities — grade strictly. **Regardless of the score, have Opus explicitly list what is missing and discuss concrete fixes with it.**
+
+---
