@@ -326,7 +326,7 @@ Five tools are exposed via `tools/list` (same names as the paid build):
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
 | `search_memory` | `query: string, limit?: int`              | Hybrid (vector + BM25) search, time-decayed ranking. Returns markdown. |
-| `save_memory`   | `content: string, agent_name?: string`      | Exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string` | Exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. |
 | `list_memories` | `limit?: int (default 20)`                | Most-recent entries, newest first. Returns markdown.                   |
 | `delete_memory` | `id: string`                              | `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically.                    |
 | `repair_memory` | —                                         | `ensure_index()`; see [§3.10](#310-repair).                            |

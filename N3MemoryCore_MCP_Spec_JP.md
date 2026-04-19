@@ -326,7 +326,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
 | `search_memory` | `query: string, limit?: int`              | ハイブリッド（ベクトル + BM25）検索、時間減衰ランキング。markdown を返す。 |
-| `save_memory`   | `content: string, agent_name?: string`      | 完全 + 近似の重複判定後、HSET + EXPIRE。`ttl_seconds` を含む JSON を返す。 |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string` | 完全 + 近似の重複判定後、HSET + EXPIRE。`ttl_seconds` を含む JSON を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。 |
 | `list_memories` | `limit?: int (既定 20)`                   | 直近エントリを新しい順。markdown を返す。                                 |
 | `delete_memory` | `id: string`                              | `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` をアトミックに実行。               |
 | `repair_memory` | —                                         | `ensure_index()` を実行。[§3.10](#310-修復) 参照。                         |

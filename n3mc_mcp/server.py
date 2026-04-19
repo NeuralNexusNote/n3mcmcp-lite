@@ -138,6 +138,10 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "Optional agent identifier (e.g. 'claude', 'user').",
                     },
+                    "owner_id": {
+                        "type": "string",
+                        "description": "Optional owner identifier. Must match the server's configured owner_id if provided.",
+                    },
                 },
                 "required": ["content"],
             },
@@ -246,6 +250,13 @@ def _tool_save(args: dict) -> list[types.TextContent]:
     content = (args.get("content") or "").strip()
     if not content:
         return [types.TextContent(type="text", text="save_memory: empty content")]
+
+    caller_owner_id = args.get("owner_id")
+    if caller_owner_id is not None and caller_owner_id != _CONFIG.get("owner_id"):
+        return [types.TextContent(
+            type="text",
+            text='{"status":"error","saved":false,"reason":"owner_id mismatch"}',
+        )]
 
     agent_name = args.get("agent_name")
     ttl_seconds = int(_CONFIG.get("ttl_seconds", 604800))
