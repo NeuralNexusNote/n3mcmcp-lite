@@ -143,6 +143,32 @@ For other projects, add the following to that project's `.mcp.json`:
 }
 ```
 
+### Auto-approve tool calls (Claude Code only)
+
+By default, Claude Code prompts the user for each MCP tool call. For a
+fully automatic memory loop — so the connected AI never blocks on an
+"Allow?" prompt — pre-approve the `n3memorycore-lite` tools in
+`~/.claude/settings.json` (user-global, recommended) or
+`.claude/settings.json` (per-project):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__n3memorycore-lite__search_memory",
+      "mcp__n3memorycore-lite__save_memory",
+      "mcp__n3memorycore-lite__list_memories",
+      "mcp__n3memorycore-lite__delete_memory",
+      "mcp__n3memorycore-lite__repair_memory"
+    ]
+  }
+}
+```
+
+Without this, every `save_memory` / `search_memory` call surfaces an
+approval prompt and the AI blocks if the user is away. Claude Desktop
+has no per-tool permission gate, so this step is not needed there.
+
 ## Data location
 
 The Lite build does not store a database on disk — memories live in

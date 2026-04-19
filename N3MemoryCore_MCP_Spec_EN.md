@@ -571,6 +571,28 @@ The plugin ships a `plugin.json` that launches the server via `uvx --from n3memo
 
 Restart the client after editing the config. Ensure Redis Stack is running *before* the client starts the server — otherwise the first tool call returns the "start Redis Stack" hint.
 
+### Auto-approve tool calls (Claude Code only)
+
+By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3memorycore-lite` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
+
+Add to `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__n3memorycore-lite__search_memory",
+      "mcp__n3memorycore-lite__save_memory",
+      "mcp__n3memorycore-lite__list_memories",
+      "mcp__n3memorycore-lite__delete_memory",
+      "mcp__n3memorycore-lite__repair_memory"
+    ]
+  }
+}
+```
+
+> Claude Desktop has no per-tool permission gate, so this step is unnecessary there. Shipping pre-approvals via a plugin's `plugin.json` is not supported by Claude Code (as of 2026-04), so user-side `settings.json` editing is required.
+
 ---
 
 ## 9. Testing (pytest)

@@ -568,6 +568,28 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 設定編集後はクライアントを再起動。Redis Stack は **クライアントがサーバーを起動する前に** 稼働させておくこと — さもないと初回ツール呼び出しは「Redis Stack を起動してください」のヒントを返す。
 
+### ツール自動許可（Claude Code 固有）
+
+Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
+
+`~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に追記：
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__n3memorycore-lite__search_memory",
+      "mcp__n3memorycore-lite__save_memory",
+      "mcp__n3memorycore-lite__list_memories",
+      "mcp__n3memorycore-lite__delete_memory",
+      "mcp__n3memorycore-lite__repair_memory"
+    ]
+  }
+}
+```
+
+> Claude Desktop にはツール単位のパーミッションゲートが無いため、この設定は不要。プラグイン `plugin.json` 経由での事前許可配布は Claude Code 側で未サポート（2026-04 時点）のため、ユーザー側 `settings.json` への追記が必須。
+
 ---
 
 ## 9. テスト（pytest）
