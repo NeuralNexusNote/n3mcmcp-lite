@@ -13,6 +13,20 @@
 
 ---
 
+## ⚠️ 事前準備（インストール前に必須）
+
+このサーバーは **そのままでは起動しません**。以下 2 点を事前に用意してください：
+
+1. **`localhost:6379` で動く Redis Stack** — Lite 版は Redis + RediSearch にメモリを保存します。Docker が最も簡単です：
+   ```bash
+   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+   ```
+2. **[`uv`](https://docs.astral.sh/uv/) を `PATH` に通す** — Claude Code プラグイン / `uvx` 経由インストールの場合のみ必要。ソースからインストールする場合は不要です。
+
+Redis に接続できない場合はサーバーが起動を拒否し、`uv` が無いと Claude Code プラグインは立ち上がりません。`/plugin install` やクライアント設定の前に必ず揃えてください。
+
+---
+
 ## Lite 版と有償版
 
 | 版                      | ストレージ                          | 耐久性           | 配布先              |

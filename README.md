@@ -14,6 +14,20 @@
 
 ---
 
+## ⚠️ Prerequisites (required before install)
+
+This server does **not** run out of the box — you must prepare two things first:
+
+1. **Redis Stack on `localhost:6379`** — the Lite build stores memory in Redis + RediSearch. The easiest way is Docker:
+   ```bash
+   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+   ```
+2. **[`uv`](https://docs.astral.sh/uv/) on your `PATH`** — required only for the Claude Code plugin / `uvx` install path. Not needed if you install from source.
+
+The server refuses to start if Redis is unreachable, and the Claude Code plugin will fail to launch without `uv`. Install both before running `/plugin install` or any client-side config.
+
+---
+
 ## Lite vs. Paid
 
 | Build                   | Storage                           | Durability        | Where                |
