@@ -262,6 +262,7 @@ def hybrid_search(
             "content": row.get("content", ""),
             "score": round(score, 4),
             "timestamp": ts,
+            "parent_id": row.get("parent_id", "") or "",
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)

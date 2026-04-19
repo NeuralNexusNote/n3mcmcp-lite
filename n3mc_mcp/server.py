@@ -24,13 +24,18 @@ from mcp.server.stdio import stdio_server
 from .config import load_config
 from .database import (
     check_exact_duplicate,
+    check_parent_exact_duplicate,
     count_memories,
+    count_parent_docs,
     delete_memory as db_delete_memory,
     ensure_index,
     get_all_memories,
+    get_parent_doc,
     get_redis_client,
     increment_access_counts,
     insert_memory,
+    insert_parent_doc,
+    list_parent_docs,
     ping,
     search_vector,
 )
@@ -240,15 +245,58 @@ def _tool_search(args: dict) -> list[types.TextContent]:
     if limit_override:
         cfg["search_result_limit"] = int(limit_override)
 
-    results = hybrid_search(_CLIENT, query, cfg)
+    raw = hybrid_search(_CLIENT, query, cfg)
 
-    if not results:
+    if not raw:
         return [types.TextContent(type="text", text="(no matching memories)")]
+
+    # Collapse chunks belonging to the same parent doc into a single hit and
+    # substitute the parent's full verbatim content. This lets long documents
+    # surface exactly as they were saved (Option A).
+    results: list[dict] = []
+    seen_parents: dict[str, int] = {}
+    chunk_hit_ids: list[str] = []  # for access-count bump (chunks only)
+    for r in raw:
+        parent_id = (r.get("parent_id") or "").strip()
+        if parent_id:
+            chunk_hit_ids.append(r.get("id", ""))
+            if parent_id in seen_parents:
+                # Already emitted this parent with a higher score — skip.
+                continue
+            parent = get_parent_doc(_CLIENT, parent_id)
+            if parent is None:
+                # Orphan chunk — parent expired or was deleted; fall through.
+                seen_parents[parent_id] = len(results)
+                results.append({
+                    "id": r.get("id", ""),
+                    "content": r.get("content", ""),
+                    "score": r.get("score", 0),
+                    "timestamp": r.get("timestamp", ""),
+                })
+                continue
+            seen_parents[parent_id] = len(results)
+            results.append({
+                "id": parent_id,
+                "content": parent.get("content", ""),
+                "score": r.get("score", 0),
+                "timestamp": parent.get("timestamp", "") or r.get("timestamp", ""),
+                "is_parent": True,
+            })
+        else:
+            results.append({
+                "id": r.get("id", ""),
+                "content": r.get("content", ""),
+                "score": r.get("score", 0),
+                "timestamp": r.get("timestamp", ""),
+            })
 
     # Update access counts + extend TTL for top-K hits in a single round-trip.
     # Access counts feed the auto-importance boost in hybrid_search on future queries.
     top_k = int(_CONFIG.get("ttl_refresh_top_k", 5))
-    hit_ids = [r["id"] for r in results[:top_k]]
+    hit_ids = [r["id"] for r in results[:top_k] if not r.get("is_parent")]
+    # Also bump the actual chunks that fired so repeated parent hits strengthen
+    # their ranking signal.
+    hit_ids.extend([cid for cid in chunk_hit_ids[:top_k] if cid])
     if hit_ids and (
         _CONFIG.get("access_count_enabled", True)
         or _CONFIG.get("ttl_refresh_on_search", True)
@@ -264,36 +312,57 @@ def _tool_search(args: dict) -> list[types.TextContent]:
     for r in results:
         score = r.get("score", 0)
         content = r.get("content", "")
-        ts = r.get("timestamp", "")[:10]
+        ts = (r.get("timestamp") or "")[:10]
         rid = r.get("id", "")
-        lines.append(f"- [{score:.4f}] ({ts}) {content}  _({rid})_")
+        tag = " [doc]" if r.get("is_parent") else ""
+        lines.append(f"- [{score:.4f}] ({ts}){tag} {content}  _({rid})_")
     return [types.TextContent(type="text", text="\n".join(lines))]
 
 
-def _save_one(text: str, agent_name: Any, ttl_seconds: int, importance: float) -> dict:
-    """Save a single purified text entry. Returns a status dict."""
-    if check_exact_duplicate(_CLIENT, text):
+def _gen_id() -> str:
+    try:
+        from uuid_utils import uuid7 as _gen_uuid7
+        return str(_gen_uuid7())
+    except Exception:
+        return str(uuid.uuid4())
+
+
+def _save_one(
+    text: str,
+    agent_name: Any,
+    ttl_seconds: int,
+    importance: float,
+    parent_id: str | None = None,
+    skip_dedup: bool = False,
+) -> dict:
+    """Save a single purified text entry. Returns a status dict.
+
+    When ``parent_id`` is set, the row is stored as a chunk of a parent doc
+    and dedup guards are bypassed (overlapping chunks are near-duplicates by
+    design).
+    """
+    if not skip_dedup and check_exact_duplicate(_CLIENT, text):
         return {"status": "duplicate", "saved": False}
 
     qvec = None
     try:
         qvec = embed_passage(text)
-        vec_results = search_vector(
-            _CLIENT, qvec, k=1, owner_id=_CONFIG.get("owner_id"),
-        )
-        if vec_results:
-            top_cos = cosine_sim_from_distance(vec_results[0][1])
-            if top_cos >= _CONFIG.get("dedup_threshold", 0.95):
-                return {"status": "near_duplicate", "saved": False, "similarity": round(top_cos, 4)}
+        if not skip_dedup:
+            vec_results = search_vector(
+                _CLIENT, qvec, k=1, owner_id=_CONFIG.get("owner_id"),
+            )
+            if vec_results:
+                top_cos = cosine_sim_from_distance(vec_results[0][1])
+                if top_cos >= _CONFIG.get("dedup_threshold", 0.95):
+                    return {
+                        "status": "near_duplicate",
+                        "saved": False,
+                        "similarity": round(top_cos, 4),
+                    }
     except Exception:
         qvec = None
 
-    try:
-        from uuid_utils import uuid7 as _gen_uuid7
-        record_id = str(_gen_uuid7())
-    except Exception:
-        record_id = str(uuid.uuid4())
-
+    record_id = _gen_id()
     ts = datetime.now(tz=timezone.utc).isoformat()
     insert_memory(
         _CLIENT,
@@ -307,6 +376,8 @@ def _save_one(text: str, agent_name: Any, ttl_seconds: int, importance: float) -
         _SESSION_ID,
         ttl_seconds=ttl_seconds,
         importance=importance,
+        parent_id=parent_id,
+        skip_sha_guard=bool(parent_id),
     )
     return {"status": "ok", "saved": True, "id": record_id, "ttl_seconds": ttl_seconds}
 
@@ -340,20 +411,49 @@ def _tool_save(args: dict) -> list[types.TextContent]:
         import json as _json
         return [types.TextContent(type="text", text=_json.dumps(result))]
 
-    # Multi-chunk path: save each chunk, report aggregate result.
+    # Multi-chunk path: persist a parent full-text doc plus overlapping chunks.
+    # The parent guarantees verbatim recall; the chunks drive hybrid retrieval.
+    import json as _json
+
+    existing_parent = check_parent_exact_duplicate(_CLIENT, text)
+    if existing_parent is not None:
+        return [types.TextContent(type="text", text=_json.dumps({
+            "status": "duplicate",
+            "saved": False,
+            "parent_id": existing_parent,
+        }))]
+
+    parent_id = _gen_id()
+    parent_ts = datetime.now(tz=timezone.utc).isoformat()
+    insert_parent_doc(
+        _CLIENT,
+        parent_id,
+        text,
+        parent_ts,
+        _CONFIG["owner_id"],
+        local_id=_CONFIG.get("local_id"),
+        agent_name=agent_name,
+        session_id=_SESSION_ID,
+        chunk_count=len(chunks),
+        ttl_seconds=ttl_seconds,
+    )
+
     saved_ids: list[str] = []
     skipped = 0
     for chunk in chunks:
-        r = _save_one(chunk, agent_name, ttl_seconds, importance)
+        r = _save_one(
+            chunk, agent_name, ttl_seconds, importance,
+            parent_id=parent_id, skip_dedup=True,
+        )
         if r.get("saved"):
             saved_ids.append(r["id"])
         else:
             skipped += 1
 
-    import json as _json
     return [types.TextContent(type="text", text=_json.dumps({
         "status": "ok",
         "saved": True,
+        "parent_id": parent_id,
         "chunks": len(chunks),
         "saved_count": len(saved_ids),
         "skipped_count": skipped,
@@ -365,18 +465,43 @@ def _tool_save(args: dict) -> list[types.TextContent]:
 def _tool_list(args: dict) -> list[types.TextContent]:
     limit = int(args.get("limit") or 20)
     owner_id = _CONFIG.get("owner_id")
-    rows = get_all_memories(_CLIENT, limit=limit, owner_id=owner_id)
-    total = count_memories(_CLIENT, owner_id=owner_id)
+    # Standalone memories exclude chunks by default; parent docs are fetched
+    # separately and interleaved as single entries.
+    standalone = get_all_memories(_CLIENT, limit=limit, owner_id=owner_id)
+    parents = list_parent_docs(_CLIENT, limit=limit, owner_id=owner_id)
 
-    if not rows:
+    merged: list[dict] = []
+    for p in parents:
+        merged.append({
+            "id": p["id"],
+            "timestamp": p.get("timestamp", ""),
+            "agent_name": p.get("agent_name", ""),
+            "content": p.get("content", ""),
+            "is_parent": True,
+            "chunk_count": p.get("chunk_count", 0),
+        })
+    for r in standalone:
+        merged.append(dict(r, is_parent=False))
+
+    def _sort_key(row: dict) -> str:
+        return row.get("timestamp") or ""
+    merged.sort(key=_sort_key, reverse=True)
+    merged = merged[:limit]
+
+    total = count_memories(_CLIENT, owner_id=owner_id) + count_parent_docs(
+        _CLIENT, owner_id=owner_id
+    )
+
+    if not merged:
         return [types.TextContent(type="text", text="(no memories stored)")]
 
-    lines = [f"# Recent memories ({len(rows)} of {total}) — Lite: 7d TTL", ""]
-    for r in rows:
+    lines = [f"# Recent memories ({len(merged)} of {total}) — Lite: 7d TTL", ""]
+    for r in merged:
         ts = (r.get("timestamp") or "")[:19]
         agent = r.get("agent_name") or "-"
         content = (r.get("content") or "")[:120]
-        lines.append(f"- `{r.get('id','')}` {ts} [{agent}] {content}")
+        tag = f" [doc×{r.get('chunk_count',0)}]" if r.get("is_parent") else ""
+        lines.append(f"- `{r.get('id','')}` {ts} [{agent}]{tag} {content}")
     return [types.TextContent(type="text", text="\n".join(lines))]
 
 

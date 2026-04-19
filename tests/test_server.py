@@ -121,3 +121,117 @@ class TestUnknownTool:
     def test_unknown_tool_returns_error(self, server_mod):
         result = asyncio.run(server_mod.call_tool("nonexistent_tool", {}))
         assert "Unknown tool" in result[0].text
+
+
+class TestParentDocRecall:
+    """Option A: long content saved verbatim survives chunked search."""
+
+    LONG_DOC = (
+        "架空の浮遊都市「不知火(しらぬい)」設定資料\n\n"
+        "【概要】不知火は反重力結晶エーテライトを動力源とする全長12kmの"
+        "浮遊都市で、標高4000m前後を自律航行する。建都は1873年、建設者は"
+        "エドガー・ヴァンクロス博士。首都機能と学術機能を兼ね備えた"
+        "特殊な都市として、周辺諸国との外交関係を維持している。\n\n"
+        "【構造】都市は上層のアカデミー区、中層の市街区、下層の工業区に"
+        "分かれ、各層は反重力エレベータで接続される。中央塔は"
+        "「天穹の柱」と呼ばれ、エーテライト核を格納している。周辺部には"
+        "気象観測所、天文台、浮遊船の係留塔が配置される。\n\n"
+        "【住民】公称人口は32,500人で、学者、技術者、商人、航海士が"
+        "主要な職業となっている。公用語は古不知火語と共通語の二言語で、"
+        "初等教育から両言語の習得が義務付けられている。\n\n"
+        "【歴史】第二次大嵐戦役(1921)で南半分が崩落したが、"
+        "10年かけて再建された。現在は中立都市として四大陸と交易を行う。"
+        "戦役記念碑は中央広場に建てられ、毎年慰霊祭が開催される。\n\n"
+        "【経済】主要産業はエーテライト精製、航空機製造、精密機械、"
+        "学術出版。対外通貨は不知火クローネ、域内では銀貨も流通する。\n\n"
+        "【文化】古不知火暦では一年を14ヶ月に分割し、各月に神話の"
+        "星座名を与える。祭事は風月祭、光穹祭、静寂祭の三大祭が有名。"
+    )
+
+    def test_long_content_saves_as_parent_with_chunks(self, server_mod):
+        result = asyncio.run(server_mod.call_tool(
+            "save_memory", {"content": self.LONG_DOC}
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["saved"] is True
+        assert payload.get("parent_id")
+        assert payload["chunks"] > 1
+        assert payload["saved_count"] >= 1
+
+    def test_search_returns_full_parent_content(self, server_mod):
+        save = asyncio.run(server_mod.call_tool(
+            "save_memory", {"content": self.LONG_DOC}
+        ))
+        parent_id = json.loads(save[0].text)["parent_id"]
+        _wait_indexed(server_mod._CLIENT, 1)
+
+        result = asyncio.run(server_mod.call_tool(
+            "search_memory", {"query": "不知火 設定"}
+        ))
+        text = result[0].text
+        # Full verbatim passages from all sections should survive in output.
+        assert "エーテライト" in text
+        assert "エドガー・ヴァンクロス" in text
+        assert "天穹の柱" in text
+        assert "第二次大嵐戦役" in text
+        assert parent_id in text
+
+    def test_search_dedupes_chunks_to_single_parent(self, server_mod):
+        save = asyncio.run(server_mod.call_tool(
+            "save_memory", {"content": self.LONG_DOC}
+        ))
+        parent_id = json.loads(save[0].text)["parent_id"]
+        _wait_indexed(server_mod._CLIENT, 1)
+
+        result = asyncio.run(server_mod.call_tool(
+            "search_memory", {"query": "不知火"}
+        ))
+        text = result[0].text
+        # Parent id appears once even though multiple chunks matched.
+        assert text.count(parent_id) == 1
+
+    def test_parent_exact_duplicate_rejected(self, server_mod):
+        first = asyncio.run(server_mod.call_tool(
+            "save_memory", {"content": self.LONG_DOC}
+        ))
+        first_id = json.loads(first[0].text)["parent_id"]
+
+        second = asyncio.run(server_mod.call_tool(
+            "save_memory", {"content": self.LONG_DOC}
+        ))
+        payload = json.loads(second[0].text)
+        assert payload["saved"] is False
+        assert payload["status"] == "duplicate"
+        assert payload.get("parent_id") == first_id
+
+    def test_list_shows_parent_and_hides_chunks(self, server_mod):
+        save = asyncio.run(server_mod.call_tool(
+            "save_memory", {"content": self.LONG_DOC}
+        ))
+        parent_id = json.loads(save[0].text)["parent_id"]
+        _wait_indexed(server_mod._CLIENT, 1)
+
+        result = asyncio.run(server_mod.call_tool("list_memories", {"limit": 50}))
+        text = result[0].text
+        assert parent_id in text
+        assert "[doc" in text  # parent marker rendered
+
+    def test_delete_parent_cascades_to_chunks(self, server_mod):
+        from n3mc_mcp.database import _find_chunk_ids_for_parent, get_parent_doc
+
+        save = asyncio.run(server_mod.call_tool(
+            "save_memory", {"content": self.LONG_DOC}
+        ))
+        parent_id = json.loads(save[0].text)["parent_id"]
+
+        assert get_parent_doc(server_mod._CLIENT, parent_id) is not None
+        assert _find_chunk_ids_for_parent(server_mod._CLIENT, parent_id)
+
+        result = asyncio.run(server_mod.call_tool(
+            "delete_memory", {"id": parent_id}
+        ))
+        payload = json.loads(result[0].text)
+        assert payload["status"] == "ok"
+
+        assert get_parent_doc(server_mod._CLIENT, parent_id) is None
+        assert _find_chunk_ids_for_parent(server_mod._CLIENT, parent_id) == []
