@@ -202,21 +202,38 @@ On first run, `config.json` is auto-generated with random UUIDs for
 
 ```json
 {
-  "owner_id": "<uuid>",
-  "local_id": "<uuid>",
-  "redis_url": "redis://localhost:6379/0",
-  "ttl_seconds": 604800,
-  "dedup_threshold": 0.95,
-  "half_life_days": 3,
-  "bm25_min_threshold": 0.1,
-  "search_result_limit": 20,
-  "min_score": 0.2,
-  "search_query_max_chars": 2000
+  "owner_id":                 "<uuid>",
+  "local_id":                 "<uuid>",
+  "redis_url":                "redis://localhost:6379/0",
+  "ttl_seconds":              604800,
+  "dedup_threshold":          0.95,
+  "half_life_days":           3,
+  "bm25_min_threshold":       0.1,
+  "search_result_limit":      20,
+  "context_char_limit":       3000,
+  "min_score":                0.2,
+  "search_query_max_chars":   2000,
+  "chunk_threshold":          400,
+  "chunk_overlap":            100,
+  "access_count_enabled":     true,
+  "access_count_weight":      0.02,
+  "access_count_max_boost":   0.5,
+  "ttl_refresh_on_search":    true,
+  "ttl_refresh_top_k":        5,
+  "lexical_rerank_enabled":   true,
+  "rerank_weight":            0.3,
+  "rerank_phrase_weight":     0.2
 }
 ```
 
-`redis_url` can also be supplied via the `N3MC_REDIS_URL` environment
-variable (takes precedence over the config file).
+- `redis_url` — connection URL; `N3MC_REDIS_URL` env var takes precedence.
+- `ttl_seconds` — TTL on every new memory and sha-guard (default 7 d).
+- `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (chars). Bodies longer than the threshold trigger the parent-document + chunks path for verbatim recall.
+- `access_count_*` — access-frequency auto-importance; top-K search hits receive a capped boost on future queries.
+- `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
+- `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (CPU-only).
+
+See the spec §6 for the complete field-by-field reference.
 
 ## Ranking formula
 
