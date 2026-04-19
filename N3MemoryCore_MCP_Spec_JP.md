@@ -106,7 +106,9 @@ Lite は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリ�
 > - 1 エントリの自動保存：**50–200 文字推奨**（1 エントリ 1 事実）。
 > - 検索クエリ：**2,000 文字**（`search_query_max_chars` で調整可能）。
 > - ベクトル検索：レコードの先頭 **~2,000 文字** のみがセマンティック検索対象（モデル上限 512 トークン）。それ以降は保存・BM25 検索可能だがベクトル類似性には見えない。
-> - **長文貼り付けの扱い**：ユーザーが長文（仕様書・記事・ログ等）を貼った場合、LLM はそれをそのまま保存してはならない。内容を読解し、各要点を短文（~50–200 字）に抽出して、1 事実ごとに `save_memory` を呼ぶこと。
+> - **長文貼り付けの扱い（2 モード）**：
+>   - **要点抽出（推奨・事実ベースの記憶）**：内容を読解し、各要点を短文（~50–200 字）に抽出して 1 事実ごとに `save_memory` を呼ぶ。検索精度・アクセス頻度ブースト・重要度調整の効果が最大化される。
+>   - **全文保存（verbatim recall）**：ユーザーが「この設定資料を後で同じものを表示してほしい」のように**原文をそのまま再現したい**場合は、長文を 1 回の `save_memory` に渡してよい。サーバーは `chunk_threshold`（既定 400 文字）を超える本文を自動的にスライディングウィンドウでチャンク化し、同時に親ドキュメント（`doc:<uuid>`）に全文を verbatim 保存する。後続の `search_memory` で任意のチャンクがヒットすると、親ドキュメントの全文が復元される（[§3.11](#311-全文再現親ドキュメントチャンクパターン) 参照）。
 
 ---
 
@@ -191,35 +193,62 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 ### 3.5 データレイアウト
 
 ```
-mem:<uuid>                  HASH
+mem:<uuid>                  HASH（メモリレコード or チャンク）
     id              string      UUIDv7（キーサフィックスと同じ）
-    content         string      元テキスト（purify 済み）
+    content         string      元テキスト（purify 済み；チャンクなら部分文）
+    content_ngram   string      CJK バイグラム展開（BM25 用のサイドチャネル）
     timestamp       string      ISO 8601 UTC
     timestamp_epoch number      unix 秒（SORTABLE）
     owner_id        string      TAG
     local_id        string      TAG
     agent_name        string      TAG
     session_id      string      TAG
+    importance      number      0.5〜2.0（save_memory 時指定、既定 1.0）
+    access_count    number      検索ヒット回数（頻度ブースト用）
+    parent_id       string      TAG 親ドキュメント id（独立メモリなら空文字列）
     embedding       bytes       FLOAT32 × 768（リトルエンディアン）
     TTL                         ttl_seconds（既定 604 800）
 
 mem:sha:<sha1>              STRING
-    value = 対応する mem id
+    value = 対応する mem id（独立メモリのみ；チャンクは付けない）
     TTL = mem:<uuid> と同値
+
+doc:<uuid>                  HASH（親ドキュメント — 長文 verbatim 保存用。RediSearch 非インデックス）
+    id              string      UUIDv7
+    content         string      元の全文 verbatim
+    timestamp       string      ISO 8601 UTC
+    timestamp_epoch number      unix 秒
+    owner_id        string
+    local_id        string
+    agent_name        string
+    session_id      string
+    chunk_count     number      生成されたチャンク数
+    TTL                         ttl_seconds
+
+docsha:<sha1>               STRING
+    value = 対応する doc id（親全文の完全一致ガード）
+    TTL = doc:<uuid> と同値
 
 n3mc_idx                    RediSearch インデックス、ON HASH PREFIX 1 mem:
     SCHEMA:
-        content         TEXT
+        content         TEXT weight 1.0
+        content_ngram   TEXT weight 0.8
         timestamp_epoch NUMERIC SORTABLE
         owner_id        TAG
         local_id        TAG
         agent_name        TAG
         session_id      TAG
+        importance      NUMERIC
+        access_count    NUMERIC
+        parent_id       TAG
         embedding       VECTOR FLAT 6 TYPE FLOAT32 DIM 768 DISTANCE_METRIC COSINE
 ```
 
 - **主キー**：UUIDv7（時刻順、挿入時に生成）。リファレンス実装は `uuid_utils.uuid7` を使用。
-- **削除のセマンティクス**：`delete_memory` は単一パイプライン内で `mem:<uuid>` とその兄弟 `mem:sha:<sha1>`（`HGET mem:<uuid> content` → sha1 で取得）を削除する。ハッシュが消えれば RediSearch はインデックスエントリを自動的に削除する。
+- **親ドキュメントは非インデックス**：`doc:` / `docsha:` は RediSearch の `PREFIX 1 mem:` に該当しないため検索インデックス対象外。検索ヒットは常にチャンク（`mem:*`）経由で、親は post-lookup で引く（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。
+- **削除のセマンティクス**：`delete_memory` は ID のキーを見て自動分岐する：
+  - ID が `doc:<uuid>` に存在 → 親ドキュメント＋`docsha:<sha1>`＋`parent_id` に一致する全チャンクを単一パイプラインで削除（cascade）。
+  - それ以外 → `mem:<uuid>` とその sha ガードを削除（従来挙動）。
 
 ### 3.6 ランキング式
 
@@ -262,9 +291,11 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
 ### 3.7 トークナイズと句読点処理
 
-**トークナイザ**：RediSearch 内蔵のトークナイザ（空白＋句読点区切り、大文字小文字統一）。有償版で使われる Porter ステマーは本版では利用不可 — Lite は RediSearch 既定動作を明示的なトレードオフとして受け入れる。
+**トークナイザ**：RediSearch 内蔵のトークナイザ（空白＋句読点区切り、大文字小文字統一）。有償版で使われる Porter ステマーは本版では利用不可。
 
-**クエリ整形** — ユーザー入力クエリは RediSearch へ送る前に `strip_fts_punctuation` を適用し、残った RediSearch 特殊文字をバックスラッシュでエスケープする。`content` はハッシュにそのまま保存する（RediSearch が動的にトークナイズする）。
+**CJK バイグラム展開**：日本語・中国語は単語間スペースがないため、素の RediSearch トークナイザでは 1 文が 1 トークンに潰れ BM25 がほぼ効かない。これを補うため、保存時に `content` 中の連続 CJK ランを **オーバーラップバイグラム**（例：「記憶装置」→「記憶 憶装 装置」）に展開し、並列の `content_ngram` TEXT フィールドに格納する。BM25 検索はクエリ側にも同じ展開を適用した上で `@content:(...) | @content_ngram:(...)` の OR クエリを走らせるため、日本語の部分一致が RediSearch 内で機能する。ベクトル検索側には一切干渉しない（e5 埋め込みは日本語を直接扱える）。
+
+**クエリ整形** — ユーザー入力クエリは RediSearch へ送る前に `strip_fts_punctuation` を適用し、CJK バイグラム展開ののち残った RediSearch 特殊文字をバックスラッシュでエスケープする。`content` はハッシュにそのまま（verbatim）保存する（RediSearch が動的にトークナイズする）。
 
 ```python
 _PUNCT_STRIP_RE = re.compile(r'[,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?`]')
@@ -275,12 +306,23 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 ### 3.8 重複判定
 
-`save_memory` 呼び出し毎に、以下の順で重複を拒否：
+`save_memory` は入力本文長が `chunk_threshold`（既定 400 文字）以下かどうかで分岐する。
+
+**(A) 単一チャンクパス**（本文が `chunk_threshold` 以下）：以下の順で重複を拒否する。
 
 1. **完全一致（O(1)）** — `EXISTS mem:sha:<sha1(content)>`。キーが存在すれば `{"status": "duplicate", "saved": false}` を返す。
 2. **近似（意味的）重複** — 埋め込みを計算し、現在の `owner_id` で絞った KNN=1 を `@embedding` に対して実行、`cosine_distance` → `cos_sim` に変換。`cos_sim >= dedup_threshold`（既定 `0.95`）なら `{"status": "near_duplicate", "saved": false, "similarity": <値>}`。
 
 両チェックを通過した場合のみ、HSET + EXPIRE + sha1 ガードのパイプラインへ進む。
+
+**(B) マルチチャンクパス**（本文が `chunk_threshold` 超）：重複判定は**親ドキュメント全文**のレベルでのみ行う。
+
+1. **親レベル完全一致（O(1)）** — `EXISTS docsha:<sha1(full_text)>`。キーが存在すれば `{"status": "duplicate", "saved": false, "parent_id": "<既存>"}` を返す。
+2. チャンクは個別の sha ガードを付けず、近似重複チェックもバイパスする。理由：スライディングウィンドウで生成される隣接チャンクは設計上ほぼ重複しており、個別に dedup すると自分自身を却下してしまう。
+
+親レベル全文一致を通過した場合、単一 `save_memory` 応答内で：
+- `doc:<parent_id>` に HSET + EXPIRE + `docsha:<sha1>` ガードを書く
+- `mem:<chunk_id>` を各チャンクにつき HSET + EXPIRE（sha ガード無し、`parent_id` フィールドに親 ID）
 
 ### 3.9 起動シーケンスと自己回復
 
@@ -315,6 +357,40 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 
 これは有償版（FTS 句読点移行・vec モデル版移行・未インデックス行修復ループ）からの意図的な簡略化。Lite では最古レコードが高々 7 日なので、移行対象が存在しない。
 
+### 3.11 全文再現（親ドキュメント＋チャンクパターン）
+
+`save_memory` に渡された本文が `chunk_threshold`（既定 400 文字）を超えた場合、サーバーは以下を自動実行する：
+
+1. 本文全体を `chunk_threshold` 文字のスライディングウィンドウ（オーバーラップ `chunk_overlap`、既定 100 文字）に分割する。
+2. 新規 `parent_id`（UUIDv7）を採番し、`doc:<parent_id>` に全文 verbatim（purify のみ適用・切り詰め無し）を HSET で書く。`docsha:<sha1(full_text)>` に親レベル完全一致ガードを設定する。
+3. 各チャンクを個別の `mem:<chunk_id>` として HSET + EXPIRE で書き、`parent_id` TAG フィールドに親 ID を格納する（sha ガード・近似 dedup はスキップ）。
+
+`search_memory` 側の整合：
+
+- `hybrid_search` は通常どおりチャンクを対象に BM25 + ベクトル検索を行い、各候補の `parent_id` を結果辞書に含める。
+- ディスパッチャは結果を走査し、`parent_id` が非空のヒットについて：
+  - 同じ `parent_id` が既出 → 重複として破棄（最高スコアのヒットのみ残す）
+  - 初出 → `doc:<parent_id>` を HGET し、`content` を親の全文に置換、ID も親 ID に差し替える
+- 最終出力は markdown 先頭に `[doc]` タグ付きで表示される。
+
+`list_memories` 側の整合：
+
+- 標準のインデックス検索は `-@parent_id:{*}` フィルタでチャンクを除外する（独立メモリのみ拾う）。
+- これに `SCAN doc:*` でオーナー一致の親ドキュメントを重ねて timestamp 降順でマージする。
+- 親は `[doc×N]`（N=`chunk_count`）タグ付きで表示される。
+
+`delete_memory` 側の整合：
+
+- ID が `doc:<uuid>` キーを指していれば、親＋`docsha:`＋`@parent_id:{<id>}` にマッチする全チャンクを単一パイプラインで連鎖削除する。
+- それ以外は従来どおり `mem:<uuid>` とその sha ガードを削除する。
+
+**設計上の不変条件**：
+- 親レコードは検索インデックスに含めない（`PREFIX 1 mem:` の外に置く）。これによりランキング式は常にチャンク本文に対して計算され、親の長大な本文が time_decay / BM25 を歪めない。
+- `stored_importance` / `access_count` はチャンクにのみ付く。親ドキュメントは「verbatim の箱」であり、ランキング要素を持たない。
+- 親が生存している限り、チャンクが 1 個でもヒットすれば全文が返る。親の TTL が切れた場合、孤児チャンクは個別メモリとして（短文ヒットの形で）表示される（退行ではなく graceful degrade）。
+
+**用途**：ユーザーが「この設定資料 / 仕様書 / 記事をあとで verbatim に取り出したい」と要求する場面。要点抽出との使い分けは [§1 の「長文貼り付けの扱い（2 モード）」](#1-ビジョン) を参照。
+
 ---
 
 ## 4. MCP プロトコル表面
@@ -337,10 +413,10 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
-| `search_memory` | `query: string, limit?: int`              | ハイブリッド（ベクトル + BM25）検索、時間減衰ランキング。markdown を返す。 |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string` | 完全 + 近似の重複判定後、HSET + EXPIRE。`ttl_seconds` を含む JSON を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。 |
-| `list_memories` | `limit?: int (既定 20)`                   | 直近エントリを新しい順。markdown を返す。                                 |
-| `delete_memory` | `id: string`                              | `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` をアトミックに実行。               |
+| `search_memory` | `query: string, limit?: int`              | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブーストランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。markdown を返す。 |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number` | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `ttl_seconds` を含む JSON を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。 |
+| `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。親は `[doc×N]` タグ付き。チャンクは隠蔽（`-@parent_id:{*}` フィルタ）。 |
+| `delete_memory` | `id: string`                              | ID が親（`doc:<uuid>`）なら親＋`docsha:`＋該当 `parent_id` を持つ全チャンクを連鎖削除。それ以外は `mem:<uuid>` とその sha ガードをアトミック削除。 |
 | `repair_memory` | —                                         | `ensure_index()` を実行。[§3.10](#310-修復) 参照。                         |
 
 全ツールの応答は単一の `TextContent`。`save_memory` / `delete_memory` / `repair_memory` は JSON 文字列、`search_memory` / `list_memories` は人間可読 markdown。
@@ -359,7 +435,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 1. **先に検索** — 各ユーザーターンの先頭で、意図を反映した簡潔なクエリで `search_memory` を呼ぶ。
 2. **交互ごとに保存** — 意味のある応答後に `save_memory` を呼び、意図の言い換えと結論（各 50–200 字）を保存。**Lite 文面では「7 日で消える」旨を LLM に明示する。**
-3. **長文貼り付けから抽出** — ユーザー貼り付けテキストを個別事実に分割、1 事実ごとに `save_memory`。
+3. **長文の扱い（2 モード）** — 既定は個別事実抽出：ユーザー貼り付けテキストを短文に分割し 1 事実ごとに `save_memory`。ただしユーザーが**原文をそのまま後で取り出したい**意図を示した場合（「この設定資料を保存」「この仕様書をあとで verbatim に表示して」等）は、長文をそのまま単一の `save_memory` に渡してよい — サーバーが自動的に親ドキュメント＋チャンク化を行い全文 verbatim 再現を保証する（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。
 4. **ノイズをスキップ** — 挨拶・確認質問・機械的な了解は保存しない。
 5. **明示要求を尊重** — 「これは保存しないで」「忘れて」に従う（`delete_memory` を使用）。
 
@@ -375,17 +451,27 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 ```json
 {
-  "owner_id":               "<UUIDv4 自動生成>",
-  "local_id":               "<UUIDv4 自動生成>",
-  "redis_url":              "redis://localhost:6379/0",
-  "ttl_seconds":            604800,
-  "dedup_threshold":        0.95,
-  "half_life_days":         3,
-  "bm25_min_threshold":     0.1,
-  "search_result_limit":    20,
-  "context_char_limit":     3000,
-  "min_score":              0.2,
-  "search_query_max_chars": 2000
+  "owner_id":                 "<UUIDv4 自動生成>",
+  "local_id":                 "<UUIDv4 自動生成>",
+  "redis_url":                "redis://localhost:6379/0",
+  "ttl_seconds":              604800,
+  "dedup_threshold":          0.95,
+  "half_life_days":           3,
+  "bm25_min_threshold":       0.1,
+  "search_result_limit":      20,
+  "context_char_limit":       3000,
+  "min_score":                0.2,
+  "search_query_max_chars":   2000,
+  "chunk_threshold":          400,
+  "chunk_overlap":            100,
+  "access_count_enabled":     true,
+  "access_count_weight":      0.02,
+  "access_count_max_boost":   0.5,
+  "ttl_refresh_on_search":    true,
+  "ttl_refresh_top_k":        5,
+  "lexical_rerank_enabled":   true,
+  "rerank_weight":            0.3,
+  "rerank_phrase_weight":     0.2
 }
 ```
 
@@ -395,6 +481,10 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `context_char_limit` — 下流ツールのクライアント側トリミング用に予約（内部では未使用）。
 - `min_score` — このスコア未満の結果を除外（既定 `0.2`）。`0.0` で無効化。
 - `search_query_max_chars` — クエリから使う最大文字数（既定 `2000`；埋め込みモデルが ~512 トークンで飽和）。
+- `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズとオーバーラップ（既定 400 / 100 文字）。本文長がこの閾値を超えた場合に親ドキュメント＋チャンク化（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）に入る。
+- `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — アクセス頻度ブーストの有効化・係数・上限（[§3.6](#36-ランキング式)）。`false` で完全無効化、`stored_importance` のみが重みになる。
+- `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索上位 K 件に対する TTL 再設定と `access_count` インクリメント。再設定は既存エントリの TTL をリセットするのみで、新規エントリの寿命を超えて延長することはない。
+- `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — 融合スコア後の軽量語彙リランカー（[§3.6](#36-ランキング式)）。`false` で従来スコア素通し。
 
 > **1 PC 内の複数アカウント**：OS ユーザーごとに各自の `config.json` で動く。Redis を共有したい場合は両方の設定の `redis_url` を揃える — エントリは `owner_id` TAG フィルタで分離される。
 
@@ -521,9 +611,8 @@ AI が本仕様書から実装を再生成した後、以下の順でレビュ�
 
 Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカーで意図的に止めている。以下の拡張は **出荷仕様には含まれない** — 将来ユーザーや AI が「試してみたい」となった時に迷わないよう、拡張余地の見取り図として記す。いずれも Lite 版が正しく動作するために必須ではなく、各々が「精度 vs レイテンシ」のトレードである。
 
-- **クロスエンコーダ・リランカー** — `hybrid_search` が返した上位 N 候補を、小型のクロスエンコーダ（例: `cross-encoder/ms-marco-MiniLM-L-12-v2`、~130 MB / `BAAI/bge-reranker-base`、~278 MB）で再ランキングする。現代的なノート PC で `search_memory` 1 回あたり **+100〜300 ms の CPU レイテンシ**（上位 50 件リランク）を加え、言い換えの多いクエリで概ね **精度 +1 ポイント** を得る見立て。差し込み位置は `processor.hybrid_search` の融合スコアソート後、`min_score` フィルタの前。リランカー無効時には従来スコアを素通しできるよう既定フォールバックを残すこと。
-- **保存時チャンキング** — `save_memory` が 2000 文字超の本文を受け取った場合、~500 文字のスライディングウィンドウ（重なり ~100 文字）に分割し、各チャンクを独立した `mem:<uuid>` として保存、共通の `source_id` フィールドで `search_memory` 側が再グループ化できるようにする。書き込みは増えるが、長い貼り付け（仕様書・記事・ログ）での再現率は顕著に改善する。現状の Lite 版は振る舞い指示の *「各キー事実を短文として別個に抽出して保存する」* でこれを代替している — チャンキングを入れればその指示は任意化できる。
+- **クロスエンコーダ・リランカー** — `hybrid_search` が返した上位 N 候補を、小型のクロスエンコーダ（例: `cross-encoder/ms-marco-MiniLM-L-12-v2`、~130 MB / `BAAI/bge-reranker-base`、~278 MB）で再ランキングする。現代的なノート PC で `search_memory` 1 回あたり **+100〜300 ms の CPU レイテンシ**（上位 50 件リランク）を加え、言い換えの多いクエリで概ね **精度 +1 ポイント** を得る見立て。差し込み位置は `processor.hybrid_search` の融合スコアソート後、`min_score` フィルタの前。リランカー無効時には従来スコアを素通しできるよう既定フォールバックを残すこと。なお本版には軽量な語彙リランカーが既にデフォルト有効で組み込まれており（`lexical_rerank_enabled` [§6](#6-設定)）、クロスエンコーダはその上位互換として差し替える形になる。
 - **HyDE（Hypothetical Document Embeddings）** — ユーザーのクエリを埋め込む前に、小型 LLM で「仮の回答」を合成し、その回答をクエリの代わりに（または併用で）埋め込む。クエリが短く曖昧で、記憶側が長く具体的な場合に効く。検索ごとに LLM ホップが入るため、「外部 API コール無し」を謳う Lite 版とは相性が悪い — ローカル LLM が既に利用可能な場合に限り選択肢となる。
-- **日本語形態素解析** — RediSearch の既定トークナイザは空白・句読点で分割するため、単語間にスペースを持たない日本語テキストは 1 文がほぼ 1 つの BM25 トークンに潰れ、キーワード関連度は実質「部分文字列一致」レベルまで退化する。保存時に形態素解析器で `text` 本文を事前分割する — 候補は `fugashi` + `unidic-lite`（MeCab ベース、~50 MB）、`SudachiPy` + `sudachidict-core`（~70 MB、A/B/C 三段の分割粒度）、バイナリ依存を避けたいなら純 Python の `Janome` — 表層形をスペース結合したものを並列 `text_tokens` TEXT フィールドに格納し、BM25 検索はこのフィールドを参照する。ベクトル検索側は影響なし（e5 埋め込みモデルは日本語を直接扱える）、表示用の生 `text` はそのまま保持する。見込みコストは `save_memory` 1 回あたり +5〜20 ms、日本語クエリでの精度改善は誤差ではなく明確な向上として現れる。日本語を含む運用ではこれは「あれば嬉しい」というより**ほぼ必須**に近く、英語のみの運用であれば省略しても安全である。
+- **日本語形態素解析** — 本版はすでに [§3.7](#37-トークナイズと句読点処理) の通り CJK バイグラム展開で日本語・中国語 BM25 を補強している。さらに精度を求めるなら保存時に形態素解析器で `text` 本文を事前分割する — 候補は `fugashi` + `unidic-lite`（MeCab ベース、~50 MB）、`SudachiPy` + `sudachidict-core`（~70 MB、A/B/C 三段の分割粒度）、バイナリ依存を避けたいなら純 Python の `Janome` — 表層形をスペース結合したものを並列 `text_tokens` TEXT フィールドに格納し、BM25 検索はこのフィールドを参照する。ベクトル検索側は影響なし（e5 埋め込みモデルは日本語を直接扱える）、表示用の生 `text` はそのまま保持する。見込みコストは `save_memory` 1 回あたり +5〜20 ms、バイグラム展開との差分は語境界の厳密性で、複合語・派生形の識別で差が出る。
 
-4 案はいずれも加算的で、Redis スキーマ既存フィールドや TTL / 重複判定契約の変更を要求しない（日本語トークナイザは並列フィールドを**追加**するのみ）。将来の実装者は機能フラグとして独立に扱い（既定 OFF）、各々ベースラインランカーに対して単独でベンチマークすべきである。
+3 案はいずれも加算的で、Redis スキーマ既存フィールドや TTL / 重複判定契約の変更を要求しない（日本語トークナイザは並列フィールドを**追加**するのみ）。将来の実装者は機能フラグとして独立に扱い（既定 OFF）、各々ベースラインランカーに対して単独でベンチマークすべきである。

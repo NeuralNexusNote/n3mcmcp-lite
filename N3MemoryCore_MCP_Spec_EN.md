@@ -106,7 +106,9 @@ The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Market
 > - Auto-save per entry: **50–200 characters recommended** (one fact per entry).
 > - Search query: **2,000 characters** (configurable via `search_query_max_chars`).
 > - Vector search: Only the first **~2,000 characters** of any record are semantically searchable (embedding model limit: 512 tokens). Beyond this, content is stored and BM25-searchable but invisible to vector similarity.
-> - **Large text handling**: When the user pastes a long text (spec, article, log, etc.), the LLM must NOT save it as-is. Instead: read and understand the full content, extract each key fact as a separate short sentence (~50–200 chars), and call `save_memory` once per fact.
+> - **Large text handling (two modes)**:
+>   - **Fact extraction (preferred for fact-based memory)**: read and understand the content, extract each key fact as a separate short sentence (~50–200 chars), and call `save_memory` once per fact. Maximises search precision, access-frequency boost, and per-fact importance tuning.
+>   - **Verbatim recall (whole-document save)**: when the user wants the exact original text back later ("save this setting doc, I want to see the same thing again"), pass the long body in a single `save_memory` call. The server auto-splits content longer than `chunk_threshold` (default 400 chars) into overlapping chunks while also persisting the original full text as a parent document (`doc:<uuid>`). A later `search_memory` that hits any chunk reconstructs the full verbatim content of the parent (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 
 ---
 
@@ -191,35 +193,65 @@ On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline
 ### 3.5 Data Layout
 
 ```
-mem:<uuid>                  HASH
+mem:<uuid>                  HASH (memory record OR chunk)
     id              string      UUIDv7 (same as the key suffix)
-    content         string      original text (post-purify)
+    content         string      original text (post-purify; chunk text if chunked)
+    content_ngram   string      CJK bigram expansion (BM25 side channel)
     timestamp       string      ISO 8601 UTC
     timestamp_epoch number      unix seconds (SORTABLE)
     owner_id        string      TAG
     local_id        string      TAG
     agent_name        string      TAG
     session_id      string      TAG
+    importance      number      0.5–2.0 (from save_memory; default 1.0)
+    access_count    number      search-hit counter (feeds frequency boost)
+    parent_id       string      TAG — parent doc id when this row is a chunk
+                                (empty string for standalone memories)
     embedding       bytes       FLOAT32 * 768 little-endian
     TTL                         ttl_seconds (default 604 800)
 
 mem:sha:<sha1>              STRING
-    value = the associated mem id
+    value = the associated mem id (standalone rows only;
+            chunks do NOT get a per-chunk sha guard)
     TTL = same as mem:<uuid>
+
+doc:<uuid>                  HASH (parent document — verbatim whole-body store;
+                                   NOT in the RediSearch index)
+    id              string      UUIDv7
+    content         string      full verbatim body
+    timestamp       string      ISO 8601 UTC
+    timestamp_epoch number      unix seconds
+    owner_id        string
+    local_id        string
+    agent_name        string
+    session_id      string
+    chunk_count     number      number of chunks emitted for this doc
+    TTL                         ttl_seconds
+
+docsha:<sha1>               STRING
+    value = associated doc id (parent-level exact-duplicate guard)
+    TTL = same as doc:<uuid>
 
 n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
     SCHEMA:
-        content         TEXT
+        content         TEXT weight 1.0
+        content_ngram   TEXT weight 0.8
         timestamp_epoch NUMERIC SORTABLE
         owner_id        TAG
         local_id        TAG
         agent_name        TAG
         session_id      TAG
+        importance      NUMERIC
+        access_count    NUMERIC
+        parent_id       TAG
         embedding       VECTOR FLAT 6 TYPE FLOAT32 DIM 768 DISTANCE_METRIC COSINE
 ```
 
 - **Primary Key**: UUIDv7 (time-sortable; generated at insert time). The reference implementation uses `uuid_utils.uuid7`.
-- **Delete semantics**: `delete_memory` deletes `mem:<uuid>` and its sibling `mem:sha:<sha1>` (fetched via `HGET mem:<uuid> content` → sha1) in a single pipeline. Redis removes the index entry automatically because the hash no longer exists.
+- **Parent docs are NOT indexed**: `doc:` / `docsha:` keys live outside the `PREFIX 1 mem:` index prefix. Search always hits chunks (`mem:*`) first; the parent is looked up in a post-retrieval step (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
+- **Delete semantics**: `delete_memory` branches on the id:
+  - If a `doc:<uuid>` key exists with that id → delete the parent, `docsha:<sha1>`, and every chunk whose `parent_id` matches, in a single pipeline (cascade).
+  - Otherwise → delete `mem:<uuid>` and its sibling `mem:sha:<sha1>` as before.
 
 ### 3.6 Ranking Formula
 
@@ -262,9 +294,11 @@ Default `half_life_days = 3` — deliberately shorter than the 7-day TTL so that
 
 ### 3.7 Text Tokenization & Punctuation Handling
 
-**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the paid build is **not** available here; the Lite accepts RediSearch's default behaviour as a documented tradeoff.
+**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the paid build is **not** available here.
 
-**Query cleaning** — apply `strip_fts_punctuation` to the user's query string *before* submitting it to RediSearch, and backslash-escape remaining RediSearch special characters. Store raw `content` in the hash (RediSearch will tokenize it on the fly).
+**CJK bigram expansion**: Japanese and Chinese text lacks inter-word spaces, so the raw RediSearch tokenizer collapses whole sentences into a single BM25 token and keyword relevance degenerates. To compensate, at save time the server expands every contiguous CJK run in `content` into **overlapping bigrams** (e.g. "記憶装置" → "記憶 憶装 装置") and stores the result in a parallel `content_ngram` TEXT field. BM25 queries apply the same expansion and run `@content:(...) | @content_ngram:(...)`, giving working Japanese partial-match retrieval without touching vector search (the e5 embedding model handles Japanese natively).
+
+**Query cleaning** — apply `strip_fts_punctuation` to the user's query string *before* submitting it to RediSearch, run CJK bigram expansion, then backslash-escape remaining RediSearch special characters. Store raw (verbatim) `content` in the hash (RediSearch tokenizes on the fly for the `content` field; `content_ngram` holds the pre-expanded form).
 
 ```python
 _PUNCT_STRIP_RE = re.compile(r'[,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?`]')
@@ -275,12 +309,23 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 ### 3.8 Duplicate Rejection
 
-On every `save_memory` call, reject duplicates in this order:
+`save_memory` branches on whether the input body exceeds `chunk_threshold` (default 400 chars).
+
+**(A) Single-chunk path** (body ≤ `chunk_threshold`): reject duplicates in this order.
 
 1. **Exact dedup (O(1))** — `EXISTS mem:sha:<sha1(content)>`. If the key exists, return `{"status": "duplicate", "saved": false}`.
 2. **Near-duplicate (semantic) dedup** — compute the embedding, run KNN=1 against `@embedding` filtered by the current `owner_id`, convert `cosine_distance` → `cos_sim`. If `cos_sim >= dedup_threshold` (default `0.95`), return `{"status": "near_duplicate", "saved": false, "similarity": <value>}`.
 
 Only if both checks pass, proceed with the HSET + EXPIRE + sha1-guard pipeline.
+
+**(B) Multi-chunk path** (body > `chunk_threshold`): dedup runs only at the **parent-document level** against the full body.
+
+1. **Parent-level exact dedup (O(1))** — `EXISTS docsha:<sha1(full_text)>`. If the key exists, return `{"status": "duplicate", "saved": false, "parent_id": "<existing>"}`.
+2. Chunks are **not** given per-chunk sha guards and bypass near-duplicate checks. Reason: sliding-window chunks are overlapping by design and would otherwise reject each other.
+
+If the parent-level exact check passes, a single `save_memory` call writes, in order:
+- `doc:<parent_id>` via HSET + EXPIRE + `docsha:<sha1(full_text)>` guard
+- One `mem:<chunk_id>` per chunk via HSET + EXPIRE (no sha guard; `parent_id` field set to the parent id)
 
 ### 3.9 Startup Sequence & Self-Recovery
 
@@ -315,6 +360,40 @@ Return shape: `{"status": "ok", "message": "index ensured"}`, or `{"status": "er
 
 This is a deliberate simplification versus the paid build (which runs FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 7 d old.
 
+### 3.11 Verbatim Recall (Parent-Document + Chunks Pattern)
+
+When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the server automatically:
+
+1. Splits the body into sliding windows of `chunk_threshold` chars with `chunk_overlap` overlap (default 100).
+2. Allocates a fresh `parent_id` (UUIDv7) and writes `doc:<parent_id>` with the **full verbatim body** (after `purify` — no truncation). Sets `docsha:<sha1(full_text)>` as the parent-level exact-duplicate guard.
+3. Writes each chunk as its own `mem:<chunk_id>` via HSET + EXPIRE with its `parent_id` TAG field populated. Per-chunk sha guards and near-duplicate checks are skipped (see [§3.8 (B)](#38-duplicate-rejection)).
+
+`search_memory` integration:
+
+- `hybrid_search` scores and ranks against the chunk index as usual and includes each chunk's `parent_id` in its result dicts.
+- The dispatcher post-processes hits: for each result whose `parent_id` is non-empty,
+  - If the same `parent_id` has already been emitted → drop as duplicate (keep the highest-scoring hit).
+  - First occurrence → `HGET doc:<parent_id>` to fetch the full body, substitute it into the result, and replace the id with the parent id.
+- Rendered output tags parent hits with `[doc]` in the markdown.
+
+`list_memories` integration:
+
+- The RediSearch query excludes chunks via `-@parent_id:{*}` (only standalone memories).
+- These are merged with parent docs fetched by `SCAN doc:*` (owner-scoped) and sorted by timestamp desc.
+- Parent rows render with a `[doc×N]` tag where N is `chunk_count`.
+
+`delete_memory` integration:
+
+- If the id resolves to a `doc:<uuid>` key, the parent, `docsha:`, and every chunk matching `@parent_id:{<id>}` are deleted in a single pipeline.
+- Otherwise the usual single-memory delete applies.
+
+**Design invariants**:
+- Parent rows are intentionally excluded from the RediSearch index (kept outside `PREFIX 1 mem:`). Ranking therefore always operates on chunk bodies, so a long parent body never distorts time-decay or BM25 norms.
+- `stored_importance` and `access_count` live on chunks, not parents. A parent is the "verbatim box" and carries no ranking state.
+- As long as the parent is alive, a single chunk hit reconstructs the full body. If a parent TTL-expires while chunks are still alive, orphaned chunks surface as their own short-text hits (a graceful degrade, not a regression).
+
+**Use cases**: when the user wants to retrieve an exact original body later ("save this setting/spec/article so I can pull it verbatim"). For the split between this mode and fact-extraction, see [§1 "Large text handling (two modes)"](#1-vision).
+
 ---
 
 ## 4. MCP Protocol Surface
@@ -337,10 +416,10 @@ Five tools are exposed via `tools/list` (same names as the paid build):
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| `search_memory` | `query: string, limit?: int`              | Hybrid (vector + BM25) search, time-decayed ranking. Returns markdown. |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string` | Exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. |
-| `list_memories` | `limit?: int (default 20)`                | Most-recent entries, newest first. Returns markdown.                   |
-| `delete_memory` | `id: string`                              | `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically.                    |
+| `search_memory` | `query: string, limit?: int`              | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Returns markdown. |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number` | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. |
+| `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (filtered via `-@parent_id:{*}`). |
+| `delete_memory` | `id: string`                              | If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk with matching `parent_id`. Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
 | `repair_memory` | —                                         | `ensure_index()`; see [§3.10](#310-repair).                            |
 
 All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `repair_memory` return JSON strings for easy parsing; `search_memory` / `list_memories` return human-readable markdown.
@@ -359,7 +438,7 @@ The instructions require the LLM to:
 
 1. **Search first** — call `search_memory` at the start of every user turn with a concise query reflecting the user's intent.
 2. **Save after each exchange** — call `save_memory` after a meaningful response, with paraphrased intent and key conclusions (50–200 chars each). **Note**: the Lite text explicitly reminds the LLM that entries vanish after 7 d.
-3. **Extract from long pastes** — split user-pasted text into discrete facts, one `save_memory` per fact.
+3. **Long-text handling (two modes)** — default is fact extraction: split user-pasted text into discrete facts, one `save_memory` per fact. However, when the user signals they want the **original body back verbatim later** ("save this setting doc", "remember this spec so I can pull it exactly later"), pass the full long body in a single `save_memory` call — the server automatically creates a parent document + chunks and guarantees verbatim recall (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 4. **Skip noise** — do not save greetings, clarifying questions, or mechanical acknowledgements.
 5. **Respect explicit requests** — honor "don't save this" and "forget that" (use `delete_memory`).
 
@@ -375,17 +454,27 @@ Complete schema (missing fields auto-filled with defaults below):
 
 ```json
 {
-  "owner_id":               "<UUIDv4 auto-generated>",
-  "local_id":               "<UUIDv4 auto-generated>",
-  "redis_url":              "redis://localhost:6379/0",
-  "ttl_seconds":            604800,
-  "dedup_threshold":        0.95,
-  "half_life_days":         3,
-  "bm25_min_threshold":     0.1,
-  "search_result_limit":    20,
-  "context_char_limit":     3000,
-  "min_score":              0.2,
-  "search_query_max_chars": 2000
+  "owner_id":                 "<UUIDv4 auto-generated>",
+  "local_id":                 "<UUIDv4 auto-generated>",
+  "redis_url":                "redis://localhost:6379/0",
+  "ttl_seconds":              604800,
+  "dedup_threshold":          0.95,
+  "half_life_days":           3,
+  "bm25_min_threshold":       0.1,
+  "search_result_limit":      20,
+  "context_char_limit":       3000,
+  "min_score":                0.2,
+  "search_query_max_chars":   2000,
+  "chunk_threshold":          400,
+  "chunk_overlap":            100,
+  "access_count_enabled":     true,
+  "access_count_weight":      0.02,
+  "access_count_max_boost":   0.5,
+  "ttl_refresh_on_search":    true,
+  "ttl_refresh_top_k":        5,
+  "lexical_rerank_enabled":   true,
+  "rerank_weight":            0.3,
+  "rerank_phrase_weight":     0.2
 }
 ```
 
@@ -395,6 +484,10 @@ Complete schema (missing fields auto-filled with defaults below):
 - `context_char_limit` — reserved for client-side truncation by downstream tools; not used internally.
 - `min_score` — excludes results with score below this value (default `0.2`). Set to `0.0` to disable.
 - `search_query_max_chars` — max characters used from a query (default `2000`; embedding model caps at ~512 tokens).
+- `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (defaults 400 / 100 chars). Bodies longer than the threshold trigger the parent-document + chunks path (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
+- `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — enable flag, per-hit weight, and cap for the frequency boost (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` disables the feature entirely and the formula falls back to `stored_importance` only.
+- `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL-reset and `access_count` increment for the top-K hits after each search. Reset-only (no lifetime extension beyond a fresh save).
+- `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` passes the fused score through unchanged.
 
 > **Multi-account on a single PC**: each OS user runs the server under their own `config.json` by default. To share a Redis across accounts, set the same `redis_url` in both configs — entries are segregated via the `owner_id` TAG filter.
 
@@ -521,9 +614,8 @@ These steps are operated by the human reviewer, not automated tests.
 
 The Lite build intentionally stops at the hybrid + time-decay ranker described in §3.6. The following extensions are **not part of the shipped spec** — they are sketched here so a future AI or contributor has a clean starting map when the user decides to try them. None of them are required for the Lite build to behave correctly; each is a precision-vs-latency trade.
 
-- **Cross-encoder reranker** — after `hybrid_search` returns the top-N candidates, rerank them with a small cross-encoder (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`, ~130 MB, or `BAAI/bge-reranker-base`, ~278 MB). Expect **+100–300 ms CPU latency** per `search_memory` call on a modern laptop (top-50 rerank), in exchange for roughly **+1 precision point** on paraphrase-heavy queries. Drop-in point: between the fused-score sort and the `min_score` filter in `processor.hybrid_search`. Keep the existing score as a fallback when the reranker is disabled.
-- **Chunking on save** — when `save_memory` receives a body longer than ~2000 characters, split it into ~500-character sliding windows (with ~100-char overlap) and store each chunk as its own `mem:<uuid>` entry, all sharing a `source_id` field so `search_memory` can re-group hits. Adds write amplification but materially improves recall on long pastes (specs, articles, logs). Today the Lite build relies on the behavioral instruction *"extract each key fact as a separate short sentence"* instead — chunking would make that instruction optional.
+- **Cross-encoder reranker** — after `hybrid_search` returns the top-N candidates, rerank them with a small cross-encoder (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`, ~130 MB, or `BAAI/bge-reranker-base`, ~278 MB). Expect **+100–300 ms CPU latency** per `search_memory` call on a modern laptop (top-50 rerank), in exchange for roughly **+1 precision point** on paraphrase-heavy queries. Drop-in point: between the fused-score sort and the `min_score` filter in `processor.hybrid_search`. Keep the existing score as a fallback when the reranker is disabled. Note that the shipping build already enables a lightweight lexical reranker by default (`lexical_rerank_enabled`, see [§6](#6-configuration)); a cross-encoder would be a stronger upgrade slotting into the same hook.
 - **HyDE (Hypothetical Document Embeddings)** — before embedding the user's query, ask a small LLM to synthesize a hypothetical *answer* to the query, then embed that answer instead of (or in addition to) the raw query. Helps when queries are short/vague and memories are long/specific. Needs an LLM hop per search, so it is a poor fit for the Lite build's "no external API calls" promise unless a local model is already available.
-- **Japanese morphological analysis** — RediSearch's default tokenizer splits on whitespace and punctuation, so Japanese text (which has no inter-word spaces) collapses into roughly one BM25 token per sentence and keyword relevance degenerates to something close to "exact substring match." Pre-tokenize the `text` body at save time with a morphological analyzer — candidates: `fugashi` + `unidic-lite` (MeCab-based, ~50 MB), `SudachiPy` + `sudachidict-core` (~70 MB, multi-granularity A/B/C modes), or pure-Python `Janome` when binary dependencies are a problem — store the space-joined surface forms in a parallel `text_tokens` TEXT field, and point BM25 search at that field. Vector search is unaffected (the e5 embedding model handles Japanese natively) and the raw `text` field stays untouched for display. Expected cost: +5–20 ms per `save_memory` call; precision gain on Japanese queries is material, not marginal. For a mixed-language deployment this is closer to a requirement than a nice-to-have; English-only deployments can skip it safely.
+- **Japanese morphological analysis** — the shipping build already supplements RediSearch's default tokenizer with CJK bigram expansion (see [§3.7](#37-text-tokenization--punctuation-handling)), which covers the basic case. For further precision, pre-tokenize the body at save time with a morphological analyzer — candidates: `fugashi` + `unidic-lite` (MeCab-based, ~50 MB), `SudachiPy` + `sudachidict-core` (~70 MB, multi-granularity A/B/C modes), or pure-Python `Janome` when binary dependencies are a problem — store the space-joined surface forms in a parallel `text_tokens` TEXT field and point BM25 search at that field. Vector search is unaffected (e5 handles Japanese natively) and the raw body stays untouched for display. Expected cost: +5–20 ms per `save_memory` call; the delta versus bigram expansion shows up most on compound words and inflected forms.
 
-All four extensions are additive — none of them require changes to the Redis schema's existing fields or the TTL/dedup contracts (the Japanese tokenizer only **adds** a parallel field). A future implementer should treat them as separate feature flags, default-off, and benchmark each independently against the baseline ranker.
+All three extensions are additive — none of them require changes to the Redis schema's existing fields or the TTL/dedup contracts (the morphological tokenizer only **adds** a parallel field). A future implementer should treat them as separate feature flags, default-off, and benchmark each independently against the baseline ranker.
