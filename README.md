@@ -183,15 +183,23 @@ variable (takes precedence over the config file).
 ## Ranking formula
 
 ```
-final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay
+final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay * b_local
 
-time_decay = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 3 days)
+time_decay   = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 3 days)
+b_local      = clamp(0.5, 2.0, stored_importance + access_boost)
+access_boost = min(0.5, access_count * 0.02)
 ```
 
 With a default 3-day half-life (shorter than the 7-day TTL), `time_decay`
 is meaningful in the Lite build: a fresh memory scores 1.0, a 3-day-old
 one exactly 0.5, and a 7-day-old (near-expiry) entry ≈ 0.20 — pushing
 recent context ahead in the ranking.
+
+**Auto-importance (access-frequency boost)**: each time `search_memory`
+returns a memory in its top 5 hits, that memory's `access_count` is
+incremented by 1 and `b_local` rises by 0.02 on future queries (capped at
++0.5). No LLM judgement required — frequently-useful memories naturally
+float to the top through CPU-only self-tuning.
 
 ## Development
 

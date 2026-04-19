@@ -53,7 +53,12 @@ OPERATIONAL NOTES
 - Storage is ephemeral: 7d TTL per entry; nothing survives a fresh
   Redis container.
 - Exact and semantic duplicates are auto-rejected by the server.
-- Search ranks by: 0.7 * cosine_similarity + 0.3 * BM25, decayed by age.
+- Search ranks by: 0.7 * cosine_similarity + 0.3 * BM25, decayed by age
+  and adjusted by importance.
+- Importance auto-tunes from access frequency: every time a memory is
+  returned in the top search hits, its access_count increments and it
+  receives a small, capped boost on future queries. You don't need to
+  do anything — frequently-useful memories naturally rise over time.
 - The server is local — Redis runs on the user's machine (no cloud).
 - For durable memory, the user can upgrade to the paid SQLite-backed
   N3MemoryCore build.

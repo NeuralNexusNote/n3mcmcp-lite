@@ -29,12 +29,14 @@ from .database import (
     ensure_index,
     get_all_memories,
     get_redis_client,
+    increment_access_counts,
     insert_memory,
     ping,
     search_vector,
 )
 from .instructions import SERVER_INSTRUCTIONS
 from .processor import (
+    chunk_text,
     cosine_sim_from_distance,
     embed_passage,
     hybrid_search,
@@ -125,6 +127,7 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Persist a short memory entry (50-200 chars ideal). "
                 "Call once per distinct fact. Exact and near-duplicates are auto-rejected. "
+                "Long text (>chunk_threshold chars) is automatically split into overlapping chunks. "
                 "Lite entries expire after 7 days."
             ),
             inputSchema={
@@ -141,6 +144,12 @@ async def list_tools() -> list[types.Tool]:
                     "owner_id": {
                         "type": "string",
                         "description": "Optional owner identifier. Must match the server's configured owner_id if provided.",
+                    },
+                    "importance": {
+                        "type": "number",
+                        "description": "Importance multiplier 0.5–2.0 (default 1.0). Higher values rank memories higher in search results.",
+                        "minimum": 0.5,
+                        "maximum": 2.0,
                     },
                 },
                 "required": ["content"],
@@ -236,6 +245,21 @@ def _tool_search(args: dict) -> list[types.TextContent]:
     if not results:
         return [types.TextContent(type="text", text="(no matching memories)")]
 
+    # Update access counts + extend TTL for top-K hits in a single round-trip.
+    # Access counts feed the auto-importance boost in hybrid_search on future queries.
+    top_k = int(_CONFIG.get("ttl_refresh_top_k", 5))
+    hit_ids = [r["id"] for r in results[:top_k]]
+    if hit_ids and (
+        _CONFIG.get("access_count_enabled", True)
+        or _CONFIG.get("ttl_refresh_on_search", True)
+    ):
+        ttl = (
+            int(_CONFIG.get("ttl_seconds", 604800))
+            if _CONFIG.get("ttl_refresh_on_search", True)
+            else None
+        )
+        increment_access_counts(_CLIENT, hit_ids, ttl_seconds=ttl)
+
     lines = ["# N3MemoryCore Lite — Relevant Memories", ""]
     for r in results:
         score = r.get("score", 0)
@@ -244,6 +268,47 @@ def _tool_search(args: dict) -> list[types.TextContent]:
         rid = r.get("id", "")
         lines.append(f"- [{score:.4f}] ({ts}) {content}  _({rid})_")
     return [types.TextContent(type="text", text="\n".join(lines))]
+
+
+def _save_one(text: str, agent_name: Any, ttl_seconds: int, importance: float) -> dict:
+    """Save a single purified text entry. Returns a status dict."""
+    if check_exact_duplicate(_CLIENT, text):
+        return {"status": "duplicate", "saved": False}
+
+    qvec = None
+    try:
+        qvec = embed_passage(text)
+        vec_results = search_vector(
+            _CLIENT, qvec, k=1, owner_id=_CONFIG.get("owner_id"),
+        )
+        if vec_results:
+            top_cos = cosine_sim_from_distance(vec_results[0][1])
+            if top_cos >= _CONFIG.get("dedup_threshold", 0.95):
+                return {"status": "near_duplicate", "saved": False, "similarity": round(top_cos, 4)}
+    except Exception:
+        qvec = None
+
+    try:
+        from uuid_utils import uuid7 as _gen_uuid7
+        record_id = str(_gen_uuid7())
+    except Exception:
+        record_id = str(uuid.uuid4())
+
+    ts = datetime.now(tz=timezone.utc).isoformat()
+    insert_memory(
+        _CLIENT,
+        record_id,
+        text,
+        ts,
+        _CONFIG["owner_id"],
+        qvec,
+        _CONFIG.get("local_id"),
+        agent_name,
+        _SESSION_ID,
+        ttl_seconds=ttl_seconds,
+        importance=importance,
+    )
+    return {"status": "ok", "saved": True, "id": record_id, "ttl_seconds": ttl_seconds}
 
 
 def _tool_save(args: dict) -> list[types.TextContent]:
@@ -260,54 +325,41 @@ def _tool_save(args: dict) -> list[types.TextContent]:
 
     agent_name = args.get("agent_name")
     ttl_seconds = int(_CONFIG.get("ttl_seconds", 604800))
+    importance = float(args.get("importance") or 1.0)
+    importance = max(0.5, min(2.0, importance))
+
     text = purify(content)
 
-    # Exact dedup (sha1 key)
-    if check_exact_duplicate(_CLIENT, text):
-        return [types.TextContent(type="text", text='{"status":"duplicate","saved":false}')]
+    # Auto-chunk long content instead of rejecting or truncating.
+    chunk_threshold = int(_CONFIG.get("chunk_threshold", 400))
+    chunk_overlap = int(_CONFIG.get("chunk_overlap", 100))
+    chunks = chunk_text(text, chunk_size=chunk_threshold, overlap=chunk_overlap)
 
-    # Vector (near-duplicate) dedup
-    qvec = None
-    try:
-        qvec = embed_passage(text)
-        vec_results = search_vector(
-            _CLIENT, qvec, k=1, owner_id=_CONFIG.get("owner_id"),
-        )
-        if vec_results:
-            top_cos = cosine_sim_from_distance(vec_results[0][1])
-            if top_cos >= _CONFIG.get("dedup_threshold", 0.95):
-                return [types.TextContent(
-                    type="text",
-                    text=f'{{"status":"near_duplicate","saved":false,"similarity":{top_cos:.4f}}}',
-                )]
-    except Exception:
-        qvec = None
+    if len(chunks) == 1:
+        result = _save_one(chunks[0], agent_name, ttl_seconds, importance)
+        import json as _json
+        return [types.TextContent(type="text", text=_json.dumps(result))]
 
-    try:
-        from uuid_utils import uuid7 as _gen_uuid7
-        record_id = str(_gen_uuid7())
-    except Exception:
-        record_id = str(uuid.uuid4())
+    # Multi-chunk path: save each chunk, report aggregate result.
+    saved_ids: list[str] = []
+    skipped = 0
+    for chunk in chunks:
+        r = _save_one(chunk, agent_name, ttl_seconds, importance)
+        if r.get("saved"):
+            saved_ids.append(r["id"])
+        else:
+            skipped += 1
 
-    ts = datetime.now(tz=timezone.utc).isoformat()
-
-    insert_memory(
-        _CLIENT,
-        record_id,
-        text,
-        ts,
-        _CONFIG["owner_id"],
-        qvec,
-        _CONFIG.get("local_id"),
-        agent_name,
-        _SESSION_ID,
-        ttl_seconds=ttl_seconds,
-    )
-
-    return [types.TextContent(
-        type="text",
-        text=f'{{"status":"ok","saved":true,"id":"{record_id}","ttl_seconds":{ttl_seconds}}}',
-    )]
+    import json as _json
+    return [types.TextContent(type="text", text=_json.dumps({
+        "status": "ok",
+        "saved": True,
+        "chunks": len(chunks),
+        "saved_count": len(saved_ids),
+        "skipped_count": skipped,
+        "ids": saved_ids,
+        "ttl_seconds": ttl_seconds,
+    }))]
 
 
 def _tool_list(args: dict) -> list[types.TextContent]:

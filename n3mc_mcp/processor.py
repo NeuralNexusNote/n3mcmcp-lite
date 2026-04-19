@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from math import pow
 
 from .database import (
+    cjk_bigram_expand,
     get_memory_by_id,
     search_fts,
     search_vector,
@@ -58,6 +59,84 @@ _CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```', re.MULTILINE)
 def purify(text: str) -> str:
     """Replace multi-line code blocks with '[code omitted]'. Keep inline code as-is."""
     return _CODE_BLOCK_RE.sub('[code omitted]', text)
+
+
+def chunk_text(text: str, chunk_size: int = 400, overlap: int = 100) -> list[str]:
+    """Split text into overlapping fixed-size chunks for server-side RAG.
+
+    Returns a single-element list when text fits within chunk_size.
+    Overlap keeps boundary context intact between adjacent chunks.
+    """
+    if len(text) <= chunk_size:
+        return [text]
+    chunks: list[str] = []
+    start = 0
+    step = chunk_size - overlap
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start += step
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Lexical reranker (second-pass, GPU/LLM free)
+# ---------------------------------------------------------------------------
+_WORD_TOKEN_RE = re.compile(r'\w+', re.UNICODE)
+
+
+def _tokenize_for_rerank(text: str) -> frozenset[str]:
+    """Lowercase tokens with CJK bigram expansion so Japanese terms match."""
+    return frozenset(m.group().lower() for m in _WORD_TOKEN_RE.finditer(cjk_bigram_expand(text)))
+
+
+def lexical_rerank(
+    query: str,
+    results: list[dict],
+    rerank_weight: float = 0.3,
+    phrase_weight: float = 0.2,
+) -> list[dict]:
+    """Lightweight second-pass reranker — no ML, no GPU.
+
+    Signals (all pure string ops):
+      term_coverage  — fraction of unique query tokens found in content
+      phrase_boost   — bonus when the exact query string appears verbatim
+      length_factor  — mild preference for concise, focused entries (≤200 chars)
+
+    Re-scored as:
+      new_score = old_score * (1 + rerank_weight * coverage * phrase_boost
+                                 * (0.5 + 0.5 * length_factor))
+
+    Entries with zero term overlap are not penalised (boost stays ≥ 1.0).
+    """
+    if not results:
+        return results
+
+    query_tokens = _tokenize_for_rerank(query)
+    if not query_tokens:
+        return results
+
+    query_lower = query.lower()
+
+    reranked: list[dict] = []
+    for r in results:
+        content = r.get("content", "")
+        content_tokens = _tokenize_for_rerank(content)
+
+        coverage = len(query_tokens & content_tokens) / len(query_tokens)
+        phrase_boost = 1.0 + phrase_weight if query_lower in content.lower() else 1.0
+        length_factor = min(1.0, 200.0 / max(1, len(content)))
+
+        boost = 1.0 + rerank_weight * coverage * phrase_boost * (0.5 + 0.5 * length_factor)
+
+        entry = dict(r)
+        entry["score"] = round(r["score"] * boost, 4)
+        reranked.append(entry)
+
+    reranked.sort(key=lambda x: x["score"], reverse=True)
+    return reranked
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +210,9 @@ def hybrid_search(
     search_result_limit = config.get("search_result_limit", 20)
     min_score = config.get("min_score", 0.2)
     owner_id = config.get("owner_id") or None
+    access_weight = float(config.get("access_count_weight", 0.02))
+    access_max_boost = float(config.get("access_count_max_boost", 0.5))
+    access_enabled = bool(config.get("access_count_enabled", True))
 
     query_vec = embed_query(query)
     vec_results = search_vector(client, query_vec, k=k, owner_id=owner_id)
@@ -162,7 +244,15 @@ def hybrid_search(
         ts = row.get("timestamp", "") or ""
         decay = time_decay(ts, half_life_days)
 
-        score = final_score(cos, kw, decay, 1.0)
+        stored_importance = float(row.get("importance") or 1.0)
+        if access_enabled:
+            access_count = int(row.get("access_count") or 0)
+            access_boost = min(access_max_boost, access_count * access_weight)
+        else:
+            access_boost = 0.0
+        b_local = max(0.5, min(2.0, stored_importance + access_boost))
+
+        score = final_score(cos, kw, decay, b_local)
 
         if score < min_score:
             continue
@@ -175,4 +265,14 @@ def hybrid_search(
         })
 
     results.sort(key=lambda x: x["score"], reverse=True)
+
+    # Second-pass lexical rerank over the full candidate set.
+    if config.get("lexical_rerank_enabled", True):
+        results = lexical_rerank(
+            query,
+            results,
+            rerank_weight=float(config.get("rerank_weight", 0.3)),
+            phrase_weight=float(config.get("rerank_phrase_weight", 0.2)),
+        )
+
     return results[:search_result_limit]

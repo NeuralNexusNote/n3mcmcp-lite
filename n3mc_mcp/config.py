@@ -36,6 +36,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "context_char_limit": 3000,
     "min_score": 0.2,
     "search_query_max_chars": 2000,
+    # Server-side sliding-window chunking (save_memory auto-splits long text)
+    "chunk_threshold": 400,
+    "chunk_overlap": 100,
+    # Extend TTL of top search hits so frequently-accessed memories survive longer
+    "ttl_refresh_on_search": True,
+    "ttl_refresh_top_k": 5,
+    # Lightweight lexical reranker (second-pass, no GPU/LLM)
+    "lexical_rerank_enabled": True,
+    "rerank_weight": 0.3,       # max score boost factor (0 = disabled)
+    "rerank_phrase_weight": 0.2, # extra multiplier for exact phrase hit
+    # Access-frequency auto-importance (CPU-only, no LLM required)
+    "access_count_enabled": True,
+    "access_count_weight": 0.02,    # per-access boost added to b_local
+    "access_count_max_boost": 0.5,  # cap on cumulative access boost
 }
 
 

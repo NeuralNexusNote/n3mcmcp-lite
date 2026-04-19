@@ -67,6 +67,9 @@ _FTS_SPECIAL_RE = re.compile(r'([,\.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])
 # digits / whitespace / CJK). We strip first and escape what remains.
 _PUNCT_STRIP_RE = re.compile(r'[,\.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?`]')
 
+# CJK Unified Ideographs + common CJK extension blocks.
+_CJK_RUN_RE = re.compile(r'[\u3000-\u9fff\uf900-\ufaff\ufe30-\ufe4f]+')
+
 
 # ---------------------------------------------------------------------------
 # Client / index setup
@@ -78,7 +81,17 @@ def get_redis_client(url: str) -> Redis:
 
 
 def ensure_index(client: Redis) -> None:
-    """Create the RediSearch index if it does not already exist."""
+    """Create the RediSearch index if it does not already exist.
+
+    When the index already exists, attempt to add newer optional fields
+    (content_ngram, importance) via FT.ALTER so existing deployments get
+    the upgrade without a full drop/recreate.
+    """
+    _NEW_FIELDS = [
+        TextField("content_ngram", weight=0.8),
+        NumericField("importance"),
+        NumericField("access_count"),
+    ]
     schema = (
         TextField("content", weight=1.0),
         NumericField("timestamp_epoch", sortable=True),
@@ -95,14 +108,19 @@ def ensure_index(client: Redis) -> None:
                 "DISTANCE_METRIC": "COSINE",
             },
         ),
+        *_NEW_FIELDS,
     )
     definition = IndexDefinition(prefix=[KEY_PREFIX], index_type=IndexType.HASH)
     try:
         client.ft(INDEX_NAME).create_index(schema, definition=definition)
     except ResponseError as e:
-        if "already exists" in str(e).lower():
-            return
-        raise
+        if "already exists" not in str(e).lower():
+            raise
+        # Index already exists — try to add the new fields (idempotent).
+        try:
+            client.ft(INDEX_NAME).alter_schema_add(_NEW_FIELDS)
+        except (ResponseError, Exception):
+            pass  # fields already present or FT.ALTER unsupported
 
 
 def ping(client: Redis) -> bool:
@@ -145,6 +163,23 @@ def _escape_tag(value: str) -> str:
     )
 
 
+def cjk_bigram_expand(text: str) -> str:
+    """Expand contiguous CJK runs into overlapping bigrams separated by spaces.
+
+    Example: "記憶装置" → "記憶 憶装 装置"
+    Non-CJK portions pass through unchanged. Single CJK chars are kept as-is.
+    This lets RediSearch's whitespace tokenizer index each bigram individually,
+    dramatically improving BM25 recall for Japanese / Chinese queries.
+    """
+    def _expand(m: re.Match) -> str:
+        run = m.group(0)
+        if len(run) < 2:
+            return run
+        return " ".join(run[i : i + 2] for i in range(len(run) - 1))
+
+    return _CJK_RUN_RE.sub(_expand, text)
+
+
 def sha1_of(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
@@ -163,6 +198,7 @@ def insert_memory(
     agent_name: Optional[str] = None,
     session_id: Optional[str] = None,
     ttl_seconds: int = 604800,
+    importance: float = 1.0,
 ) -> None:
     """Insert a memory record with TTL. Embedding is required for vector search."""
     try:
@@ -176,12 +212,15 @@ def insert_memory(
     mapping: dict[str, Any] = {
         "id": record_id,
         "content": content,
+        "content_ngram": cjk_bigram_expand(content),
         "timestamp": timestamp,
         "timestamp_epoch": ts_epoch,
         "owner_id": owner_id or "",
         "local_id": local_id or "",
         "agent_name": agent_name or "",
         "session_id": session_id or "",
+        "importance": max(0.5, min(2.0, float(importance))),
+        "access_count": 0,
     }
     if embedding is not None:
         mapping["embedding"] = vector_to_bytes(embedding)
@@ -220,6 +259,31 @@ def delete_memory(client: Redis, record_id: str) -> bool:
 def check_exact_duplicate(client: Redis, content: str) -> bool:
     """O(1) exact-content duplicate check."""
     return bool(client.exists(f"{HASH_PREFIX}{sha1_of(content)}"))
+
+
+def increment_access_counts(
+    client: Redis,
+    record_ids: list[str],
+    ttl_seconds: Optional[int] = None,
+) -> None:
+    """Atomically HINCRBY access_count for each id in a single pipeline.
+
+    When ``ttl_seconds`` is provided, also refreshes each key's TTL so the
+    access-count update and TTL bump ride the same round-trip.
+    Silently ignores missing keys (already expired).
+    """
+    if not record_ids:
+        return
+    pipe = client.pipeline()
+    for rid in record_ids:
+        key = f"{KEY_PREFIX}{rid}"
+        pipe.hincrby(key, "access_count", 1)
+        if ttl_seconds is not None:
+            pipe.expire(key, ttl_seconds)
+    try:
+        pipe.execute()
+    except Exception:
+        pass  # non-critical: access count is a best-effort signal
 
 
 def count_memories(client: Redis, owner_id: Optional[str] = None) -> int:
@@ -333,41 +397,50 @@ def search_fts(
     owner_id: Optional[str] = None,
 ) -> list[tuple[str, float]]:
     """
-    BM25 text search over the ``content`` field.
+    BM25 text search over ``content`` and ``content_ngram`` fields.
 
-    Returns list of (record_id, bm25_score). Higher score = more relevant
-    (RediSearch BM25 scores are already non-negative).
+    Queries are CJK-expanded before matching so that Japanese/Chinese text
+    benefits from bigram tokenization. Falls back to content-only if the
+    content_ngram field is not yet present in the index.
+
+    Returns list of (record_id, bm25_score). Higher score = more relevant.
     """
     cleaned = strip_fts_punctuation(query).strip()
     if not cleaned:
         return []
-    escaped = _escape_redis_query(cleaned)
+    expanded = cjk_bigram_expand(cleaned)
+    escaped = _escape_redis_query(expanded)
 
-    if owner_id:
-        q_str = f"(@content:({escaped}) @owner_id:{{{_escape_tag(owner_id)}}})"
-    else:
-        q_str = f"@content:({escaped})"
+    owner_filter = f" @owner_id:{{{_escape_tag(owner_id)}}}" if owner_id else ""
+    q_str = f"(@content:({escaped}) | @content_ngram:({escaped})){owner_filter}"
 
-    q = (
-        Query(q_str)
-        .scorer("BM25")
-        .with_scores()
-        .return_fields("id")
-        .paging(0, limit)
-        .dialect(2)
-    )
-    try:
-        res = client.ft(INDEX_NAME).search(q)
-    except ResponseError:
-        return []
+    def _run(query_str: str) -> list[tuple[str, float]]:
+        q = (
+            Query(query_str)
+            .scorer("BM25")
+            .with_scores()
+            .return_fields("id")
+            .paging(0, limit)
+            .dialect(2)
+        )
+        try:
+            res = client.ft(INDEX_NAME).search(q)
+        except ResponseError:
+            return []
+        out: list[tuple[str, float]] = []
+        for doc in res.docs:
+            rid = _strip_key_prefix(_as_str(getattr(doc, "id", "")))
+            score = float(getattr(doc, "score", 0.0) or 0.0)
+            if rid:
+                out.append((rid, score))
+        return out
 
-    out: list[tuple[str, float]] = []
-    for doc in res.docs:
-        rid = _strip_key_prefix(_as_str(getattr(doc, "id", "")))
-        score = float(getattr(doc, "score", 0.0) or 0.0)
-        if rid:
-            out.append((rid, score))
-    return out
+    results = _run(q_str)
+    if not results:
+        # Retry with content-only in case content_ngram field is absent.
+        fallback = f"@content:({escaped}){owner_filter}"
+        results = _run(fallback)
+    return results
 
 
 # ---------------------------------------------------------------------------

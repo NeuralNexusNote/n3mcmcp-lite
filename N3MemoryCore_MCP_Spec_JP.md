@@ -226,8 +226,20 @@ n3mc_idx                    RediSearch インデックス、ON HASH PREFIX 1 mem
 有償版と同一：
 
 ```
-Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay
+Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local
 ```
+
+ここで `b_local` は **重要度係数**：
+
+```
+b_local = clamp(0.5, 2.0, stored_importance + access_boost)
+access_boost = min(access_count_max_boost, access_count × access_count_weight)
+```
+
+- `stored_importance`：`save_memory` 時に指定（既定 `1.0`、範囲 `0.5〜2.0`）。
+- `access_boost`：**CPU のみで自動算出される頻度ブースト**。`search_memory` がその記憶を上位 `ttl_refresh_top_k` 件に含めるたび `access_count` が +1 され、次回以降の検索で `access_count × access_count_weight`（既定 `0.02`）だけ `b_local` を押し上げる（上限 `access_count_max_boost = 0.5`）。LLM の介在なく「よく使われる記憶ほど上位に来る」自己調整ループが成立する。
+
+設定で `access_count_enabled: false` にすればブーストを無効化できる（`stored_importance` のみで重み付け）。
 
 **cos_sim** — **RediSearch のコサイン距離から直接導出**：
 

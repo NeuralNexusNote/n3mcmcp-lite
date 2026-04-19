@@ -226,8 +226,20 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
 Identical to the paid build:
 
 ```
-Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay
+Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local
 ```
+
+Where `b_local` is the **importance coefficient**:
+
+```
+b_local = clamp(0.5, 2.0, stored_importance + access_boost)
+access_boost = min(access_count_max_boost, access_count × access_count_weight)
+```
+
+- `stored_importance`: provided at `save_memory` time (default `1.0`, range `0.5–2.0`).
+- `access_boost`: **automatic CPU-only frequency boost**. Every `search_memory` call increments `access_count` by 1 for each memory returned in the top `ttl_refresh_top_k` hits. On subsequent queries that memory receives an additive boost of `access_count × access_count_weight` (default `0.02`), capped at `access_count_max_boost` (default `0.5`). This creates a self-adjusting "frequently-used memories rank higher" loop with zero LLM involvement.
+
+Set `access_count_enabled: false` in config to disable the boost (the formula falls back to `stored_importance` only).
 
 **cos_sim** — **derived directly from RediSearch's cosine distance**:
 
