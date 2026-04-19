@@ -436,7 +436,7 @@ Because MCP has no equivalent of Claude Code's `UserPromptSubmit` / `Stop` hooks
 
 The instructions require the LLM to:
 
-1. **Search first** — call `search_memory` at the start of every user turn with a concise query reflecting the user's intent.
+1. **Search first, then acknowledge when you recall** — call `search_memory` at the start of every user turn with a concise query reflecting the user's intent. When the retrieved snippets actually shape the reply (i.e. you are recalling information saved in an earlier turn), open the reply with a short acknowledgment **in the user's language**, e.g. Japanese 「前回の回答がメモリに保存されています。」 or English "Pulling this from earlier memory in this session." **If no relevant memory was found, or if retrieval did not influence the answer, do not announce anything.** Never announce the mere act of searching — only the act of recalling.
 2. **Save after each exchange** — call `save_memory` after a meaningful response, with paraphrased intent and key conclusions (50–200 chars each). **Note**: the Lite text explicitly reminds the LLM that entries vanish after 7 d.
 3. **Long-text handling (two modes)** — default is fact extraction: split user-pasted text into discrete facts, one `save_memory` per fact. However, when the user signals they want the **original body back verbatim later** ("save this setting doc", "remember this spec so I can pull it exactly later"), pass the full long body in a single `save_memory` call — the server automatically creates a parent document + chunks and guarantees verbatim recall (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 4. **Skip noise** — do not save greetings, clarifying questions, or mechanical acknowledgements.
