@@ -117,7 +117,19 @@ thereafter.
 
 ### 2. Install the package
 
-Install from source (PyPI distribution is not yet available):
+**From PyPI (recommended):**
+
+```bash
+pip install n3memorycore-mcp-lite
+```
+
+Or zero-install via `uvx` (the Claude Code plugin uses this path):
+
+```bash
+uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+```
+
+**From source** (if you want to edit the code):
 
 ```bash
 git clone https://github.com/NeuralNexusNote/n3mcmcp-lite

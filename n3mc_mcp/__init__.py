@@ -14,4 +14,4 @@ Tools:
   - repair_memory   : re-create the RediSearch index if missing
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.4"

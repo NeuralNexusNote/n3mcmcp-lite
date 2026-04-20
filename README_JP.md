@@ -112,7 +112,19 @@ The container name "/redis-stack" is already in use` エラーになります
 
 ### 2. パッケージのインストール
 
-ソースからインストールしてください（PyPI 配布は未公開です）：
+**PyPI から（推奨）**：
+
+```bash
+pip install n3memorycore-mcp-lite
+```
+
+または `uvx` でゼロインストール実行（Claude Code プラグインはこの経路を使用）：
+
+```bash
+uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+```
+
+**ソースから**（コードを編集する場合）：
 
 ```bash
 git clone https://github.com/NeuralNexusNote/n3mcmcp-lite
