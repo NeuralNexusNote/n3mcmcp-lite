@@ -120,7 +120,82 @@ class TestRepair:
 class TestUnknownTool:
     def test_unknown_tool_returns_error(self, server_mod):
         result = asyncio.run(server_mod.call_tool("nonexistent_tool", {}))
-        assert "Unknown tool" in result[0].text
+        # Unknown tool must surface as a proper MCP tool error so the
+        # LLM cannot treat it as a successful "no results" return.
+        assert result.isError is True
+        assert "Unknown tool" in result.content[0].text
+
+
+class TestRedisUnreachableSurfacesError:
+    """When Redis is down, every tool call MUST return isError=True.
+
+    A plain text-content string containing "Error: ..." looks like
+    success to the MCP client — the LLM may paste it back verbatim or
+    silently swallow it, and every subsequent save_memory call also
+    fails silently. The Shiranui case lost all content this way.
+    """
+
+    def _force_redis_down(self, server_mod):
+        """Point the module's client at an unreachable URL without
+        touching the real redis-stack the rest of the suite depends on."""
+        from n3mc_mcp.database import get_redis_client
+        # Redis on a definitely-closed port; ping will fail fast.
+        server_mod._CLIENT = get_redis_client("redis://127.0.0.1:1/0")
+
+    def test_search_returns_mcp_error_when_redis_down(self, server_mod):
+        original = server_mod._CLIENT
+        try:
+            self._force_redis_down(server_mod)
+            result = asyncio.run(server_mod.call_tool(
+                "search_memory", {"query": "anything"}
+            ))
+            assert result.isError is True, (
+                "search_memory must set isError=True when Redis is unreachable "
+                "— otherwise the LLM treats the failure as a successful empty "
+                "search and proceeds to generate content that will never be "
+                "saved."
+            )
+            text = result.content[0].text
+            assert "Redis is not reachable" in text
+            assert "docker" in text  # recovery hint present
+        finally:
+            server_mod._CLIENT = original
+
+    def test_save_returns_mcp_error_when_redis_down(self, server_mod):
+        original = server_mod._CLIENT
+        try:
+            self._force_redis_down(server_mod)
+            result = asyncio.run(server_mod.call_tool(
+                "save_memory", {"content": "this must not silently succeed"}
+            ))
+            assert result.isError is True, (
+                "save_memory must set isError=True when Redis is unreachable "
+                "— a silent success here is how the Lite build loses user "
+                "content without the LLM ever noticing."
+            )
+            text = result.content[0].text
+            assert "Redis is not reachable" in text
+            # The error must warn the user that nothing is being persisted
+            # this turn, so long-form generation can be aborted.
+            assert "NOT persist" in text or "not persist" in text
+        finally:
+            server_mod._CLIENT = original
+
+    def test_list_delete_repair_also_error_when_redis_down(self, server_mod):
+        original = server_mod._CLIENT
+        try:
+            self._force_redis_down(server_mod)
+            for name, args in [
+                ("list_memories", {}),
+                ("delete_memory", {"id": "00000000-0000-0000-0000-000000000000"}),
+                ("repair_memory", {}),
+            ]:
+                result = asyncio.run(server_mod.call_tool(name, args))
+                assert result.isError is True, (
+                    f"{name} must set isError=True when Redis is unreachable"
+                )
+        finally:
+            server_mod._CLIENT = original
 
 
 class TestParentDocRecall:

@@ -282,13 +282,42 @@ async def list_tools() -> list[types.Tool]:
 # ---------------------------------------------------------------------------
 # Tool dispatch
 # ---------------------------------------------------------------------------
+def _tool_error(text: str) -> types.CallToolResult:
+    """Build a proper MCP tool-error response.
+
+    Returning a plain ``list[TextContent]`` with an "Error: ..." string
+    inside is **not** the same thing as an MCP tool error: the client
+    still sees ``isError=False`` and may treat it as a normal successful
+    return — i.e. the LLM can paste the error text back as if it were
+    data, or worse, swallow it silently. Setting ``isError=True``
+    forces the client (and the LLM on the other side of it) to
+    acknowledge the failure.
+
+    This matters for the Lite build specifically: if Redis is down and
+    ``save_memory`` silently "succeeds", the LLM will keep generating
+    long content under the false assumption that it is being saved —
+    which is exactly how the Shiranui test case lost its data.
+    """
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)],
+        isError=True,
+    )
+
+
 @app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+async def call_tool(
+    name: str, arguments: dict
+) -> list[types.TextContent] | types.CallToolResult:
+    # Redis reachability gate — ping on every call, not just at startup,
+    # so a mid-session Redis restart / crash is surfaced immediately
+    # rather than silently corrupting the save/search contract.
     if _CLIENT is None or not ping(_CLIENT):
-        return [types.TextContent(
-            type="text",
-            text=f"Error: Redis is not reachable.\n{REDIS_STARTUP_HINT}",
-        )]
+        return _tool_error(
+            f"Error: Redis is not reachable. "
+            f"save_memory and search_memory cannot proceed — "
+            f"any content generated this turn will NOT persist.\n"
+            f"{REDIS_STARTUP_HINT}"
+        )
     try:
         if name == "search_memory":
             return _tool_search(arguments)
@@ -300,9 +329,14 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return _tool_delete(arguments)
         if name == "repair_memory":
             return _tool_repair(arguments)
-        return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+        return _tool_error(f"Unknown tool: {name}")
     except Exception as e:
-        return [types.TextContent(type="text", text=f"Error: {e}")]
+        # Any exception from the tool implementations (Redis connection
+        # reset mid-call, RediSearch index missing, embedding model
+        # failure, etc.) is a hard error — surface it with isError=True
+        # so the LLM cannot mistake it for a successful "no results"
+        # return.
+        return _tool_error(f"Error: {e}")
 
 
 # ---------------------------------------------------------------------------
