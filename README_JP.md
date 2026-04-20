@@ -20,19 +20,21 @@
 1. **`localhost:6379` で動く Redis Stack** — Lite 版は Redis + RediSearch にメモリを保存します。Docker が最も簡単です：
    ```bash
    # 初回のみ（コンテナを作成）：
-   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
    # 2 回目以降（コンテナは既存なので start するだけ）：
    docker start redis-stack
    ```
    コンテナ作成後に再度 `docker run` を実行すると `Conflict. The container name "/redis-stack" is already in use` エラーになります。2 回目以降は `docker start redis-stack` を使ってください。
 
-   > **`--appendonly yes` の意味**：Redis AOF 永続化を有効にして、コンテナ
-   > 再起動・クラッシュでも直近の書き込みを保護します。無効のままだと、
-   > 既定の RDB スナップショット間隔（書き込み量により 1〜60 分）の合間
-   > に保存されたメモリは再起動で失われます。7 日 TTL による揮発は変わ
-   > らず — AOF は「保存済みだがまだスナップショットに入っていない」
-   > データ損失の窓を閉じるためのものです。
+   > **`--appendonly no --save ""` の意味**：Lite 版は**意図的に揮発性**
+   > です。揮発性は Lite と有償の永続 N3MemoryCore 版を分ける製品境界
+   > であり、Lite で AOF / RDB を有効にしてしまうとこの境界が消滅して
+   > しまいます。サーバーは起動時に `CONFIG SET appendonly no` および
+   > `CONFIG SET save ""` を毎回発行して**強制的に永続化を無効化**します
+   > ので、セッション間に手動で永続化を有効にしても次回 Lite 起動時に
+   > 無効に戻されます。上の docker フラグは初回起動時点で強制状態と一致
+   > させ、書き込みが一瞬ディスクに落ちる窓を作らないための措置です。
 2. **[`uv`](https://docs.astral.sh/uv/) を `PATH` に通す** — Claude Code プラグイン / `uvx` 経由インストールの場合のみ必要。ソースからインストールする場合は不要です。
 
 Redis に接続できない場合はサーバーが起動を拒否し、`uv` が無いと Claude Code プラグインは立ち上がりません。`/plugin install` やクライアント設定の前に必ず揃えてください。
@@ -95,7 +97,7 @@ Docker を使うのが最も簡単です：
 
 ```bash
 # 初回のみ（コンテナを作成）：
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
 # 2 回目以降（コンテナは既存なので start するだけ）：
 docker start redis-stack

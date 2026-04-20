@@ -60,14 +60,76 @@ _CLIENT = None  # redis.Redis
 # (`docker start redis-stack`) so users who already created the
 # container once do not hit the "container name already in use" error
 # from blindly re-running the `docker run` command.
+#
+# NOTE: persistence flags (`--appendonly no --save ""`) are passed so a
+# fresh container starts in ephemeral mode. The server additionally
+# enforces this at startup via CONFIG SET (see _enforce_ephemeral),
+# which is the source of truth — the docker flags are just a safety net
+# for users reading the command before the server ever runs.
 REDIS_STARTUP_HINT = (
-    "Start Redis Stack.\n"
+    "Start Redis Stack (ephemeral mode required for Lite).\n"
     "  First time (creates the container):\n"
     "    docker run -d --name redis-stack -p 6379:6379 "
-    "redis/redis-stack-server:latest --appendonly yes\n"
+    'redis/redis-stack-server:latest --appendonly no --save ""\n'
     "  If the container already exists (just start it):\n"
     "    docker start redis-stack"
 )
+
+
+def _enforce_ephemeral(client) -> None:
+    """Force Redis persistence off.
+
+    The Lite build is a volatile scratchpad by design. Persistence is a
+    feature of the paid variant; enabling it on Lite would erase the
+    product line's differentiator. This runs on every server startup
+    and is idempotent — if the user ran `CONFIG SET appendonly yes`
+    between sessions, we undo it.
+
+    Both axes must be disabled:
+      - `appendonly no`   : AOF log off.
+      - `save ""`         : RDB snapshot schedule cleared.
+    We also best-effort flush any in-flight AOF via `BGREWRITEAOF` being
+    skipped (there is no explicit "forget AOF on disk" command; the user
+    must recreate the container for a clean wipe — which is the
+    documented fix).
+
+    If CONFIG SET is blocked (e.g. protected-mode, ACL), we warn loudly
+    but continue: the tools still work, and the user sees exactly one
+    clear message telling them their data may persist longer than
+    advertised.
+    """
+    axes = (("appendonly", "no"), ("save", ""))
+    for key, value in axes:
+        try:
+            client.config_set(key, value)
+        except Exception as e:
+            print(
+                f"[N3MC-Lite] WARNING: could not disable Redis persistence "
+                f"(CONFIG SET {key} {value!r} failed: {e}). "
+                f"The Lite build requires ephemeral storage — please run a "
+                f'dedicated redis-stack container with `--appendonly no --save ""` '
+                f"and no ACL restrictions.",
+                file=sys.stderr,
+            )
+            return
+
+    # Sanity-check: confirm both axes are actually off. If the user has
+    # a redis.conf that overrides CONFIG SET, we still want to tell them.
+    try:
+        ao = client.config_get("appendonly").get("appendonly", "")
+        sv = client.config_get("save").get("save", "")
+        if str(ao).lower() != "no" or str(sv).strip() != "":
+            print(
+                f"[N3MC-Lite] WARNING: Redis still reports persistence enabled "
+                f"after CONFIG SET (appendonly={ao!r}, save={sv!r}). "
+                f"The Lite build advertises 7d-TTL ephemeral storage; please "
+                f"use a dedicated redis-stack container without a redis.conf "
+                f"override.",
+                file=sys.stderr,
+            )
+    except Exception:
+        # CONFIG GET failure is non-fatal; we already warned above if relevant.
+        pass
 
 
 def _startup() -> None:
@@ -85,6 +147,10 @@ def _startup() -> None:
             file=sys.stderr,
         )
         return
+
+    # Lite build invariant: persistence MUST be off. Do this before
+    # ensure_index so the index itself is never dumped to disk.
+    _enforce_ephemeral(_CLIENT)
 
     try:
         ensure_index(_CLIENT)
@@ -104,7 +170,7 @@ def _startup() -> None:
 # ---------------------------------------------------------------------------
 app: Server = Server(
     name="n3memorycore-lite",
-    version="1.1.2",
+    version="1.1.3",
     instructions=SERVER_INSTRUCTIONS,
 )
 

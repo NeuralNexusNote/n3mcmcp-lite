@@ -1,7 +1,7 @@
 {
   "name": "n3memorycore-lite",
-  "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory server for Claude Code, backed by Redis Stack. Prerequisites: (1) Redis Stack running on localhost:6379 (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes) and (2) uv installed on PATH (https://docs.astral.sh/uv/).",
-  "version": "1.1.2",
+  "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory server for Claude Code, backed by Redis Stack. Persistence is disabled and enforced by the server (AOF off, RDB off) — use the paid N3MemoryCore for durable memory. Prerequisites: (1) Redis Stack on localhost:6379 (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save \"\") and (2) uv on PATH (https://docs.astral.sh/uv/).",
+  "version": "1.1.3",
   "author": {
     "name": "NeuralNexusNote",
     "email": "arnolfjp019@gmail.com"

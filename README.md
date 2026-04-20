@@ -21,18 +21,22 @@ This server does **not** run out of the box — you must prepare two things firs
 1. **Redis Stack on `localhost:6379`** — the Lite build stores memory in Redis + RediSearch. The easiest way is Docker:
    ```bash
    # First time only (creates the container):
-   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
    # Every subsequent session (container already exists):
    docker start redis-stack
    ```
    Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start` from the second session onward.
 
-   > **Why `--appendonly yes`**: enables Redis AOF persistence so writes survive
-   > container restart / crash. Without it, anything saved between the periodic
-   > RDB snapshots (default: every 1–60 minutes depending on write volume) is
-   > lost on restart. Memory is still ephemeral via the 7-day TTL — AOF just
-   > closes the "saved but not snapshotted yet" data-loss window.
+   > **Why `--appendonly no --save ""`**: the Lite build is *deliberately
+   > volatile*. Ephemerality is the product boundary that separates Lite
+   > from the paid, persistent N3MemoryCore build — enabling AOF or RDB
+   > on Lite would erase that boundary. The server **enforces** this at
+   > startup by issuing `CONFIG SET appendonly no` and `CONFIG SET save ""`
+   > on every connect, so even if you re-enable persistence manually
+   > between sessions it will be turned back off on the next Lite run.
+   > The docker flags above just make the first boot match the enforced
+   > state, avoiding a transient moment where writes could land on disk.
 2. **[`uv`](https://docs.astral.sh/uv/) on your `PATH`** — required only for the Claude Code plugin / `uvx` install path. Not needed if you install from source.
 
 The server refuses to start if Redis is unreachable, and the Claude Code plugin will fail to launch without `uv`. Install both before running `/plugin install` or any client-side config.
@@ -98,7 +102,7 @@ easiest way is Docker:
 
 ```bash
 # First time only (creates the container):
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
 # Every subsequent session (container already exists):
 docker start redis-stack

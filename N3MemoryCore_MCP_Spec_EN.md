@@ -68,21 +68,24 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 1. Start Redis Stack:
    ```bash
    # First time only (creates the container):
-   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
    # Every subsequent session (container already exists):
    docker start redis-stack
    ```
    Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start redis-stack` thereafter.
 
-   **AOF persistence is mandatory.** `--appendonly yes` makes Redis append
-   every write to `appendonly.aof` (`fsync` every second by default), so
-   container restart / crash preserves writes made between RDB snapshots.
-   Without AOF, the Lite build's "7-day TTL" guarantee is undercut by a
-   real data-loss window of up to the RDB interval (default: 1–60 min
-   depending on write volume). AOF is the smallest config change that
-   makes the TTL promise honest — memory still evaporates at the 7-day
-   boundary, but nothing is lost *before* that boundary due to restart.
+   **Persistence is forbidden — enforced, not optional.** `--appendonly no`
+   and `--save ""` disable AOF and RDB respectively. The server also issues
+   `CONFIG SET appendonly no` and `CONFIG SET save ""` at every startup
+   (§3.4 `_enforce_ephemeral`), so any manual re-enable between sessions
+   is reverted. Rationale: ephemerality is the product boundary that
+   separates the free Lite build from the paid persistent
+   N3MemoryCore — Lite is "a rolling 7-day scratchpad that truly forgets
+   on restart", not "a durable store with a TTL". If the user wants
+   continuous memory, they upgrade. The docker flags above and the
+   server-side `CONFIG SET` together make it *mechanically impossible*
+   to turn Lite into a persistent store by accident.
 2. Install the package (choose one):
    - **pip** (global or venv):
      ```bash
@@ -353,7 +356,7 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 2. **Redis connect & ping**:
    - Build a client from `redis_url`.
-   - `PING`. **If it fails**: log a warning to `stderr` with both startup hints (first-time: `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes`; restart: `docker start redis-stack`) and continue with a non-functional client. Every subsequent tool call returns an error with the same hints. The server stays up — the client can hot-fix Redis without restarting the MCP.
+   - `PING`. **If it fails**: log a warning to `stderr` with both startup hints (first-time: `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""`; restart: `docker start redis-stack`) and continue with a non-functional client. Every subsequent tool call returns an error with the same hints. The server stays up — the client can hot-fix Redis without restarting the MCP.
 
 3. **Ensure RediSearch index** (`ensure_index()`):
    - `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...` as per [§3.5](#35-data-layout).
@@ -620,9 +623,9 @@ By default, Claude Code prompts the user for each MCP tool call. **For the auto-
 
 ```bash
 # 1. Start Redis Stack (RediSearch can only index DB 0)
-#    First time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+#    First time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 #    Subsequent: docker start redis-stack
-docker start redis-stack 2>/dev/null || docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+docker start redis-stack 2>/dev/null || docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
 # 2. Install with dev deps and run pytest
 pip install -e ".[dev]"

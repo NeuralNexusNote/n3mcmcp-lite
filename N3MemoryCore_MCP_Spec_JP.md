@@ -68,21 +68,24 @@
 1. Redis Stack を起動：
    ```bash
    # 初回のみ（コンテナを作成）：
-   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
    # 2 回目以降（コンテナ既存）：
    docker start redis-stack
    ```
    初回作成後は `docker run` を再実行すると `Conflict. The container name "/redis-stack" is already in use` になるので、以降は `docker start` を使用。
 
-   **AOF 永続化は必須**。`--appendonly yes` を付けると Redis は全書き込み
-   を `appendonly.aof` に追記（既定：`fsync` 毎秒）するため、コンテナの
-   再起動・クラッシュでも RDB スナップショット間の書き込みが保護され
-   ます。AOF なしでは、Lite 版の「7 日 TTL」という保証が、書き込み量に
-   応じて最大 RDB 間隔（既定 1〜60 分）のデータ損失窓に実質的に短縮
-   されてしまいます。AOF は「TTL の約束を誠実にする」最小の設定変更
-   です — メモリは 7 日境界で蒸発するのは変わらず、**7 日より前に再
-   起動で失われることがなくなる**のが追加される保証です。
+   **永続化は禁止 — オプションではなく強制**。`--appendonly no` と
+   `--save ""` でそれぞれ AOF と RDB を無効化します。さらにサーバーは
+   起動のたびに `CONFIG SET appendonly no` と `CONFIG SET save ""` を
+   発行する（§3.4 `_enforce_ephemeral`）ため、セッション間で手動で永続
+   化を有効にしても次回 Lite 起動時に元に戻されます。**理由**：揮発性
+   こそが無償 Lite 版と有償永続版 N3MemoryCore を分ける製品境界であり、
+   Lite は「再起動で本当に忘れる 7 日ローリング・スクラッチパッド」で
+   あって「TTL 付きの永続ストア」ではありません。継続的なメモリが欲し
+   ければ有償版に移行してもらう設計です。上の docker フラグとサーバー
+   側の `CONFIG SET` を組み合わせることで、**Lite を誤って永続ストアに
+   変えてしまうことが機構的に不可能**になります。
 2. パッケージをインストール（いずれか一つ）：
    - **pip**（グローバルまたは venv）：
      ```bash
@@ -350,7 +353,7 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 2. **Redis 接続と ping**：
    - `redis_url` からクライアントを構築。
-   - `PING`。**失敗時**は `stderr` にヒント（初回：`docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes` ／ 再起動：`docker start redis-stack`）を出し、非機能クライアントのまま続行。以降のツール呼び出しはすべて同じヒントをエラーで返す。サーバーは生存する — ユーザーは MCP を再起動せずに Redis をホットフィックスできる。
+   - `PING`。**失敗時**は `stderr` にヒント（初回：`docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""` ／ 再起動：`docker start redis-stack`）を出し、非機能クライアントのまま続行。以降のツール呼び出しはすべて同じヒントをエラーで返す。サーバーは生存する — ユーザーは MCP を再起動せずに Redis をホットフィックスできる。
 
 3. **RediSearch インデックスの確保**（`ensure_index()`）：
    - [§3.5](#35-データレイアウト) の通り `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...`。
@@ -617,9 +620,9 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 
 ```bash
 # 1. Redis Stack を起動（RediSearch は DB 0 しか索引できない）
-#    初回：docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+#    初回：docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 #    2 回目以降：docker start redis-stack
-docker start redis-stack 2>/dev/null || docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly yes
+docker start redis-stack 2>/dev/null || docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
 
 # 2. 開発依存込みでインストールして pytest
 pip install -e ".[dev]"

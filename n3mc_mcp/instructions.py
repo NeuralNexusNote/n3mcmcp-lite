@@ -96,8 +96,7 @@ BEHAVIORAL RULES
    - Relay any recovery hint the tool returned (e.g. `docker start
      redis-stack` if the container already exists, or `docker run -d
      --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
-     --appendonly yes`
-     for a first-time install).
+     --appendonly no --save ""` for a first-time install).
    - Ask whether to proceed WITHOUT memory (so the user knows their
      work will not persist this session) or to pause until the
      backend is restored.
