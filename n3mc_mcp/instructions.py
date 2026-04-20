@@ -75,12 +75,39 @@ BEHAVIORAL RULES
    short facts instead. Do NOT split a long verbatim-worthy body into
    many short summaries — that destroys recall fidelity.
 
-4. DO NOT SAVE NOISE
+4. HANDLE TOOL ERRORS VISIBLY — NEVER GENERATE LONG CONTENT BLIND
+   If `search_memory` or `save_memory` returns a server error (Redis
+   unreachable, connection refused, timeout, "start Redis Stack" hint,
+   etc.), STOP and surface the error to the user in their language
+   BEFORE generating any substantial creative or long-form content.
+
+   Why: with the backend down, every subsequent `save_memory` call
+   also fails silently. Producing a long setting / design / spec /
+   code architecture / outline the user will want back later means
+   they lose it the moment the session closes — and they will not
+   notice the memory is broken until recall fails.
+
+   Required on tool error:
+   - Announce the failure succinctly in the user's language, e.g.
+       JP: 「Redis Stack が停止しているようです。メモリ保存・検索が
+            使えません。」
+       EN: "Memory backend is unreachable — save and search are
+            offline right now."
+   - Relay any recovery hint the tool returned (e.g. the `docker run
+     ... redis-stack-server:latest` command).
+   - Ask whether to proceed WITHOUT memory (so the user knows their
+     work will not persist this session) or to pause until the
+     backend is restored.
+
+   Short factual replies (one or two sentences) may proceed, but
+   still mention the error once so the user knows saves are failing.
+
+5. DO NOT SAVE NOISE
    Skip trivial greetings, clarifying questions, and mechanical
    acknowledgements. Save substantive content only: facts, decisions,
    user preferences, project context, unresolved questions.
 
-5. RESPECT EXPLICIT REQUESTS
+6. RESPECT EXPLICIT REQUESTS
    If the user says "don't save this" or "forget that", comply — call
    `delete_memory` when asked to forget specific entries.
 
