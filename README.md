@@ -20,8 +20,13 @@ This server does **not** run out of the box — you must prepare two things firs
 
 1. **Redis Stack on `localhost:6379`** — the Lite build stores memory in Redis + RediSearch. The easiest way is Docker:
    ```bash
+   # First time only (creates the container):
    docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+
+   # Every subsequent session (container already exists):
+   docker start redis-stack
    ```
+   Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start` from the second session onward.
 2. **[`uv`](https://docs.astral.sh/uv/) on your `PATH`** — required only for the Claude Code plugin / `uvx` install path. Not needed if you install from source.
 
 The server refuses to start if Redis is unreachable, and the Claude Code plugin will fail to launch without `uv`. Install both before running `/plugin install` or any client-side config.
@@ -86,11 +91,18 @@ The Lite build requires Redis Stack (Redis + RediSearch module). The
 easiest way is Docker:
 
 ```bash
+# First time only (creates the container):
 docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+
+# Every subsequent session (container already exists):
+docker start redis-stack
 ```
 
 That's it — the container exposes Redis on `localhost:6379` and the
-server will find it automatically.
+server will find it automatically. Re-running the `docker run` command
+after the first install produces `Conflict. The container name
+"/redis-stack" is already in use`; use `docker start redis-stack`
+thereafter.
 
 ### 2. Install the package
 

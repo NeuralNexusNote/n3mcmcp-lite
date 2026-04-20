@@ -4,8 +4,9 @@ Redis-backed storage layer for the N3MemoryCore MCP **Lite** server.
 The Lite variant is deliberately ephemeral:
   - Every entry is written with a 7d (configurable) TTL.
   - No SQLite file, no migrations, no integrity checks.
-  - Redis Stack (RediSearch + RedisJSON) is required — the user runs
-    ``docker run -p 6379:6379 redis/redis-stack-server:latest``.
+  - Redis Stack (RediSearch + RedisJSON) is required. First install:
+    ``docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest``.
+    Subsequent runs (container already created): ``docker start redis-stack``.
 
 Data layout
 -----------

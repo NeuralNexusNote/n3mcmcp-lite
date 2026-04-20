@@ -65,10 +65,15 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 
 ### Quick Start
 
-1. Start Redis Stack (once):
+1. Start Redis Stack:
    ```bash
+   # First time only (creates the container):
    docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+
+   # Every subsequent session (container already exists):
+   docker start redis-stack
    ```
+   Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start redis-stack` thereafter.
 2. Install the package (choose one):
    - **pip** (global or venv):
      ```bash
@@ -339,7 +344,7 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 2. **Redis connect & ping**:
    - Build a client from `redis_url`.
-   - `PING`. **If it fails**: log a warning pointing the user at `docker run -p 6379:6379 redis/redis-stack-server:latest` and continue with a non-functional client. Every subsequent tool call returns an error with the same hint. The server stays up — the client can hot-fix Redis without restarting the MCP.
+   - `PING`. **If it fails**: log a warning to `stderr` with both startup hints (first-time: `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`; restart: `docker start redis-stack`) and continue with a non-functional client. Every subsequent tool call returns an error with the same hints. The server stays up — the client can hot-fix Redis without restarting the MCP.
 
 3. **Ensure RediSearch index** (`ensure_index()`):
    - `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...` as per [§3.5](#35-data-layout).
@@ -606,7 +611,9 @@ By default, Claude Code prompts the user for each MCP tool call. **For the auto-
 
 ```bash
 # 1. Start Redis Stack (RediSearch can only index DB 0)
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+#    First time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+#    Subsequent: docker start redis-stack
+docker start redis-stack 2>/dev/null || docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 
 # 2. Install with dev deps and run pytest
 pip install -e ".[dev]"

@@ -65,10 +65,15 @@
 
 ### クイックスタート
 
-1. Redis Stack を起動（一度きり）：
+1. Redis Stack を起動：
    ```bash
+   # 初回のみ（コンテナを作成）：
    docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+
+   # 2 回目以降（コンテナ既存）：
+   docker start redis-stack
    ```
+   初回作成後は `docker run` を再実行すると `Conflict. The container name "/redis-stack" is already in use` になるので、以降は `docker start` を使用。
 2. パッケージをインストール（いずれか一つ）：
    - **pip**（グローバルまたは venv）：
      ```bash
@@ -336,7 +341,7 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 2. **Redis 接続と ping**：
    - `redis_url` からクライアントを構築。
-   - `PING`。**失敗時**は `docker run -p 6379:6379 redis/redis-stack-server:latest` のヒントを `stderr` に出し、非機能クライアントのまま続行。以降のツール呼び出しはすべて同じヒントをエラーで返す。サーバーは生存する — ユーザーは MCP を再起動せずに Redis をホットフィックスできる。
+   - `PING`。**失敗時**は `stderr` にヒント（初回：`docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest` ／ 再起動：`docker start redis-stack`）を出し、非機能クライアントのまま続行。以降のツール呼び出しはすべて同じヒントをエラーで返す。サーバーは生存する — ユーザーは MCP を再起動せずに Redis をホットフィックスできる。
 
 3. **RediSearch インデックスの確保**（`ensure_index()`）：
    - [§3.5](#35-データレイアウト) の通り `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...`。
@@ -603,7 +608,9 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 
 ```bash
 # 1. Redis Stack を起動（RediSearch は DB 0 しか索引できない）
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+#    初回：docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+#    2 回目以降：docker start redis-stack
+docker start redis-stack 2>/dev/null || docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 
 # 2. 開発依存込みでインストールして pytest
 pip install -e ".[dev]"

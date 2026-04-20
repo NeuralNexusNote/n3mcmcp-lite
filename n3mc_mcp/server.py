@@ -55,6 +55,20 @@ _SESSION_ID = str(uuid.uuid4())
 _CONFIG: dict[str, Any] = {}
 _CLIENT = None  # redis.Redis
 
+# User-facing hint shown whenever Redis is unreachable. Covers BOTH
+# the first-time install (`docker run …`) and the restart case
+# (`docker start redis-stack`) so users who already created the
+# container once do not hit the "container name already in use" error
+# from blindly re-running the `docker run` command.
+REDIS_STARTUP_HINT = (
+    "Start Redis Stack.\n"
+    "  First time (creates the container):\n"
+    "    docker run -d --name redis-stack -p 6379:6379 "
+    "redis/redis-stack-server:latest\n"
+    "  If the container already exists (just start it):\n"
+    "    docker start redis-stack"
+)
+
 
 def _startup() -> None:
     """One-time initialization: config, Redis connection, index, model preload."""
@@ -66,9 +80,8 @@ def _startup() -> None:
 
     if not ping(_CLIENT):
         print(
-            f"[N3MC-Lite] WARNING: cannot reach Redis at {redis_url}. "
-            f"Start Redis Stack first:\n"
-            f"    docker run -p 6379:6379 redis/redis-stack-server:latest",
+            f"[N3MC-Lite] WARNING: cannot reach Redis at {redis_url}.\n"
+            f"{REDIS_STARTUP_HINT}",
             file=sys.stderr,
         )
         return
@@ -208,10 +221,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     if _CLIENT is None or not ping(_CLIENT):
         return [types.TextContent(
             type="text",
-            text=(
-                "Error: Redis is not reachable. Start Redis Stack with:\n"
-                "  docker run -p 6379:6379 redis/redis-stack-server:latest"
-            ),
+            text=f"Error: Redis is not reachable.\n{REDIS_STARTUP_HINT}",
         )]
     try:
         if name == "search_memory":
