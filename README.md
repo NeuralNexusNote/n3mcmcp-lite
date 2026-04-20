@@ -21,22 +21,23 @@ This server does **not** run out of the box — you must prepare two things firs
 1. **Redis Stack on `localhost:6379`** — the Lite build stores memory in Redis + RediSearch. The easiest way is Docker:
    ```bash
    # First time only (creates the container):
-   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
+   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 
    # Every subsequent session (container already exists):
    docker start redis-stack
    ```
    Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start` from the second session onward.
 
-   > **Why `--appendonly no --save ""`**: the Lite build is *deliberately
-   > volatile*. Ephemerality is the product boundary that separates Lite
-   > from the paid, persistent N3MemoryCore build — enabling AOF or RDB
-   > on Lite would erase that boundary. The server **enforces** this at
-   > startup by issuing `CONFIG SET appendonly no` and `CONFIG SET save ""`
-   > on every connect, so even if you re-enable persistence manually
-   > between sessions it will be turned back off on the next Lite run.
-   > The docker flags above just make the first boot match the enforced
-   > state, avoiding a transient moment where writes could land on disk.
+   > **Why no persistence flags on the docker line**: the Lite build is
+   > *deliberately volatile*. Ephemerality is the product boundary that
+   > separates Lite from the paid, persistent N3MemoryCore build. Rather
+   > than rely on fragile shell-quoting for `--save ""` (which breaks on
+   > Windows PowerShell and cmd.exe), the MCP server **enforces** the
+   > ephemeral state at startup by issuing `CONFIG SET appendonly no` and
+   > `CONFIG SET save ""` on every connect. If you manually re-enable
+   > persistence between sessions, it is reverted on the next Lite run.
+   > The plain `docker run` above is sufficient — the server is the
+   > source of truth for the ephemerality guarantee.
 2. **[`uv`](https://docs.astral.sh/uv/) on your `PATH`** — required only for the Claude Code plugin / `uvx` install path. Not needed if you install from source.
 
 The server refuses to start if Redis is unreachable, and the Claude Code plugin will fail to launch without `uv`. Install both before running `/plugin install` or any client-side config.
@@ -102,7 +103,7 @@ easiest way is Docker:
 
 ```bash
 # First time only (creates the container):
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 
 # Every subsequent session (container already exists):
 docker start redis-stack

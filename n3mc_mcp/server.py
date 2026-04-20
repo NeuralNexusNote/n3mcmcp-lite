@@ -61,16 +61,19 @@ _CLIENT = None  # redis.Redis
 # container once do not hit the "container name already in use" error
 # from blindly re-running the `docker run` command.
 #
-# NOTE: persistence flags (`--appendonly no --save ""`) are passed so a
-# fresh container starts in ephemeral mode. The server additionally
-# enforces this at startup via CONFIG SET (see _enforce_ephemeral),
-# which is the source of truth — the docker flags are just a safety net
-# for users reading the command before the server ever runs.
+# NOTE: no persistence flags are shown on the docker command. The Lite
+# build enforces ephemeral mode at server-connect time via CONFIG SET
+# (see _enforce_ephemeral) — that is the source of truth. Earlier
+# iterations put `--appendonly no --save ""` on this line as a safety
+# net, but the empty-string argument for `--save` is mangled by Windows
+# PowerShell and cmd.exe quoting (it has left containers with a broken
+# entrypoint in practice), so the flags were removed to keep the
+# copy-pasteable command reliable across shells.
 REDIS_STARTUP_HINT = (
-    "Start Redis Stack (ephemeral mode required for Lite).\n"
+    "Start Redis Stack (ephemeral mode is enforced by the MCP server).\n"
     "  First time (creates the container):\n"
     "    docker run -d --name redis-stack -p 6379:6379 "
-    'redis/redis-stack-server:latest --appendonly no --save ""\n'
+    "redis/redis-stack-server:latest\n"
     "  If the container already exists (just start it):\n"
     "    docker start redis-stack"
 )
@@ -107,8 +110,9 @@ def _enforce_ephemeral(client) -> None:
                 f"[N3MC-Lite] WARNING: could not disable Redis persistence "
                 f"(CONFIG SET {key} {value!r} failed: {e}). "
                 f"The Lite build requires ephemeral storage — please run a "
-                f'dedicated redis-stack container with `--appendonly no --save ""` '
-                f"and no ACL restrictions.",
+                f"dedicated redis-stack container with CONFIG SET permitted "
+                f"(no ACL restrictions, no redis.conf override blocking "
+                f"appendonly/save).",
                 file=sys.stderr,
             )
             return

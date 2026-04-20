@@ -5,7 +5,9 @@ The Lite variant is deliberately ephemeral:
   - Every entry is written with a 7d (configurable) TTL.
   - No SQLite file, no migrations, no integrity checks.
   - Redis Stack (RediSearch + RedisJSON) is required. First install:
-    ``docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest --appendonly no --save ""``.
+    ``docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest``.
+    Persistence is disabled by the server at connect time (see
+    ``server._enforce_ephemeral``) — no docker flags needed.
     Subsequent runs (container already created): ``docker start redis-stack``.
 
 Data layout
