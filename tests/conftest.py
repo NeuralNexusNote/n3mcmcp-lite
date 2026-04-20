@@ -37,7 +37,7 @@ if not _redis_available(_TEST_REDIS_URL):
     pytest.skip(
         f"Redis Stack not reachable at {_TEST_REDIS_URL}; "
         "first-time install: `docker run -d --name redis-stack -p 6379:6379 "
-        "redis/redis-stack-server:latest`, or if the container already "
+        "redis/redis-stack-server:latest --appendonly yes`, or if the container already "
         "exists: `docker start redis-stack`.",
         allow_module_level=True,
     )

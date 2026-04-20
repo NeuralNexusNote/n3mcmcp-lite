@@ -64,7 +64,7 @@ REDIS_STARTUP_HINT = (
     "Start Redis Stack.\n"
     "  First time (creates the container):\n"
     "    docker run -d --name redis-stack -p 6379:6379 "
-    "redis/redis-stack-server:latest\n"
+    "redis/redis-stack-server:latest --appendonly yes\n"
     "  If the container already exists (just start it):\n"
     "    docker start redis-stack"
 )
@@ -104,7 +104,7 @@ def _startup() -> None:
 # ---------------------------------------------------------------------------
 app: Server = Server(
     name="n3memorycore-lite",
-    version="1.1.1",
+    version="1.1.2",
     instructions=SERVER_INSTRUCTIONS,
 )
 
