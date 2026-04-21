@@ -121,7 +121,7 @@ pip install n3memorycore-mcp-lite
 または `uvx` でゼロインストール実行（Claude Code プラグインはこの経路を使用）：
 
 ```bash
-uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+uvx --from n3memorycore-mcp-lite n3mc-workingmemory
 ```
 
 **ソースから**（コードを編集する場合）：
@@ -146,7 +146,7 @@ pip install -e .
 {
   "mcpServers": {
     "n3memorycore-lite": {
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
@@ -167,7 +167,7 @@ pip install -e .
   "mcpServers": {
     "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }

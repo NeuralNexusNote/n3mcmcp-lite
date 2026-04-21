@@ -99,7 +99,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
      ```
    - **uvx** (zero-install, isolated env — requires [`uv`](https://docs.astral.sh/uv/)):
      ```bash
-     uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+     uvx --from n3memorycore-mcp-lite n3mc-workingmemory
      ```
    - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin configures `uvx` launch for you, but `uv` must still be on PATH):
      ```
@@ -139,7 +139,7 @@ The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Market
 
 ```
 n3memorycore-mcp-lite/
-├── pyproject.toml                  # Package metadata, entry point 'n3mc-mcp-lite'
+├── pyproject.toml                  # Package metadata, entry point 'n3mc-workingmemory' (+ deprecated alias 'n3mc-mcp-lite')
 ├── n3mc_mcp/                       # Python package
 │   ├── __init__.py                 # Version marker
 │   ├── __main__.py                 # Entry point: python -m n3mc_mcp
@@ -545,7 +545,7 @@ Override via the environment variable `N3MC_DATA_DIR` (absolute path). Redis sta
 {
   "mcpServers": {
     "n3memorycore-lite": {
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
@@ -563,7 +563,7 @@ Three equivalent paths are supported. Pick one; do not combine.
 /plugin install n3memorycore-lite@neuralnexusnote
 ```
 
-The plugin ships a `plugin.json` that launches the server via `uvx --from n3memorycore-mcp-lite n3mc-mcp-lite`. Requires `uv` on PATH.
+The plugin ships a `plugin.json` that launches the server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`. Requires `uv` on PATH.
 
 **(b) Project-local `.mcp.json` (manual, when cloning the repo or pip-installing)**
 
@@ -572,7 +572,7 @@ The plugin ships a `plugin.json` that launches the server via `uvx --from n3memo
   "mcpServers": {
     "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
@@ -587,7 +587,7 @@ The plugin ships a `plugin.json` that launches the server via `uvx --from n3memo
     "n3memorycore-lite": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-mcp-lite"]
+      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-workingmemory"]
     }
   }
 }

@@ -2,19 +2,19 @@
   "name": "neuralnexusnote",
   "owner": {
     "name": "NeuralNexusNote",
-    "email": "arnolfjp019@gmail.com"
+    "email": "info@NeuralNexusNote.com"
   },
   "metadata": {
-    "description": "Memory-focused MCP servers from NeuralNexusNote",
+    "description": "Memory-focused MCP servers from NeuralNexusNote (working memory + long-term knowledge)",
     "version": "1.1.4"
   },
   "plugins": [
     {
       "name": "n3memorycore-lite",
       "source": "./plugins/n3memorycore-lite",
-      "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory for Claude Code, backed by Redis Stack. Requires a Redis Stack container running on localhost:6379 and uv (for uvx) on PATH.",
+      "description": "Working memory for AI agents — ephemeral (7-day TTL) hybrid vector + BM25 memory for Claude Code, backed by Redis Stack. Session-scoped by design; pair with N3MemoryCore Pro for long-term persistent knowledge. Requires a Redis Stack container running on localhost:6379 and uv (for uvx) on PATH.",
       "category": "memory",
-      "tags": ["memory", "rag", "redis", "vector-search", "bm25", "embedding", "ephemeral"]
+      "tags": ["working-memory", "memory", "rag", "redis", "vector-search", "bm25", "embedding", "ephemeral"]
     }
   ]
 }

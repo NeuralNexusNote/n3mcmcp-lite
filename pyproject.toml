@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "n3memorycore-mcp-lite"
 version = "1.1.4"
-description = "N3MemoryCore MCP Lite — ephemeral (Redis-backed, 7d TTL) hybrid (vector + BM25) memory for Claude and other MCP clients"
+description = "N3MemoryCore MCP — Working Memory (Lite): ephemeral (Redis-backed, 7d TTL) hybrid (vector + BM25) working memory for Claude and other MCP clients"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -13,7 +13,7 @@ authors = [
   { name = "NeuralNexusNote" },
   { name = "ArnolfJp019" },
 ]
-keywords = ["mcp", "memory", "rag", "claude", "anthropic", "redis", "redis-stack", "vector-search", "embedding", "lite"]
+keywords = ["mcp", "working-memory", "memory", "rag", "claude", "anthropic", "redis", "redis-stack", "vector-search", "embedding", "ephemeral", "lite"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -40,6 +40,10 @@ dev = [
 ]
 
 [project.scripts]
+# Primary command — clarifies this is a working-memory server (vs. the Pro long-term memory server).
+n3mc-workingmemory = "n3mc_mcp.__main__:main"
+# Deprecated alias — kept for backward compatibility with 1.1.0–1.1.3 user configs.
+# Will be removed in 1.2.0; please migrate to `n3mc-workingmemory`.
 n3mc-mcp-lite = "n3mc_mcp.__main__:main"
 
 [project.urls]

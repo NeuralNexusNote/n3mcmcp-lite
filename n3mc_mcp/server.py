@@ -1,5 +1,8 @@
 """
-N3MemoryCore MCP **Lite** server — stdio transport.
+N3MemoryCore MCP — **Working Memory (Lite)** server — stdio transport.
+
+Role: session-scoped working memory for AI agents. Pair with the paid
+N3MemoryCore Pro server for long-term persistent knowledge.
 
 Exposes five tools (same shape as the paid variant):
   search_memory, save_memory, list_memories, delete_memory, repair_memory
@@ -8,7 +11,8 @@ Storage is Redis Stack (RediSearch) with a 7d TTL per entry. No persistence.
 
 Usage:
     python -m n3mc_mcp          # stdio server
-    n3mc-mcp-lite              # via installed console script
+    n3mc-workingmemory         # via installed console script
+    n3mc-mcp-lite              # deprecated alias (1.1.0–1.1.3 compat; removed in 1.2.0)
 """
 from __future__ import annotations
 

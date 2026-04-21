@@ -98,7 +98,7 @@
      ```
    - **uvx**（事前インストール不要・分離環境 — [`uv`](https://docs.astral.sh/uv/) が必要）：
      ```bash
-     uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+     uvx --from n3memorycore-mcp-lite n3mc-workingmemory
      ```
    - **Claude Code プラグインマーケットプレイス**（pip/uvx コマンドを手動で打つ必要なし — プラグインが `uvx` 起動を設定するが、`uv` は PATH に必要）：
      ```
@@ -138,7 +138,7 @@ Lite は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリ�
 
 ```
 n3memorycore-mcp-lite/
-├── pyproject.toml                  # パッケージメタデータ、エントリポイント 'n3mc-mcp-lite'
+├── pyproject.toml                  # パッケージメタデータ、エントリポイント 'n3mc-workingmemory'（`n3mc-mcp-lite` は deprecated alias として 1.1.4 のみ存続）
 ├── n3mc_mcp/                       # Python パッケージ
 │   ├── __init__.py                 # バージョンマーカー
 │   ├── __main__.py                 # エントリポイント: python -m n3mc_mcp
@@ -541,7 +541,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 {
   "mcpServers": {
     "n3memorycore-lite": {
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
@@ -559,7 +559,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 /plugin install n3memorycore-lite@neuralnexusnote
 ```
 
-プラグインに同梱された `plugin.json` が `uvx --from n3memorycore-mcp-lite n3mc-mcp-lite` 経由でサーバーを起動する。`uv` が PATH にあることが前提。
+プラグインに同梱された `plugin.json` が `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` 経由でサーバーを起動する。`uv` が PATH にあることが前提。
 
 **(b) プロジェクトの `.mcp.json`（手動 — リポジトリをクローン、または pip インストール済みの場合）**
 
@@ -568,7 +568,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
   "mcpServers": {
     "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
@@ -583,7 +583,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
     "n3memorycore-lite": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-mcp-lite"]
+      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-workingmemory"]
     }
   }
 }

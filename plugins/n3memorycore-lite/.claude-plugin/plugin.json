@@ -1,19 +1,19 @@
 {
   "name": "n3memorycore-lite",
-  "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory server for Claude Code, backed by Redis Stack. Persistence is disabled and enforced by the server (AOF off, RDB off) — use the paid N3MemoryCore for durable memory. Prerequisites: (1) Redis Stack on localhost:6379 (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) and (2) uv on PATH (https://docs.astral.sh/uv/).",
+  "description": "Working memory for AI agents (Claude Code) — ephemeral (7-day TTL) hybrid vector + BM25 memory, backed by Redis Stack. Session-scoped by design; pair with the paid N3MemoryCore Pro server for long-term persistent knowledge. Persistence is disabled and enforced by the server (AOF off, RDB off). Prerequisites: (1) Redis Stack on localhost:6379 (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) and (2) uv on PATH (https://docs.astral.sh/uv/).",
   "version": "1.1.4",
   "author": {
     "name": "NeuralNexusNote",
-    "email": "arnolfjp019@gmail.com"
+    "email": "info@NeuralNexusNote.com"
   },
   "homepage": "https://github.com/NeuralNexusNote/n3mcmcp-lite",
   "repository": "https://github.com/NeuralNexusNote/n3mcmcp-lite",
   "license": "Apache-2.0",
-  "keywords": ["memory", "rag", "redis", "vector-search", "bm25", "embedding", "ephemeral"],
+  "keywords": ["working-memory", "memory", "rag", "redis", "vector-search", "bm25", "embedding", "ephemeral"],
   "mcpServers": {
     "n3memorycore-lite": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-mcp-lite"]
+      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-workingmemory"]
     }
   }
 }

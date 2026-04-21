@@ -126,7 +126,7 @@ pip install n3memorycore-mcp-lite
 Or zero-install via `uvx` (the Claude Code plugin uses this path):
 
 ```bash
-uvx --from n3memorycore-mcp-lite n3mc-mcp-lite
+uvx --from n3memorycore-mcp-lite n3mc-workingmemory
 ```
 
 **From source** (if you want to edit the code):
@@ -151,7 +151,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 {
   "mcpServers": {
     "n3memorycore-lite": {
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
@@ -171,7 +171,7 @@ For other projects, add the following to that project's `.mcp.json`:
   "mcpServers": {
     "n3memorycore-lite": {
       "type": "stdio",
-      "command": "n3mc-mcp-lite",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
