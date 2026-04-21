@@ -254,7 +254,7 @@ RediSearch は DB 0 以外でインデックスを作成できない
 - [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 完全な設計ドキュメント（日本語）
 - [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — English version
 
-仕様書の付録 B にオプション拡張（クロスエンコーダ・リランカー、保存時チャンキング、HyDE、日本語形態素解析）の差し込み位置と候補ライブラリを記載しています。仕様書があれば AI（あるいは人間）が TTL・重複判定・RediSearch 契約を壊さずにコードを編集できます — 設計意図の一次情報源です。
+仕様書の付録 B にオプション拡張（クロスエンコーダ・リランカー、保存時チャンキング、HyDE、日本語形態素解析）の差し込み位置と候補ライブラリを記載しています。TTL・重複判定・RediSearch インデックス契約を壊さずに改造したいときの参考資料としてお使いください。
 
 ## ライセンス
 

@@ -313,7 +313,7 @@ If you want to modify behavior (change the ranking formula, drop in a cross-enco
 - [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — full design document (English)
 - [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 日本語版
 
-Appendix B of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. The spec gives an AI (or human) enough context to edit the code without breaking the TTL, dedup, or RediSearch contracts — it is the source of truth for design intent.
+Appendix B of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. Use it as reference when you want to edit the code without breaking the TTL, dedup, or RediSearch contracts.
 
 ## License
 
