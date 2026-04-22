@@ -43,12 +43,12 @@ Redis に接続できない場合はサーバーが起動を拒否し、`uv` が
 
 ---
 
-## Lite 版と有償版
+## Lite 版と Pro 版（公開予定）
 
-| 版                      | ストレージ                          | 耐久性           | 配布先              |
-| ----------------------- | ----------------------------------- | ---------------- | ------------------- |
-| **Lite（本リポジトリ）** | Redis Stack（RediSearch）            | 7d TTL・揮発   | Claude Marketplace  |
-| 有償版                  | SQLite + sqlite-vec（ローカルファイル） | 永続            | 別途配布             |
+| 版                        | ストレージ                          | 耐久性           | 配布先              |
+| ------------------------- | ----------------------------------- | ---------------- | ------------------- |
+| **Lite（本リポジトリ）**  | Redis Stack（RediSearch）            | 7d TTL・揮発   | Claude Marketplace  |
+| **Pro（公開予定）**       | SQLite + sqlite-vec（ローカルファイル） | 永続            | 別途配布             |
 
 MCP の外向き仕様は同じ（5 ツール・同じランキング式）。7 日 TTL と
 揮発性 Redis ストレージは**設計上の特長であり制約ではありません** —
@@ -60,9 +60,10 @@ MCP の外向き仕様は同じ（5 ツール・同じランキング式）。7 
   タスクを汚染しません。
 - **試作・実験用途** — 放置すれば 7 日で自動蒸発、削除判断は不要です。
 
-有償版は真逆のユースケースを想定：数ヶ月〜数年にわたる長期的な知識
-蓄積、永続性こそが価値となる場面。**プロジェクト境界内のメモリ**が
-欲しければ Lite、**継続的なメモリ**が欲しければ有償版をお選びください。
+**Pro 版（公開予定）** は真逆のユースケースを想定：数ヶ月〜数年に
+わたる長期的な知識蓄積、永続性こそが価値となる場面。**プロジェクト
+境界内のワーキングメモリ**が欲しければ Lite、**継続的なメモリ**が
+必要であれば **Pro 版（公開予定）** をお待ちください。
 
 ## 概要
 
@@ -137,7 +138,12 @@ pip install -e .
 
 ## クライアント設定
 
-### Claude Desktop
+### Claude Desktop（および Claude Desktop 内の「Code」タブ）
+
+**Claude Desktop アプリ**（内蔵の **Code** タブを含む）を使っている場合
+は、`.mcp.json` ではなく Desktop 用の設定ファイルを編集してください。
+`.mcp.json` はターミナルから起動する `claude` CLI 専用で、Claude
+Desktop アプリからは読まれません。
 
 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）または
 `~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）：
@@ -153,10 +159,29 @@ pip install -e .
 }
 ```
 
-### Claude Code
+**Windows の注意点：** 上記のコマンド名指定で Claude Desktop がサーバー
+を起動できない（ハンマー／ツールアイコンが出ない）場合は、`"command"`
+をインストール済み `.exe` への絶対パスに置き換えてください。例：
+
+```json
+"command": "C:\\Users\\<ユーザー名>\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\n3mc-workingmemory.exe"
+```
+
+正確なパスはターミナルで `where n3mc-workingmemory` を実行して確認
+できます。
+
+**設定ファイル編集後は Claude Desktop を完全に終了してください。**
+ウィンドウを閉じるだけでは不十分です。タスクトレイの Claude アイコン
+を右クリックして Quit、もしくはタスクマネージャーで Claude 関連
+プロセスをすべて終了させてから再起動してください。
+
+### Claude Code（スタンドアロン CLI）
+
+この節は `claude` コマンドラインツール専用で、Claude Desktop 内の
+「Code」タブではありません（そちらは上の節を参照）。
 
 **`.mcp.json` はこのリポジトリに同梱されています。** リポジトリを
-クローンしてパッケージをインストールするだけで、Claude Code が
+クローンしてパッケージをインストールするだけで、Claude Code CLI が
 自動的に接続されます — 手動設定は不要です。
 
 他のプロジェクトから利用する場合は、そのプロジェクトの `.mcp.json`
@@ -204,11 +229,19 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
   "bm25_min_threshold": 0.1,
   "search_result_limit": 20,
   "min_score": 0.2,
-  "search_query_max_chars": 2000
+  "search_query_max_chars": 2000,
+  "skip_code_blocks": false
 }
 ```
 
 `redis_url` は環境変数 `N3MC_REDIS_URL` でも指定可能（こちらが優先）。
+
+`skip_code_blocks` を `true` にすると、`save_memory` はトリプルバック
+クォートフェンス（```` ``` ````）を含むペイロードを拒否して
+`status: "skipped_code"` を返します。既定は `false`。FastAPI 版
+N3MemoryCore 時代の「コードはメモリに入れない」運用を再現したい場合に
+有効化してください（git / IDE 履歴に任せ、Redis には散文の決定事項や
+計画だけを置きたい場合に有用）。全フィールドの詳細は仕様書 §6 を参照。
 
 ## ランキング式
 
@@ -254,7 +287,7 @@ RediSearch は DB 0 以外でインデックスを作成できない
 - [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 完全な設計ドキュメント（日本語）
 - [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — English version
 
-仕様書の付録 B にオプション拡張（クロスエンコーダ・リランカー、保存時チャンキング、HyDE、日本語形態素解析）の差し込み位置と候補ライブラリを記載しています。TTL・重複判定・RediSearch インデックス契約を壊さずに改造したいときの参考資料としてお使いください。
+仕様書の付録 A にオプション拡張（クロスエンコーダ・リランカー、保存時チャンキング、HyDE、日本語形態素解析）の差し込み位置と候補ライブラリを記載しています。TTL・重複判定・RediSearch インデックス契約を壊さずに改造したいときの参考資料としてお使いください。
 
 ## ライセンス
 

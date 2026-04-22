@@ -1,37 +1,17 @@
-"""
-Path resolution for the N3MemoryCore MCP **Lite** server.
-
-Lite is ephemeral (Redis-backed, 7d TTL) and therefore owns no database
-file. Only the local ``config.json`` (owner_id / local_id / ranking
-parameters / Redis URL) lives on disk.
-
-Default location:
-  - Windows:  %LOCALAPPDATA%\\n3memorycore-lite
-  - macOS:    ~/Library/Application Support/n3memorycore-lite
-  - Linux:    ~/.local/share/n3memorycore-lite
-
-Override via the environment variable ``N3MC_DATA_DIR``.
-"""
-from __future__ import annotations
-
 import os
 from pathlib import Path
 
 from platformdirs import user_data_dir
 
-_APP_NAME = "n3memorycore-lite"
+APP_NAME = "n3memorycore-lite"
 
 
-def data_dir() -> Path:
-    """Return the directory that holds the local config file."""
+def get_data_dir() -> Path:
     override = os.environ.get("N3MC_DATA_DIR")
     if override:
-        p = Path(override).expanduser().resolve()
-    else:
-        p = Path(user_data_dir(_APP_NAME, appauthor=False))
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+        return Path(override)
+    return Path(user_data_dir(APP_NAME))
 
 
-def config_path() -> Path:
-    return data_dir() / "config.json"
+def get_config_path() -> Path:
+    return get_data_dir() / "config.json"

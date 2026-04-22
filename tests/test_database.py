@@ -1,306 +1,268 @@
-"""
-Redis store unit tests for n3mc_mcp.database (Lite build).
-
-These require a live Redis Stack — see conftest.py.
-"""
-import math
 import time
-
-from uuid_utils import uuid7 as _gen_uuid7
-
-from n3mc_mcp.database import (
-    bytes_to_vector,
-    check_exact_duplicate,
-    cjk_bigram_expand,
-    count_memories,
-    delete_memory,
-    get_all_memories,
-    get_memory_by_id,
-    increment_access_counts,
-    insert_memory,
-    search_fts,
-    search_vector,
-    sha1_of,
-    strip_fts_punctuation,
-    vector_to_bytes,
-)
+import pytest
+from tests.conftest import requires_redis
 
 
-def make_vec(dim=768):
-    return [1.0 / math.sqrt(dim)] * dim
+# ── TestIndexSetup ────────────────────────────────────────────────────────────
 
-
-class TestCjkBigramExpand:
-    def test_four_char_run(self):
-        result = cjk_bigram_expand("記憶装置")
-        assert result == "記憶 憶装 装置"
-
-    def test_single_cjk_char_unchanged(self):
-        assert cjk_bigram_expand("記") == "記"
-
-    def test_two_char_run(self):
-        assert cjk_bigram_expand("記憶") == "記憶"
-
-    def test_mixed_latin_cjk(self):
-        result = cjk_bigram_expand("RAG記憶装置test")
-        assert "記憶 憶装 装置" in result
-        assert result.startswith("RAG")
-        assert result.endswith("test")
-
-    def test_no_cjk_unchanged(self):
-        assert cjk_bigram_expand("hello world 123") == "hello world 123"
-
-    def test_empty_string(self):
-        assert cjk_bigram_expand("") == ""
-
-
-def _wait_indexed(client, expected_total, timeout=2.0):
-    """RediSearch is eventually consistent; poll briefly for the index to catch up."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if count_memories(client) >= expected_total:
-            return
-        time.sleep(0.05)
-
-
+@requires_redis
 class TestIndexSetup:
-    def test_index_created(self, redis_client):
-        info = redis_client.ft("n3mc_idx").info()
-        # redis-py returns a dict-like; index_name is a bytes field.
+    def test_index_created(self, db):
+        info = db._client.execute_command("FT.INFO", "n3mc_idx")
+        assert info is not None
+
+    def test_ensure_index_idempotent(self, db):
+        db.ensure_index()
+        db.ensure_index()
+        info = db._client.execute_command("FT.INFO", "n3mc_idx")
         assert info is not None
 
 
+# ── TestInsertAndRetrieve ─────────────────────────────────────────────────────
+
+@requires_redis
 class TestInsertAndRetrieve:
-    def test_insert_and_count(self, redis_client):
-        assert count_memories(redis_client) == 0
-        insert_memory(
-            redis_client, str(_gen_uuid7()), "hello world",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        _wait_indexed(redis_client, 1)
-        assert count_memories(redis_client) == 1
+    def test_save_single_returns_saved(self, db):
+        result = db.save_memory("Hello Redis test")
+        assert result["saved"] is True
+        assert "id" in result
+        assert result["ttl_seconds"] == 604800
 
-    def test_insert_stores_embedding(self, redis_client):
-        vec = make_vec()
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "test content",
-            "2025-01-01T00:00:00+00:00", "owner1", vec,
-        )
-        raw = redis_client.hget(f"mem:{rid}", "embedding")
-        assert raw is not None
-        recovered = bytes_to_vector(raw)
-        assert len(recovered) == 768
+    def test_key_exists_after_save(self, db, redis_client):
+        result = db.save_memory("key existence check")
+        mem_key = f"mem:{result['id']}"
+        assert redis_client.exists(mem_key)
 
-    def test_insert_without_embedding(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "no embedding",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        assert redis_client.hget(f"mem:{rid}", "embedding") is None
+    def test_ttl_set_on_key(self, db, redis_client):
+        result = db.save_memory("ttl check entry")
+        mem_key = f"mem:{result['id']}"
+        ttl = redis_client.ttl(mem_key)
+        assert ttl > 0
 
-    def test_get_memory_by_id(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "find me",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        row = get_memory_by_id(redis_client, rid)
-        assert row is not None
-        assert row["content"] == "find me"
+    def test_parent_id_empty_for_single(self, db, redis_client):
+        result = db.save_memory("short entry")
+        d = redis_client.hgetall(f"mem:{result['id']}")
+        assert d[b"parent_id"] == b""
 
-    def test_get_all_memories(self, redis_client):
-        insert_memory(
-            redis_client, str(_gen_uuid7()), "a",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        insert_memory(
-            redis_client, str(_gen_uuid7()), "b",
-            "2025-01-02T00:00:00+00:00", "owner1", None,
-        )
-        _wait_indexed(redis_client, 2)
-        rows = get_all_memories(redis_client)
-        assert len(rows) == 2
+    def test_content_stored_correctly(self, db, redis_client):
+        text = "unique content for retrieval"
+        result = db.save_memory(text)
+        d = redis_client.hgetall(f"mem:{result['id']}")
+        assert d[b"content"].decode() == text
 
-    def test_get_all_memories_limit(self, redis_client):
-        for i in range(5):
-            insert_memory(
-                redis_client, str(_gen_uuid7()), f"entry {i}",
-                f"2025-01-0{i+1}T00:00:00+00:00", "owner1", None,
-            )
-        _wait_indexed(redis_client, 5)
-        rows = get_all_memories(redis_client, limit=3)
-        assert len(rows) == 3
+    def test_empty_content_rejected(self, db):
+        result = db.save_memory("")
+        assert result["saved"] is False
+        assert "empty" in result["reason"]
+
+    def test_whitespace_only_rejected(self, db):
+        result = db.save_memory("   ")
+        assert result["saved"] is False
 
 
-class TestAccessCount:
-    def test_initial_access_count_zero(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "new entry",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        row = get_memory_by_id(redis_client, rid)
-        assert int(row.get("access_count") or 0) == 0
+# ── TestDedup ─────────────────────────────────────────────────────────────────
 
-    def test_increment_single(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "incremented",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        increment_access_counts(redis_client, [rid])
-        row = get_memory_by_id(redis_client, rid)
-        assert int(row["access_count"]) == 1
-
-    def test_increment_accumulates(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "popular",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        for _ in range(5):
-            increment_access_counts(redis_client, [rid])
-        row = get_memory_by_id(redis_client, rid)
-        assert int(row["access_count"]) == 5
-
-    def test_increment_batch(self, redis_client):
-        ids = [str(_gen_uuid7()) for _ in range(3)]
-        for rid in ids:
-            insert_memory(
-                redis_client, rid, f"entry {rid}",
-                "2025-01-01T00:00:00+00:00", "owner1", None,
-            )
-        increment_access_counts(redis_client, ids)
-        for rid in ids:
-            row = get_memory_by_id(redis_client, rid)
-            assert int(row["access_count"]) == 1
-
-    def test_increment_refreshes_ttl_when_requested(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "ttl target",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-            ttl_seconds=60,
-        )
-        increment_access_counts(redis_client, [rid], ttl_seconds=3600)
-        ttl = redis_client.ttl(f"mem:{rid}")
-        assert ttl > 60
-
-    def test_empty_id_list_is_noop(self, redis_client):
-        # No keys touched when given an empty list
-        increment_access_counts(redis_client, [])
-
-
-class TestTTL:
-    def test_ttl_is_set_on_insert(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "ephemeral",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-            ttl_seconds=3600,
-        )
-        ttl = redis_client.ttl(f"mem:{rid}")
-        assert 0 < ttl <= 3600
-
-    def test_sha_key_shares_ttl(self, redis_client):
-        insert_memory(
-            redis_client, str(_gen_uuid7()), "same text",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-            ttl_seconds=3600,
-        )
-        sha_ttl = redis_client.ttl(f"mem:sha:{sha1_of('same text')}")
-        assert 0 < sha_ttl <= 3600
-
-
-class TestDelete:
-    def test_delete_removes_record_and_sha(self, redis_client):
-        rid = str(_gen_uuid7())
-        insert_memory(
-            redis_client, rid, "to delete",
-            "2025-01-01T00:00:00+00:00", "owner1", make_vec(),
-        )
-        _wait_indexed(redis_client, 1)
-        assert count_memories(redis_client) == 1
-
-        assert delete_memory(redis_client, rid) is True
-        _wait_indexed(redis_client, 0)
-
-        assert count_memories(redis_client) == 0
-        assert redis_client.exists(f"mem:sha:{sha1_of('to delete')}") == 0
-
-    def test_delete_nonexistent_returns_false(self, redis_client):
-        assert delete_memory(redis_client, "nonexistent-id") is False
-
-
+@requires_redis
 class TestDedup:
-    def test_check_exact_duplicate_true(self, redis_client):
-        insert_memory(
-            redis_client, str(_gen_uuid7()), "duplicate text",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        assert check_exact_duplicate(redis_client, "duplicate text") is True
+    def test_exact_duplicate_rejected(self, db):
+        content = "exact duplicate test content"
+        db.save_memory(content)
+        result = db.save_memory(content)
+        assert result["saved"] is False
+        assert result["status"] == "duplicate"
 
-    def test_check_exact_duplicate_false(self, redis_client):
-        assert check_exact_duplicate(redis_client, "unique text") is False
+    def test_sha_guard_key_exists(self, db, redis_client):
+        import hashlib
+        content = "sha guard verification"
+        db.save_memory(content)
+        sha = hashlib.sha1(content.encode()).hexdigest()
+        assert redis_client.exists(f"mem:sha:{sha}")
+
+    def test_different_content_saved(self, db):
+        db.save_memory("first unique content abc")
+        result = db.save_memory("second unique content xyz")
+        assert result["saved"] is True
 
 
+# ── TestSkipCodeBlocks ────────────────────────────────────────────────────────
+
+@requires_redis
+class TestSkipCodeBlocks:
+    def test_default_saves_code(self, db):
+        result = db.save_memory("see ```python\nprint('hi')\n``` for details")
+        assert result["saved"] is True
+
+    def test_flag_on_skips_fenced_code(self, db):
+        db.cfg["skip_code_blocks"] = True
+        result = db.save_memory("see ```python\nprint('hi')\n``` for details")
+        assert result["saved"] is False
+        assert result["status"] == "skipped_code"
+
+    def test_flag_on_allows_prose(self, db):
+        db.cfg["skip_code_blocks"] = True
+        result = db.save_memory("a plain sentence with no fences at all")
+        assert result["saved"] is True
+
+
+# ── TestDelete ────────────────────────────────────────────────────────────────
+
+@requires_redis
+class TestDelete:
+    def test_delete_existing(self, db, redis_client):
+        result = db.save_memory("entry to delete")
+        mem_id = result["id"]
+        del_result = db.delete_memory(mem_id)
+        assert del_result["status"] == "deleted"
+        assert not redis_client.exists(f"mem:{mem_id}")
+
+    def test_delete_removes_sha_guard(self, db, redis_client):
+        import hashlib
+        content = "delete with sha guard"
+        result = db.save_memory(content)
+        db.delete_memory(result["id"])
+        sha = hashlib.sha1(content.encode()).hexdigest()
+        assert not redis_client.exists(f"mem:sha:{sha}")
+
+    def test_delete_nonexistent_returns_not_found(self, db):
+        result = db.delete_memory("nonexistent-id-12345")
+        assert result["status"] == "not_found"
+
+    def test_parent_delete_cascades_chunks(self, db, redis_client):
+        long_text = "A" * 500 + " " + "B" * 500
+        result = db.save_memory(long_text)
+        parent_id = result["parent_id"]
+        chunk_ids = result["ids"]
+        db.delete_memory(parent_id)
+        assert not redis_client.exists(f"doc:{parent_id}")
+        for cid in chunk_ids:
+            assert not redis_client.exists(f"mem:{cid}")
+
+
+# ── TestTTL ───────────────────────────────────────────────────────────────────
+
+@requires_redis
+class TestTTL:
+    def test_ttl_positive(self, db, redis_client):
+        result = db.save_memory("ttl positive test")
+        ttl = redis_client.ttl(f"mem:{result['id']}")
+        assert ttl > 0
+
+    def test_sha_guard_ttl(self, db, redis_client):
+        import hashlib
+        content = "sha ttl check"
+        db.save_memory(content)
+        sha = hashlib.sha1(content.encode()).hexdigest()
+        ttl = redis_client.ttl(f"mem:sha:{sha}")
+        assert ttl > 0
+
+
+# ── TestFTS ───────────────────────────────────────────────────────────────────
+
+@requires_redis
 class TestFTS:
-    def test_strip_fts_punctuation(self):
-        assert strip_fts_punctuation("hello, world!") == "hello  world "
-        assert "test" in strip_fts_punctuation("(test) [bracket]")
-        assert "bracket" in strip_fts_punctuation("(test) [bracket]")
+    def test_bm25_finds_english(self, db):
+        db.save_memory("Abraham Lincoln was the 16th president of the United States")
+        time.sleep(0.5)
+        results = db.search_memory("Abraham Lincoln president")
+        assert any("Lincoln" in r["content"] for r in results)
 
-    def test_search_fts_basic(self, redis_client):
-        insert_memory(
-            redis_client, str(_gen_uuid7()),
-            "Abraham Lincoln president",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        _wait_indexed(redis_client, 1)
-        assert len(search_fts(redis_client, "Lincoln")) >= 1
-
-    def test_search_fts_empty_query(self, redis_client):
-        assert search_fts(redis_client, "") == []
-
-    def test_search_fts_punctuation_resilience(self, redis_client):
-        insert_memory(
-            redis_client, str(_gen_uuid7()),
-            "Planet Alpha temperature settings",
-            "2025-01-01T00:00:00+00:00", "owner1", None,
-        )
-        _wait_indexed(redis_client, 1)
-        assert len(search_fts(redis_client, "Alpha temperature")) >= 1
+    def test_cjk_bigram_hit(self, db):
+        db.save_memory("坂本龍馬は幕末の志士であり土佐藩出身の人物です")
+        time.sleep(0.5)
+        results = db.search_memory("坂本龍馬")
+        assert any("坂本龍馬" in r["content"] for r in results)
 
 
+# ── TestVectorSearch ──────────────────────────────────────────────────────────
+
+@requires_redis
 class TestVectorSearch:
-    def test_search_vector_returns_results(self, redis_client):
-        vec = make_vec()
-        insert_memory(
-            redis_client, str(_gen_uuid7()), "vector test",
-            "2025-01-01T00:00:00+00:00", "owner1", vec,
-        )
-        _wait_indexed(redis_client, 1)
-        results = search_vector(redis_client, vec, k=5)
-        assert len(results) >= 1
-        assert results[0][1] < 0.01  # identical vector → near-zero cosine distance
+    def test_saved_content_findable(self, db):
+        db.save_memory("The quick brown fox jumps over the lazy dog")
+        time.sleep(0.5)
+        results = db.search_memory("fox dog animal")
+        assert len(results) > 0
 
-    def test_search_vector_empty_db(self, redis_client):
-        assert search_vector(redis_client, make_vec(), k=5) == []
+    def test_empty_db_returns_empty(self, db):
+        results = db.search_memory("anything at all")
+        assert results == []
+
+    def test_owner_filter(self, cfg, redis_client):
+        import uuid
+        from n3mc_mcp.database import Database
+
+        cfg2 = dict(cfg)
+        cfg2["owner_id"] = str(uuid.uuid4())
+
+        db1 = Database(cfg)
+        db1.connect()
+        db1.ensure_index()
+
+        db2 = Database(cfg2)
+        db2.connect()
+        db2.ensure_index()
+
+        db1.save_memory("owner1 specific content about dolphins")
+        time.sleep(0.5)
+        results = db2.search_memory("dolphins")
+        assert len(results) == 0
 
 
-class TestSerialization:
-    def test_vector_roundtrip(self):
-        v = [float(i) / 768 for i in range(768)]
-        recovered = bytes_to_vector(vector_to_bytes(v))
-        assert len(recovered) == 768
-        assert abs(recovered[0] - v[0]) < 1e-5
-
+# ── TestSha1 ─────────────────────────────────────────────────────────────────
 
 class TestSha1:
-    def test_sha1_deterministic(self):
-        assert sha1_of("hello") == sha1_of("hello")
+    def test_sha1_hex(self):
+        from n3mc_mcp.database import _sha1
+        result = _sha1("hello")
+        assert len(result) == 40
+        assert all(c in "0123456789abcdef" for c in result)
 
-    def test_sha1_different(self):
-        assert sha1_of("hello") != sha1_of("world")
+    def test_empty_string(self):
+        from n3mc_mcp.database import _sha1
+        assert len(_sha1("")) == 40
+
+    def test_unicode_content(self):
+        from n3mc_mcp.database import _sha1
+        result = _sha1("日本語テスト")
+        assert len(result) == 40
+
+
+# ── TestParentDocument ────────────────────────────────────────────────────────
+
+@requires_redis
+class TestParentDocument:
+    def test_long_content_creates_parent(self, db):
+        long_text = "架空都市「不知火」は南太平洋に浮かぶ人工島都市である。" * 40
+        result = db.save_memory(long_text)
+        assert result["saved"] is True
+        assert "parent_id" in result
+        assert result["chunks"] > 1
+
+    def test_parent_doc_key_exists(self, db, redis_client):
+        long_text = "テスト用の長文コンテンツです。" * 40
+        result = db.save_memory(long_text)
+        assert redis_client.exists(f"doc:{result['parent_id']}")
+
+    def test_verbatim_recall(self, db):
+        long_text = ("架空都市「不知火」設定資料。浮遊する都市、住民は空中庭園に暮らす。"
+                     "エネルギー源は反重力結晶。行政は評議会制。通貨は光子。") * 20
+        db.save_memory(long_text)
+        time.sleep(1.0)
+        results = db.search_memory("不知火 浮遊都市 反重力")
+        assert any("不知火" in r["content"] for r in results)
+
+    def test_parent_doc_duplicate_rejected(self, db):
+        long_text = "重複テスト用の長文です。" * 50
+        db.save_memory(long_text)
+        result2 = db.save_memory(long_text)
+        assert result2["saved"] is False
+        assert result2["status"] == "duplicate"
+
+
+# ── TestRepair ────────────────────────────────────────────────────────────────
+
+@requires_redis
+class TestRepair:
+    def test_repair_ok(self, db):
+        result = db.repair_memory()
+        assert result["status"] == "ok"

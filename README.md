@@ -44,12 +44,12 @@ The server refuses to start if Redis is unreachable, and the Claude Code plugin 
 
 ---
 
-## Lite vs. Paid
+## Lite vs. Pro (coming soon)
 
-| Build                   | Storage                           | Durability        | Where                |
-| ----------------------- | --------------------------------- | ----------------- | -------------------- |
-| **Lite (this repo)**   | Redis Stack (RediSearch)          | 7d TTL, volatile | Claude Marketplace   |
-| Paid                    | SQLite + sqlite-vec (local file)  | Permanent         | Separate distribution |
+| Build                      | Storage                           | Durability        | Where                 |
+| -------------------------- | --------------------------------- | ----------------- | --------------------- |
+| **Lite (this repo)**       | Redis Stack (RediSearch)          | 7d TTL, volatile  | Claude Marketplace    |
+| **Pro (coming soon)**      | SQLite + sqlite-vec (local file)  | Permanent         | Separate distribution |
 
 Same MCP surface (five tools, same ranking formula). The 7-day TTL and
 volatile Redis storage are **design features, not limitations** —
@@ -63,9 +63,10 @@ they make the Lite build the better fit for:
 - **Experimental / throwaway prototyping** — leave it alone and memory
   evaporates in 7 days, no pruning needed.
 
-The Paid build targets the opposite use case: long-term knowledge
-accumulation where persistence is the feature. Pick the Lite for
-**project-scoped memory**; pick the Paid for **continuous memory**.
+The **Pro build (coming soon)** will target the opposite use case:
+long-term knowledge accumulation where persistence is the feature.
+Pick Lite for **project-scoped working memory**; the Pro build will
+offer **continuous memory** when released.
 
 ## What is this?
 
@@ -142,7 +143,11 @@ into the standard `~/.cache/huggingface/` directory.
 
 ## Configure a client
 
-### Claude Desktop
+### Claude Desktop (and the "Code" tab inside Claude Desktop)
+
+If you are using the **Claude Desktop application** — including its
+built-in **Code** tab — configure MCP via the desktop config file, NOT
+via `.mcp.json` (which is only read by the standalone `claude` CLI).
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
@@ -158,11 +163,29 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 }
 ```
 
-### Claude Code
+**Windows tip:** if Claude Desktop fails to spawn the server with the
+bare command name above (the hammer/tool icon never appears), replace
+`"command"` with the absolute path to the installed `.exe`, for example:
+
+```json
+"command": "C:\\Users\\<YOU>\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\n3mc-workingmemory.exe"
+```
+
+Run `where n3mc-workingmemory` in a terminal to find the exact path on
+your machine.
+
+**After editing the config, fully quit Claude Desktop** — closing the
+window is not enough. Right-click the Claude icon in the system tray (or
+use Task Manager) and terminate every Claude process, then relaunch.
+
+### Claude Code (standalone CLI)
+
+This section applies ONLY to the `claude` command-line tool, not to the
+Claude Desktop "Code" tab (see above for that).
 
 **`.mcp.json` is already included in this repository.** Clone the repo,
-install the package, and Claude Code connects automatically — no manual
-configuration needed.
+install the package, and the Claude Code CLI connects automatically — no
+manual configuration needed.
 
 For other projects, add the following to that project's `.mcp.json`:
 
@@ -257,7 +280,8 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "ttl_refresh_top_k":        5,
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
-  "rerank_phrase_weight":     0.2
+  "rerank_phrase_weight":     0.2,
+  "skip_code_blocks":         false
 }
 ```
 
@@ -267,6 +291,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
 - `access_count_*` — access-frequency auto-importance; top-K search hits receive a capped boost on future queries.
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
 - `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (CPU-only).
+- `skip_code_blocks` — when `true`, `save_memory` rejects any payload containing a triple-backtick fence (```` ``` ````) and returns `status: "skipped_code"`. Default `false`. Set to `true` if you want FastAPI-era N3MemoryCore-style code exclusion (keep code out of the memory index entirely — useful when your workflow already has git/IDE history for code and you only want prose decisions/plans in Redis).
 
 See the spec §6 for the complete field-by-field reference.
 
@@ -313,7 +338,7 @@ If you want to modify behavior (change the ranking formula, drop in a cross-enco
 - [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — full design document (English)
 - [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 日本語版
 
-Appendix B of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. Use it as reference when you want to edit the code without breaking the TTL, dedup, or RediSearch contracts.
+Appendix A of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. Use it as reference when you want to edit the code without breaking the TTL, dedup, or RediSearch contracts.
 
 ## License
 

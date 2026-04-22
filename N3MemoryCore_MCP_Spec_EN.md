@@ -1,7 +1,7 @@
 # N3MemoryCore MCP v1.1.0 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
-> **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as a public test drive — the paid build uses SQLite and stores memories permanently.
+> **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
 >
 > **Who is this for?** Users of any MCP-compatible LLM client (Claude Desktop, Claude Code, and others) who want searchable, short-lived memory shared across sessions within a 7-day window.
 >
@@ -22,7 +22,7 @@ By using this software, you agree to the terms above.
 
 > **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-lite` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3memorycore-lite` entry from your MCP client's config file.
 >
-> **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, use the paid build.
+> **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, the **Pro build (coming soon)** will offer persistent storage.
 
 > **For implementation questions**: While the author cannot be contacted for support, you can load this specification into Claude and ask questions directly — Claude can assist with implementation and customization.
 
@@ -30,9 +30,9 @@ By using this software, you agree to the terms above.
 
 ## Lite: Volatile Memory
 
-This section captures the tradeoffs unique to the Lite build; the rest of the specification deliberately reuses the paid-build structure so AI-driven regeneration stays simple.
+This section captures the tradeoffs unique to the Lite build; the rest of the specification deliberately reuses the Pro-build structure so AI-driven regeneration stays simple.
 
-| Property               | Lite (this spec)                         | Paid (separate spec)                   |
+| Property               | Lite (this spec)                         | Pro (coming soon — separate spec)      |
 | ---------------------- | ----------------------------------------- | -------------------------------------- |
 | Storage engine         | Redis Stack (RediSearch module)           | SQLite + sqlite-vec (local file)       |
 | Durability             | **7 d TTL per entry**, ephemeral         | Permanent, disk-persistent             |
@@ -40,7 +40,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | External dependency    | User-run Redis Stack container            | None (self-contained)                  |
 | `time_decay` relevance | Meaningful (3-day half-life; fresh=1.0, 7d≈0.20) | Meaningful (90-day half-life) |
 | Re-indexing / repair   | `FT.CREATE` is idempotent; no migrations  | Schema + model migration markers       |
-| Intended use           | Short-term projects, evaluation, marketplace | Ongoing projects                    |
+| Intended use           | Short-term projects, working memory, marketplace | Ongoing projects (coming soon)   |
 
 **Volatility contract:**
 - Every write to Redis sets a TTL equal to `ttl_seconds` (default 604 800 = 7 d).
@@ -48,7 +48,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 - Expiration is delegated to Redis; no background cleanup job runs.
 - Restarting the Redis container with its volume removed wipes all memory immediately.
 
-**No cross-session guarantee beyond 7 d.** Unlike the paid build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, use the paid variant.
+**No cross-session guarantee beyond 7 d.** Unlike the forthcoming Pro build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, wait for the Pro build (coming soon).
 
 ---
 
@@ -119,7 +119,7 @@ Not applicable. See the [Lite: Volatile Memory](#lite-volatile-memory) section �
 
 Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector + RediSearch BM25), mathematically sound ranking, 7-day automatic garbage collection. The MCP server delivers behavioral instructions so the connected LLM auto-searches at the start of each turn and auto-saves after each meaningful exchange — without requiring client-side hooks.
 
-The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; upgrading to the paid build swaps the storage layer from Redis to SQLite while preserving the MCP surface.
+The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; the forthcoming **Pro build (coming soon)** will swap the storage layer from Redis to SQLite + sqlite-vec while preserving the MCP surface.
 
 > **⚠️ Python check**: Before installing, run `python --version` to verify Python 3.10+ is available.
 
@@ -146,7 +146,7 @@ n3memorycore-mcp-lite/
 │   ├── server.py                   # MCP server definition + 5 tools
 │   ├── instructions.py             # Behavioral instructions delivered at initialize
 │   ├── database.py                 # Redis layer: index, CRUD, TTL, dedup
-│   ├── processor.py                # Embedding, ranking, text purification
+│   ├── processor.py                # Embedding, ranking, CJK tokenization, reranker
 │   ├── config.py                   # config.json load/save + UUID generation
 │   └── paths.py                    # platformdirs-based config location
 ├── tests/
@@ -174,7 +174,7 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 | ID           | Stored in       | Generated                          | Granularity          | Purpose                                                                                            |
 | ------------ | --------------- | ---------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------- |
 | `id` (PK)    | Redis hash      | Per record (UUIDv7, time-ordered)  | **One record**       | Unique identifier for each memory — used for deletion and dedup                                    |
-| `owner_id`   | `config.json`   | First startup (UUIDv4)             | **Owner**            | Identifies whose data this is — used as a TAG filter in RediSearch                                 |
+| `owner_id`   | `config.json`   | First startup (UUIDv4)             | **Owner**            | Identifies whose data this is — stored as a TAG field and returned in results; filtering is done in Python (see §3.12) |
 | `local_id` (agent_id)   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Lite ranking.            |
 | `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which server process wrote the record (stored for compatibility; not used in Lite ranking). |
 | `agent_name`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`).                                   |
@@ -208,7 +208,7 @@ On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline
 **The following are absolutely prohibited (even for "performance" or "persistence" reasons):**
 - Writing records without an `EXPIRE` (i.e. infinite TTL).
 - Enabling Redis RDB / AOF persistence policies that would survive container removal for the sole purpose of extending Lite memory lifespan. (The user may, of course, choose any Redis configuration; the spec simply doesn't rely on it.)
-- Re-extending TTL on read (`TOUCH`, `EXPIRE` on `search_memory`).
+- Unconditional TTL extension on read (`TOUCH` / `EXPIRE` applied indiscriminately on `search_memory`). Note: the `ttl_refresh_on_search` setting (§6, default `true`) is an **explicit design exception** to this rule — it resets TTL only for the top-K search hits and only up to `ttl_seconds`, never extending memory beyond the configured maximum lifetime.
 - Write buffering / deferred pipelines beyond the single save call.
 
 **Reason**: the Lite build's differentiation is explicit volatility; circumventing it erodes the product distinction.
@@ -218,7 +218,7 @@ On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline
 ```
 mem:<uuid>                  HASH (memory record OR chunk)
     id              string      UUIDv7 (same as the key suffix)
-    content         string      original text (post-purify; chunk text if chunked)
+    content         string      original text verbatim (chunk text if chunked)
     content_ngram   string      CJK bigram expansion (BM25 side channel)
     timestamp       string      ISO 8601 UTC
     timestamp_epoch number      unix seconds (SORTABLE)
@@ -278,7 +278,7 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
 
 ### 3.6 Ranking Formula
 
-Identical to the paid build:
+Identical to the forthcoming Pro build:
 
 ```
 Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local
@@ -307,17 +307,28 @@ RediSearch returns `cosine_distance ∈ [0, 2]` for normalized vectors. Clamping
 1. If `|bm25_score| < bm25_min_threshold` (default `0.1`), set to `0.0`.
 2. Otherwise: `|bm25_score| / max(1.0, max_|bm25_score| in result set)`.
 
-(RediSearch BM25 scores are non-negative, but the `abs()` keeps the algorithm identical to the paid build where FTS5 produces negative scores.)
+(RediSearch BM25 scores are non-negative, but the `abs()` keeps the algorithm identical to the forthcoming Pro build where FTS5 produces negative scores.)
 
 **time_decay**:
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
-Default `half_life_days = 3` — deliberately shorter than the 7-day TTL so that `time_decay` is actually informative in the Lite build: a fresh entry scores 1.0, a 3-day-old one exactly 0.5, and a 7-day-old (near-expiry) one ≈ 0.20. This pushes recent context ahead in ranking. This is a Lite-specific tuning; the paid build keeps a 90-day half-life to match its permanent horizon.
+Default `half_life_days = 3` — deliberately shorter than the 7-day TTL so that `time_decay` is actually informative in the Lite build: a fresh entry scores 1.0, a 3-day-old one exactly 0.5, and a 7-day-old (near-expiry) one ≈ 0.20. This pushes recent context ahead in ranking. This is a Lite-specific tuning; the forthcoming Pro build will keep a 90-day half-life to match its permanent horizon.
+
+**Lightweight lexical rerank** (post-fusion, pre-TTL-refresh):
+
+After the hybrid score above is computed, an optional CPU-only rerank pass boosts each candidate's score by:
+
+- `coverage × rerank_weight` (default weight `0.3`), where `coverage` is the fraction of query tokens that appear in the content. Tokenization is whitespace-split **augmented with CJK bigram tokens** so that Japanese/Chinese queries contribute a real coverage signal (without bigrams, `.split()` collapses a pure-CJK query into a single token and coverage degenerates to a binary whole-query-substring match).
+- `rerank_phrase_weight` (default `0.2`) added when the entire query string appears as a substring of the content (case-insensitive).
+
+Parent-document resolution happens **before** lexical rerank: chunk hits are expanded to their full `doc:<parent_id>` body first, then rerank operates on the full verbatim content. This ensures that a query phrase appearing in a non-matching chunk of the same document still boosts the parent's rank correctly (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
+
+Set `lexical_rerank_enabled: false` in config to skip this pass (candidates are then sorted by the hybrid score only).
 
 ### 3.7 Text Tokenization & Punctuation Handling
 
-**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the paid build is **not** available here.
+**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the forthcoming Pro build is **not** available here.
 
 **CJK bigram expansion**: Japanese and Chinese text lacks inter-word spaces, so the raw RediSearch tokenizer collapses whole sentences into a single BM25 token and keyword relevance degenerates. To compensate, at save time the server expands every contiguous CJK run in `content` into **overlapping bigrams** (e.g. "記憶装置" → "記憶 憶装 装置") and stores the result in a parallel `content_ngram` TEXT field. BM25 queries apply the same expansion and run `@content:(...) | @content_ngram:(...)`, giving working Japanese partial-match retrieval without touching vector search (the e5 embedding model handles Japanese natively).
 
@@ -337,18 +348,19 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 **(A) Single-chunk path** (body ≤ `chunk_threshold`): reject duplicates in this order.
 
 1. **Exact dedup (O(1))** — `EXISTS mem:sha:<sha1(content)>`. If the key exists, return `{"status": "duplicate", "saved": false}`.
-2. **Near-duplicate (semantic) dedup** — compute the embedding, run KNN=1 against `@embedding` filtered by the current `owner_id`, convert `cosine_distance` → `cos_sim`. If `cos_sim >= dedup_threshold` (default `0.95`), return `{"status": "near_duplicate", "saved": false, "similarity": <value>}`.
+2. **Near-duplicate (semantic) dedup** — compute the embedding, run KNN=5 against `@embedding` (no `owner_id` TAG filter in the FT.SEARCH query — see §3.12), check `owner_id` in Python on returned results, convert `cosine_distance` → `cos_sim`. If `cos_sim >= dedup_threshold` (default `0.95`), return `{"status": "near_duplicate", "saved": false, "similarity": <value>}`.
 
 Only if both checks pass, proceed with the HSET + EXPIRE + sha1-guard pipeline.
 
-**(B) Multi-chunk path** (body > `chunk_threshold`): dedup runs only at the **parent-document level** against the full body.
+**(B) Multi-chunk path** (body > `chunk_threshold`): dedup runs at the **parent-document level** against the full body.
 
 1. **Parent-level exact dedup (O(1))** — `EXISTS docsha:<sha1(full_text)>`. If the key exists, return `{"status": "duplicate", "saved": false, "parent_id": "<existing>"}`.
-2. Chunks are **not** given per-chunk sha guards and bypass near-duplicate checks. Reason: sliding-window chunks are overlapping by design and would otherwise reject each other.
+2. **Parent-level near-duplicate (semantic) dedup** — embed the full body (e5-base-v2 truncates to ~512 tokens, which is enough to fingerprint the document's opening), run the same KNN=5 near-dedup used by (A) against the indexed chunk space. If a prior chunk's `cos_sim >= dedup_threshold` (default `0.95`) for the same `owner_id`, return `{"status": "near_duplicate", "saved": false, "similarity": <value>}`. This makes long-content dedup semantics symmetric with short-content (A).
+3. Chunks themselves are **not** given per-chunk sha guards and bypass per-chunk near-duplicate checks. Reason: sliding-window chunks are overlapping by design and would otherwise reject each other.
 
-If the parent-level exact check passes, a single `save_memory` call writes, in order:
-- `doc:<parent_id>` via HSET + EXPIRE + `docsha:<sha1(full_text)>` guard
-- One `mem:<chunk_id>` per chunk via HSET + EXPIRE (no sha guard; `parent_id` field set to the parent id)
+If both parent-level checks pass, a single `save_memory` call writes, in order:
+- `doc:<parent_id>` via HSET + EXPIRE + `docsha:<sha1(full_text)>` guard (one pipeline)
+- All chunk HSET + EXPIRE commands batched in a **single pipeline** (no per-chunk sha guard; each chunk's `parent_id` field is set to the parent id)
 
 ### 3.9 Startup Sequence & Self-Recovery
 
@@ -356,13 +368,13 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 1. **Load config** (`load_config()`):
    - Read `config.json` from the data directory.
-   - **If the file is corrupt (JSON parse error)**: log a warning to `stderr` and fall back to defaults. Unlike the paid build, the Lite does **not** attempt DB-based recovery — Redis may already be empty (TTL-expired). A fresh UUIDv4 pair is generated and written.
+   - **If the file is corrupt (JSON parse error)**: log a warning to `stderr` and fall back to defaults. Unlike the forthcoming Pro build, the Lite does **not** attempt DB-based recovery — Redis may already be empty (TTL-expired). A fresh UUIDv4 pair is generated and written.
    - Apply `N3MC_REDIS_URL` env-var override (takes precedence over the file).
    - If any field is missing, fill with defaults and persist.
 
 2. **Redis connect & ping**:
    - Build a client from `redis_url`.
-   - `PING`. **If it fails**: log a warning to `stderr` with both startup hints (first-time: `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`; restart: `docker start redis-stack`) and continue with a non-functional client. Every subsequent tool call returns an error with the same hints. The server stays up — the client can hot-fix Redis without restarting the MCP.
+   - `PING`. **If it fails**: log a warning to `stderr` with both startup hints (first-time: `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`; restart: `docker start redis-stack`) and continue with a non-functional client. Every subsequent tool call returns an **explicit error** with the same hints — `save_memory`, `delete_memory`, and `repair_memory` return `{"status": "error", ...}` JSON; `search_memory` and `list_memories` surface a `TextContent` starting with `Error:` that includes the recovery hint. This matches the [§5](#5-behavioral-instructions-auto-save-strategy) contract that tells the AI client to announce backend failures instead of silently falling back to "no memory found". The server stays up — the client can hot-fix Redis without restarting the MCP.
 
 3. **Ensure RediSearch index** (`ensure_index()`):
    - `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...` as per [§3.5](#35-data-layout).
@@ -381,41 +393,63 @@ The `repair_memory` tool in the Lite build is a **thin idempotent operation**: i
 
 Return shape: `{"status": "ok", "message": "index ensured"}`, or `{"status": "error", "message": "<detail>"}` on failure.
 
-This is a deliberate simplification versus the paid build (which runs FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 7 d old.
+This is a deliberate simplification versus the forthcoming Pro build (which will run FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 7 d old.
 
 ### 3.11 Verbatim Recall (Parent-Document + Chunks Pattern)
 
 When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the server automatically:
 
 1. Splits the body into sliding windows of `chunk_threshold` chars with `chunk_overlap` overlap (default 100).
-2. Allocates a fresh `parent_id` (UUIDv7) and writes `doc:<parent_id>` with the **full verbatim body** (after `purify` — no truncation). Sets `docsha:<sha1(full_text)>` as the parent-level exact-duplicate guard.
-3. Writes each chunk as its own `mem:<chunk_id>` via HSET + EXPIRE with its `parent_id` TAG field populated. Per-chunk sha guards and near-duplicate checks are skipped (see [§3.8 (B)](#38-duplicate-rejection)).
+2. Allocates a fresh `parent_id` (UUIDv7) and writes `doc:<parent_id>` with the **full verbatim body** (no truncation, no code-block stripping — the input is stored byte-for-byte). Sets `docsha:<sha1(full_text)>` as the parent-level exact-duplicate guard.
+3. Batches all chunk HSET + EXPIRE commands in a **single pipeline**, setting each `mem:<chunk_id>`'s `parent_id` TAG field to the parent id. Per-chunk sha guards and per-chunk near-duplicate checks are skipped (parent-level near-dedup handles this — see [§3.8 (B)](#38-duplicate-rejection)).
 
 `search_memory` integration:
 
 - `hybrid_search` scores and ranks against the chunk index as usual and includes each chunk's `parent_id` in its result dicts.
-- The dispatcher post-processes hits: for each result whose `parent_id` is non-empty,
+- The dispatcher post-processes hits **before** lexical rerank: for each result whose `parent_id` is non-empty,
   - If the same `parent_id` has already been emitted → drop as duplicate (keep the highest-scoring hit).
-  - First occurrence → `HGET doc:<parent_id>` to fetch the full body, substitute it into the result, and replace the id with the parent id.
-- Rendered output tags parent hits with `[doc]` in the markdown.
+  - First occurrence → `HGET doc:<parent_id>` to fetch the full body and substitute it into the result, replacing the id with the parent id.
+- The subsequent lexical rerank (token-coverage + phrase bonus) therefore sees the **full verbatim body** for parent hits, not just the matched chunk — a query phrase that appears in a non-matching chunk of the same document still boosts the parent's rank correctly.
+- When `ttl_refresh_on_search` is enabled, TTL refresh is applied to the top-K **after** rerank: for each hit the underlying `mem:<chunk_id>` (or standalone `mem:<id>`) key is refreshed and its `access_count` is incremented; if the hit resolved to a parent document, the `doc:<parent_id>` key's TTL is also refreshed so verbatim recall stays alive alongside its chunks.
+- Rendered output tags parent hits with `[doc×N]` (N = `chunk_count`) in the markdown.
 
 `list_memories` integration:
 
-- The RediSearch query excludes chunks via `-@parent_id:{*}` (only standalone memories).
-- These are merged with parent docs fetched by `SCAN doc:*` (owner-scoped) and sorted by timestamp desc.
+- Issues a `*` (match-all) FT.SEARCH query; `owner_id` and `parent_id` are included in the RETURN fields. Python filters the result set to records whose `owner_id` matches and whose `parent_id` is an empty string (standalone memories only). The `-@parent_id:{*}` TAG filter is not used because UUID values in TAG queries cause parse errors in RediSearch (see §3.12).
+- These are merged with parent docs fetched by `SCAN doc:*` (owner-filtered in Python) and sorted by timestamp desc.
 - Parent rows render with a `[doc×N]` tag where N is `chunk_count`.
 
 `delete_memory` integration:
 
-- If the id resolves to a `doc:<uuid>` key, the parent, `docsha:`, and every chunk matching `@parent_id:{<id>}` are deleted in a single pipeline.
+- If the id resolves to a `doc:<uuid>` key, the server first attempts `FT.SEARCH @parent_id:{<id>}` to collect chunks. If that TAG query fails (UUID hyphen issue — §3.12), it falls back to `SCAN mem:*` and checks the `parent_id` field in Python. The parent, `docsha:`, and all collected chunks are then deleted in a single pipeline.
 - Otherwise the usual single-memory delete applies.
 
 **Design invariants**:
 - Parent rows are intentionally excluded from the RediSearch index (kept outside `PREFIX 1 mem:`). Ranking therefore always operates on chunk bodies, so a long parent body never distorts time-decay or BM25 norms.
 - `stored_importance` and `access_count` live on chunks, not parents. A parent is the "verbatim box" and carries no ranking state.
-- As long as the parent is alive, a single chunk hit reconstructs the full body. If a parent TTL-expires while chunks are still alive, orphaned chunks surface as their own short-text hits (a graceful degrade, not a regression).
+- As long as the parent is alive, a single chunk hit reconstructs the full body. When `ttl_refresh_on_search` is enabled (default `true`), every chunk hit that fetches the parent doc also refreshes the `doc:` key's TTL, so the parent and its chunks age together under normal use. Should the parent expire — e.g. with `ttl_refresh_on_search: false`, or if it was never searched during its initial 7-day window — orphaned chunks surface as their own short-text hits (a graceful degrade, not a regression).
 
 **Use cases**: when the user wants to retrieve an exact original body later ("save this setting/spec/article so I can pull it verbatim"). For the split between this mode and fact-extraction, see [§1 "Large text handling (two modes)"](#1-vision).
+
+### 3.12 UUID TAG Query Constraint & Python-side Owner Filtering
+
+**Background**: RediSearch TAG field queries (`@field:{value}`) treat the hyphen character (`-`) as a special operator inside the `{...}` delimiters. Because every UUID (e.g. `041500aa-4b54-4f49-ab4c-82045865072c`) contains hyphens in every segment, injecting a UUID into a TAG query causes a parse error regardless of whether the hyphen is backslash-escaped (`\-`) or left bare. This behavior was confirmed on Redis Stack 7.x and affects both KNN hybrid queries and BM25 FT.SEARCH queries.
+
+**Design decision**: Remove `owner_id` (and, where relevant, `parent_id`) from all FT.SEARCH query strings. Instead, include them as `RETURN` fields and filter in Python after the query returns.
+
+**Affected methods and how each is handled**:
+
+| Method | FT.SEARCH query | Python filtering |
+|---|---|---|
+| `_vector_search` | `*=>[KNN N @embedding $vec AS __dist]` — no owner filter; `owner_id` added to RETURN | Keep only records where `owner_id` matches |
+| `_bm25_search` | `(@content:(...) \| @content_ngram:(...))` — no owner filter; `owner_id` added to RETURN | Keep only records where `owner_id` matches |
+| `_near_dedup` | `*=>[KNN 5 @embedding $vec AS __dist]` — global fetch of 5 candidates; `owner_id` added to RETURN | Check `owner_id` match before applying cosine threshold |
+| `list_memories` | `*` (match-all); `owner_id` and `parent_id` added to RETURN | Keep records where `owner_id` matches **and** `parent_id` is empty string |
+| `delete_memory` (cascade) | Attempt `@parent_id:{<id>}` via FT.SEARCH first; on parse error fall back to `SCAN mem:*` | In fallback path, compare `parent_id` field value in Python |
+
+**Performance note**: Fetching globally and filtering in Python incurs extra network transfer when multiple owner IDs share the same Redis instance. The Lite build assumes a single-user, single-install deployment, so this is not a practical concern. Should multi-tenant use arise, consider storing a separate hyphen-free derived field (e.g. `owner_id_tag = owner_id.replace("-", "")`) alongside the canonical `owner_id` and using that field for TAG queries.
+
+**The TAG index schema is preserved**: The `owner_id` and `parent_id` TAG field declarations in §3.5 remain intact. If a future Redis Stack release resolves the UUID hyphen parse error, the Python-side filtering can be moved back into the FT.SEARCH queries without any schema migration.
 
 ---
 
@@ -435,13 +469,13 @@ The server advertises:
 
 ### 4.3 Tools
 
-Five tools are exposed via `tools/list` (same names as the paid build):
+Five tools are exposed via `tools/list` (same names as the forthcoming Pro build):
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
 | `search_memory` | `query: string, limit?: int`              | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Returns markdown. |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number` | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. |
-| `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (filtered via `-@parent_id:{*}`). |
+| `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). |
 | `delete_memory` | `id: string`                              | If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk with matching `parent_id`. Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
 | `repair_memory` | —                                         | `ensure_index()`; see [§3.10](#310-repair).                            |
 
@@ -465,6 +499,8 @@ The instructions require the LLM to:
 4. **Handle tool errors visibly — never generate long content blind** — if `search_memory` / `save_memory` returns a server error (Redis unreachable, connection refused, timeout, "start Redis Stack" hint, etc.), **STOP and surface the failure to the user in their language BEFORE generating any long creative or spec content**. Rationale: with the backend down, every subsequent `save_memory` also fails silently, so a long setting / design doc / code architecture produced during the outage is lost the moment the session closes — and the user will not realize the memory layer was broken until recall fails. Required behavior: (a) announce the failure succinctly (e.g. "Memory backend is unreachable — save/search are offline right now"), (b) relay the recovery hint the tool returned (e.g. `docker run -p 6379:6379 redis/redis-stack-server:latest`), (c) ask whether to proceed without memory (so the user knows this session will not persist) or to pause until the backend is restored. Short factual replies may proceed, but must still mention the error once so the user knows saves are failing.
 5. **Skip noise** — do not save greetings, clarifying questions, or mechanical acknowledgements.
 6. **Respect explicit requests** — honor "don't save this" and "forget that" (use `delete_memory`).
+7. **Inform the user about the 7-day TTL when they expect permanence** — the TTL is visible to the LLM (this INSTRUCTIONS block, the `search_memory` tool description, and the `ttl_seconds` field on every `save_memory` response) but is **invisible to the human user**. Default behavior remains silent auto-save (rule 2) — do NOT mention TTL on every save. However, when the user's message signals an expectation of long-term retention — explicit permanence phrases ("remember this forever", "don't forget", "save permanently", 「ずっと覚えておいて」「永続的に保存して」), a long setting / spec / code dump / world-building / character sheet the user obviously invested in, or a reference back to content saved more than ~5 days ago — add ONE short sentence in the user's language reminding them that Lite memories auto-expire 7 days after save, noting that the **Pro build (sqlite-vec backed, coming soon)** will offer persistence, and suggesting external backup in the meantime. Save anyway; do not ask permission. Emit the reminder ONCE per distinct long-term signal, not once per turn and not once per save. Rationale: without this rule, the LLM silently persists content that the user believes is permanent, and the user only discovers the loss when recall fails mid-project.
+8. **Respect the `skip_code_blocks` server policy** — when `save_memory` returns `{"status": "skipped_code", "saved": false}`, the server is configured to reject any payload containing a triple-backtick fence (see [§6](#6-configuration)). This mirrors the FastAPI-era N3MemoryCore's code-exclusion behavior for users who intentionally keep code out of memory. Do NOT retry the same payload; either save a prose description of what the code does, or skip saving for that turn. Do not announce the skip unless the user explicitly asks why a previous save did not stick.
 
 The full text is in [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py).
 
@@ -498,7 +534,8 @@ Complete schema (missing fields auto-filled with defaults below):
   "ttl_refresh_top_k":        5,
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
-  "rerank_phrase_weight":     0.2
+  "rerank_phrase_weight":     0.2,
+  "skip_code_blocks":         false
 }
 ```
 
@@ -510,8 +547,9 @@ Complete schema (missing fields auto-filled with defaults below):
 - `search_query_max_chars` — max characters used from a query (default `2000`; embedding model caps at ~512 tokens).
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (defaults 400 / 100 chars). Bodies longer than the threshold trigger the parent-document + chunks path (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 - `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — enable flag, per-hit weight, and cap for the frequency boost (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` disables the feature entirely and the formula falls back to `stored_importance` only.
-- `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL-reset and `access_count` increment for the top-K hits after each search. Reset-only (no lifetime extension beyond a fresh save).
+- `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL-reset and `access_count` increment for the top-K hits after each search. Reset-only (no lifetime extension beyond a fresh save). When a chunk hit expands to its parent document, the `doc:<parent_id>` key's TTL is also refreshed alongside the chunk's `mem:` key, keeping verbatim recall ability alive in sync with the chunks.
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` passes the fused score through unchanged.
+- `skip_code_blocks` — when `true`, `save_memory` rejects any content containing a triple-backtick fence (```` ``` ````) and returns `{"status": "skipped_code", "saved": false}`. Default `false` (inherit the FastAPI-era N3MemoryCore behavior where users who did not want code in memory could opt out). Heuristic only — the fence marker is the signal; mixed prose+code is rejected wholesale, not stripped. The LLM is instructed (§5) to avoid retrying the same payload on `skipped_code` and to save a prose description instead.
 
 > **Multi-account on a single PC**: each OS user runs the server under their own `config.json` by default. To share a Redis across accounts, set the same `redis_url` in both configs — entries are segregated via the `owner_id` TAG filter.
 
@@ -740,22 +778,7 @@ pytest tests/ -v -k "not TestEmbedding"
 
 ---
 
-## Appendix A: Recommended Review Workflow
-
-After an AI regenerates the implementation from this spec, review it in this order:
-
-1. **Data flow trace** — ask the AI to read the code and trace the end-to-end path from a `save_memory` tool call to the Redis pipeline's `EXECUTE`, and from a `search_memory` call back to the tool response. Confirm no silent data loss, and confirm TTL is set on every write.
-2. **Spec ↔ code comparison** — walk each tool (§4.3) one-by-one, comparing the input schema and behavior in this document to the implementation.
-3. **TTL test** — save an entry with a short `ttl_seconds` (e.g. 5) via a direct config override, wait, and confirm both `mem:<uuid>` and `mem:sha:<sha1>` are gone (proves §3.3 and §3.4 compliance).
-4. **Cross-session test (within 7 d)** — save in session 1, restart the MCP server (not Redis), search in session 2. Confirm the saved entry is retrievable.
-5. **Dedup test** — save the same content twice; confirm the second call returns `status: "duplicate"`. Save near-paraphrases; confirm near-duplicate rejection.
-6. **Redis-down test** — stop Redis, call any tool, confirm the server returns the "start Redis Stack" hint without crashing. Restart Redis, confirm tools work again without restarting the MCP process.
-
-These steps are operated by the human reviewer, not automated tests.
-
----
-
-## Appendix B: Optional Extensions (not shipped)
+## Appendix A: Optional Extensions (not shipped)
 
 The Lite build intentionally stops at the hybrid + time-decay ranker described in §3.6. The following extensions are **not part of the shipped spec** — they are sketched here so a future AI or contributor has a clean starting map when the user decides to try them. None of them are required for the Lite build to behave correctly; each is a precision-vs-latency trade.
 
@@ -767,7 +790,7 @@ All three extensions are additive — none of them require changes to the Redis 
 
 ---
 
-## Appendix C: Recommended AI-Assisted Workflow
+## Appendix B: Recommended AI-Assisted Workflow
 
 > **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code (or your preferred MCP client). The AI does not advance to the next phase on its own. Unlike the Free build, which is driven by slash commands, the MCP Lite build is driven by **MCP tool calls** (`save_memory` / `search_memory` / `list_memories` / `delete_memory` / `repair_memory`).
 
@@ -847,10 +870,10 @@ time decay / auto importance). Generate a scorecard.
 Opus will actually call the MCP tools and produce a two-axis scorecard: **memory device** (persistence, TTL, dedup, parent doc) vs. **RAG** (retrieval precision, ranking, noise resistance).
 
 > **Note**: the MCP Lite build ships a lightweight reranker and CJK bigram expansion by default, so the RAG ceiling sits slightly higher than in the Free build. Even so, the following are not implemented, and **the RAG score is unlikely to exceed 8:**
-> - Morphological analysis (MeCab / SudachiPy, etc.) for stricter word boundaries (see Appendix B)
-> - A full cross-encoder reranker (see Appendix B)
+> - Morphological analysis (MeCab / SudachiPy, etc.) for stricter word boundaries (see Appendix A)
+> - A full cross-encoder reranker (see Appendix A)
 > - Language-specialized embedding models (e.g. `multilingual-e5-large`)
-> - Query-expansion techniques such as HyDE (see Appendix B)
+> - Query-expansion techniques such as HyDE (see Appendix A)
 >
 > Soft grading robs you of improvement opportunities — grade strictly. **Regardless of the score, have Opus explicitly list what is missing and discuss concrete fixes with it.**
 

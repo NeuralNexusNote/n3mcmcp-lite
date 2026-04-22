@@ -1,726 +1,718 @@
-"""
-Redis-backed storage layer for the N3MemoryCore MCP **Lite** server.
-
-The Lite variant is deliberately ephemeral:
-  - Every entry is written with a 7d (configurable) TTL.
-  - No SQLite file, no migrations, no integrity checks.
-  - Redis Stack (RediSearch + RedisJSON) is required. First install:
-    ``docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest``.
-    Persistence is disabled by the server at connect time (see
-    ``server._enforce_ephemeral``) — no docker flags needed.
-    Subsequent runs (container already created): ``docker start redis-stack``.
-
-Data layout
------------
-  mem:<uuid>                HASH   the memory record (or chunk)
-      id              string      (same uuid)
-      content         string      original text (chunk text if chunked)
-      timestamp       string      ISO-8601 UTC
-      timestamp_epoch number      unix seconds (sortable)
-      owner_id        string      user/tenant uuid
-      local_id        string      install uuid
-      agent_name        string      "claude" / "user" / ""
-      session_id      string      per-process uuid
-      parent_id       string      doc id if this row is a chunk of a parent
-                                  document, else ""
-      embedding       bytes       float32 * 768 (little-endian)
-
-  mem:sha:<sha1>            STRING value = mem id   (exact-duplicate guard,
-                                                     same TTL)
-
-  doc:<uuid>                HASH   parent document (full verbatim text);
-                                   NOT in the RediSearch index
-      id, content, timestamp, timestamp_epoch, owner_id, local_id,
-      agent_name, session_id, chunk_count
-
-  docsha:<sha1>             STRING value = doc id   (parent-level exact
-                                                     duplicate guard)
-
-  n3mc_idx                  RediSearch index over the mem:* prefix
-
-Both keys are deleted automatically by Redis once their TTL expires; no
-background cleanup is required.
-"""
-from __future__ import annotations
-
 import hashlib
 import re
-import struct
-import time
+import sys
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
-from redis import Redis
-from redis.commands.search.field import (
-    NumericField,
-    TagField,
-    TextField,
-    VectorField,
+_CODE_FENCE_RE = re.compile(r"```")
+
+
+def _contains_code_block(text: str) -> bool:
+    """Heuristic: treat triple-backtick fences as a code-block signal."""
+    return bool(_CODE_FENCE_RE.search(text))
+
+import redis as redis_lib
+
+from .processor import (
+    b_local,
+    cjk_bigram_expand,
+    chunk_text,
+    cosine_sim_from_distance,
+    embed,
+    final_score,
+    keyword_relevance,
+    lexical_rerank,
+    prepare_query,
+    time_decay,
 )
-try:  # redis-py >= 6: snake_case module
-    from redis.commands.search.index_definition import IndexDefinition, IndexType
-except ImportError:  # redis-py <= 5: legacy camelCase module
-    from redis.commands.search.indexDefinition import IndexDefinition, IndexType  # type: ignore
-from redis.commands.search.query import Query
-from redis.exceptions import ResponseError
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 INDEX_NAME = "n3mc_idx"
-KEY_PREFIX = "mem:"
-HASH_PREFIX = "mem:sha:"
-DOC_KEY_PREFIX = "doc:"
-DOC_SHA_PREFIX = "docsha:"
-VECTOR_DIM = 768
 
-# RediSearch query special characters that must be escaped in user input.
-# https://redis.io/docs/interact/search-and-query/advanced-concepts/escaping/
-_FTS_SPECIAL_RE = re.compile(r'([,\.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])')
-
-# A soft punctuation stripper for the user's query text (keeps letters /
-# digits / whitespace / CJK). We strip first and escape what remains.
-_PUNCT_STRIP_RE = re.compile(r'[,\.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?`]')
-
-# CJK Unified Ideographs + common CJK extension blocks.
-_CJK_RUN_RE = re.compile(r'[\u3000-\u9fff\uf900-\ufaff\ufe30-\ufe4f]+')
+_DOCKER_HINT = (
+    "Redis Stack が起動していません。"
+    "docker start redis-stack または "
+    "docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest "
+    "を実行してください。"
+)
 
 
-# ---------------------------------------------------------------------------
-# Client / index setup
-# ---------------------------------------------------------------------------
-def get_redis_client(url: str) -> Redis:
-    """Construct a Redis client for the given URL (decode_responses=False)."""
-    # decode_responses=False because embeddings are raw bytes.
-    return Redis.from_url(url, decode_responses=False)
-
-
-def ensure_index(client: Redis) -> None:
-    """Create the RediSearch index if it does not already exist.
-
-    When the index already exists, attempt to add newer optional fields
-    (content_ngram, importance) via FT.ALTER so existing deployments get
-    the upgrade without a full drop/recreate.
-    """
-    _NEW_FIELDS = [
-        TextField("content_ngram", weight=0.8),
-        NumericField("importance"),
-        NumericField("access_count"),
-        TagField("parent_id"),
-    ]
-    schema = (
-        TextField("content", weight=1.0),
-        NumericField("timestamp_epoch", sortable=True),
-        TagField("owner_id"),
-        TagField("local_id"),
-        TagField("agent_name"),
-        TagField("session_id"),
-        VectorField(
-            "embedding",
-            "FLAT",
-            {
-                "TYPE": "FLOAT32",
-                "DIM": VECTOR_DIM,
-                "DISTANCE_METRIC": "COSINE",
-            },
-        ),
-        *_NEW_FIELDS,
-    )
-    definition = IndexDefinition(prefix=[KEY_PREFIX], index_type=IndexType.HASH)
-    try:
-        client.ft(INDEX_NAME).create_index(schema, definition=definition)
-    except ResponseError as e:
-        if "already exists" not in str(e).lower():
-            raise
-        # Index already exists — try to add the new fields (idempotent).
-        try:
-            client.ft(INDEX_NAME).alter_schema_add(_NEW_FIELDS)
-        except (ResponseError, Exception):
-            pass  # fields already present or FT.ALTER unsupported
-
-
-def ping(client: Redis) -> bool:
-    try:
-        return bool(client.ping())
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
-# Vector serialization
-# ---------------------------------------------------------------------------
-def vector_to_bytes(vec: list[float]) -> bytes:
-    """Pack a Python float list as little-endian FLOAT32 bytes."""
-    return struct.pack(f"<{len(vec)}f", *vec)
-
-
-def bytes_to_vector(b: bytes) -> list[float]:
-    n = len(b) // 4
-    return list(struct.unpack(f"<{n}f", b))
-
-
-# ---------------------------------------------------------------------------
-# Text helpers
-# ---------------------------------------------------------------------------
-def strip_fts_punctuation(text: str) -> str:
-    """Collapse punctuation for BM25-style tokenization."""
-    return _PUNCT_STRIP_RE.sub(" ", text)
-
-
-def _escape_redis_query(text: str) -> str:
-    """Backslash-escape RediSearch special chars in a user query string."""
-    return _FTS_SPECIAL_RE.sub(r"\\\1", text)
-
-
-def _escape_tag(value: str) -> str:
-    """Escape a TAG value for use inside ``@field:{value}`` expressions."""
-    return re.sub(
-        r'([ ,\.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])', r"\\\1", value
-    )
-
-
-def cjk_bigram_expand(text: str) -> str:
-    """Expand contiguous CJK runs into overlapping bigrams separated by spaces.
-
-    Example: "記憶装置" → "記憶 憶装 装置"
-    Non-CJK portions pass through unchanged. Single CJK chars are kept as-is.
-    This lets RediSearch's whitespace tokenizer index each bigram individually,
-    dramatically improving BM25 recall for Japanese / Chinese queries.
-    """
-    def _expand(m: re.Match) -> str:
-        run = m.group(0)
-        if len(run) < 2:
-            return run
-        return " ".join(run[i : i + 2] for i in range(len(run) - 1))
-
-    return _CJK_RUN_RE.sub(_expand, text)
-
-
-def sha1_of(text: str) -> str:
+def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Core CRUD
-# ---------------------------------------------------------------------------
-def insert_memory(
-    client: Redis,
-    record_id: str,
-    content: str,
-    timestamp: str,
-    owner_id: str,
-    embedding: Optional[list[float]],
-    local_id: Optional[str] = None,
-    agent_name: Optional[str] = None,
-    session_id: Optional[str] = None,
-    ttl_seconds: int = 604800,
-    importance: float = 1.0,
-    parent_id: Optional[str] = None,
-    skip_sha_guard: bool = False,
-) -> None:
-    """Insert a memory record with TTL. Embedding is required for vector search.
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    When ``parent_id`` is provided, this row is a chunk belonging to a parent
-    document (see ``insert_parent_doc``). Chunks typically pass
-    ``skip_sha_guard=True`` since the parent's sha guard already dedupes the
-    full text and overlapping chunks would collide pointlessly.
-    """
+
+def _now_epoch() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _new_id() -> str:
     try:
-        ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        if ts_dt.tzinfo is None:
-            ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-        ts_epoch = ts_dt.timestamp()
-    except Exception:
-        ts_epoch = time.time()
-
-    mapping: dict[str, Any] = {
-        "id": record_id,
-        "content": content,
-        "content_ngram": cjk_bigram_expand(content),
-        "timestamp": timestamp,
-        "timestamp_epoch": ts_epoch,
-        "owner_id": owner_id or "",
-        "local_id": local_id or "",
-        "agent_name": agent_name or "",
-        "session_id": session_id or "",
-        "importance": max(0.5, min(2.0, float(importance))),
-        "access_count": 0,
-        "parent_id": parent_id or "",
-    }
-    if embedding is not None:
-        mapping["embedding"] = vector_to_bytes(embedding)
-
-    key = f"{KEY_PREFIX}{record_id}"
-    pipe = client.pipeline()
-    pipe.hset(key, mapping=mapping)
-    pipe.expire(key, ttl_seconds)
-
-    if not skip_sha_guard:
-        sha_key = f"{HASH_PREFIX}{sha1_of(content)}"
-        pipe.set(sha_key, record_id, ex=ttl_seconds)
-    pipe.execute()
+        from uuid_utils import uuid7
+        return str(uuid7())
+    except ImportError:
+        return str(uuid.uuid4())
 
 
-def delete_memory(client: Redis, record_id: str) -> bool:
-    """Delete a memory record and its sha1 guard. Returns True if it existed.
+def _escape_tag(val: str) -> str:
+    # Hyphens in UUID TAG values do not need escaping in Redis Stack 7.x DIALECT 2
+    special = set(".,@!(){}|^?~&*+#$%")
+    return "".join(("\\" + ch if ch in special else ch) for ch in val)
 
-    If ``record_id`` names a parent document (``doc:<id>``), cascades to all
-    chunks whose ``parent_id`` matches. Chunks can still be deleted
-    individually by passing a chunk's own id.
-    """
-    # Parent-document path: cascade to all chunks.
-    doc_key = f"{DOC_KEY_PREFIX}{record_id}"
-    if client.exists(doc_key):
-        return delete_parent_doc(client, record_id)
 
-    key = f"{KEY_PREFIX}{record_id}"
-    content = client.hget(key, "content")
-    if content is None:
-        return False
-    pipe = client.pipeline()
-    pipe.delete(key)
-    if isinstance(content, bytes):
+def _parse_fields(flist) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not flist:
+        return result
+    for j in range(0, len(flist) - 1, 2):
+        k = flist[j].decode("utf-8") if isinstance(flist[j], bytes) else str(flist[j])
+        v = flist[j + 1].decode("utf-8") if isinstance(flist[j + 1], bytes) else str(flist[j + 1])
+        result[k] = v
+    return result
+
+
+def _to_float(v, default: float = 1.0) -> float:
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+
+def _to_int(v, default: int = 0) -> int:
+    try:
+        return int(float(v))
+    except (ValueError, TypeError):
+        return default
+
+
+class Database:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self._client: Optional[redis_lib.Redis] = None
+        self._ok = False
+
+    # ── connection ──────────────────────────────────────────────────────────
+
+    def connect(self) -> bool:
         try:
-            content_str = content.decode("utf-8")
-        except Exception:
-            content_str = ""
-    else:
-        content_str = content
-    if content_str:
-        pipe.delete(f"{HASH_PREFIX}{sha1_of(content_str)}")
-    results = pipe.execute()
-    return bool(results and results[0])
-
-
-# ---------------------------------------------------------------------------
-# Parent-document helpers (Option A: full-text recall)
-# ---------------------------------------------------------------------------
-def check_parent_exact_duplicate(client: Redis, content: str) -> Optional[str]:
-    """Return the parent doc id if an identical full-text doc already exists."""
-    val = client.get(f"{DOC_SHA_PREFIX}{sha1_of(content)}")
-    if val is None:
-        return None
-    return val.decode("utf-8") if isinstance(val, bytes) else str(val)
-
-
-def insert_parent_doc(
-    client: Redis,
-    doc_id: str,
-    content: str,
-    timestamp: str,
-    owner_id: str,
-    local_id: Optional[str] = None,
-    agent_name: Optional[str] = None,
-    session_id: Optional[str] = None,
-    chunk_count: int = 0,
-    ttl_seconds: int = 604800,
-) -> None:
-    """Insert a parent full-text document. Not indexed by RediSearch."""
-    try:
-        ts_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        if ts_dt.tzinfo is None:
-            ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-        ts_epoch = ts_dt.timestamp()
-    except Exception:
-        ts_epoch = time.time()
-
-    mapping: dict[str, Any] = {
-        "id": doc_id,
-        "content": content,
-        "timestamp": timestamp,
-        "timestamp_epoch": ts_epoch,
-        "owner_id": owner_id or "",
-        "local_id": local_id or "",
-        "agent_name": agent_name or "",
-        "session_id": session_id or "",
-        "chunk_count": int(chunk_count),
-    }
-    key = f"{DOC_KEY_PREFIX}{doc_id}"
-    pipe = client.pipeline()
-    pipe.hset(key, mapping=mapping)
-    pipe.expire(key, ttl_seconds)
-    pipe.set(f"{DOC_SHA_PREFIX}{sha1_of(content)}", doc_id, ex=ttl_seconds)
-    pipe.execute()
-
-
-def get_parent_doc(client: Redis, doc_id: str) -> Optional[dict]:
-    """Fetch a parent document by id. Returns None if missing."""
-    key = f"{DOC_KEY_PREFIX}{doc_id}"
-    raw = client.hgetall(key)
-    if not raw:
-        return None
-    out: dict[str, Any] = {}
-    for k, v in raw.items():
-        k_s = k.decode("utf-8") if isinstance(k, bytes) else k
-        if isinstance(v, bytes):
-            try:
-                out[k_s] = v.decode("utf-8")
-            except Exception:
-                out[k_s] = ""
-        else:
-            out[k_s] = v
-    return out
-
-
-def _find_chunk_ids_for_parent(
-    client: Redis, parent_id: str, owner_id: Optional[str] = None
-) -> list[str]:
-    """Return all chunk record ids whose parent_id matches."""
-    parent_tag = _escape_tag(parent_id)
-    owner_filter = f" @owner_id:{{{_escape_tag(owner_id)}}}" if owner_id else ""
-    q_str = f"@parent_id:{{{parent_tag}}}{owner_filter}"
-    q = Query(q_str).return_fields("id").paging(0, 1000).dialect(2)
-    try:
-        res = client.ft(INDEX_NAME).search(q)
-    except ResponseError:
-        return []
-    out: list[str] = []
-    for doc in res.docs:
-        rid = _strip_key_prefix(_as_str(getattr(doc, "id", "")))
-        if rid:
-            out.append(rid)
-    return out
-
-
-def delete_parent_doc(client: Redis, doc_id: str) -> bool:
-    """Delete a parent doc and cascade to all its chunks. Returns True on hit."""
-    doc_key = f"{DOC_KEY_PREFIX}{doc_id}"
-    content = client.hget(doc_key, "content")
-    if content is None:
-        return False
-    content_str = content.decode("utf-8") if isinstance(content, bytes) else str(content)
-
-    chunk_ids = _find_chunk_ids_for_parent(client, doc_id)
-
-    pipe = client.pipeline()
-    pipe.delete(doc_key)
-    if content_str:
-        pipe.delete(f"{DOC_SHA_PREFIX}{sha1_of(content_str)}")
-    for cid in chunk_ids:
-        pipe.delete(f"{KEY_PREFIX}{cid}")
-    pipe.execute()
-    return True
-
-
-def list_parent_docs(
-    client: Redis, limit: int = 20, owner_id: Optional[str] = None
-) -> list[dict]:
-    """Return recent parent docs, newest first. Owner-scoped if provided."""
-    rows: list[dict] = []
-    cursor = 0
-    match = f"{DOC_KEY_PREFIX}*"
-    scanned = 0
-    while True:
-        cursor, keys = client.scan(cursor=cursor, match=match, count=200)
-        for raw_key in keys:
-            scanned += 1
-            if scanned > 5000:
-                break
-            key = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else raw_key
-            # Pull only the fields we need to rank/display.
-            data = client.hmget(
-                key,
-                "id",
-                "content",
-                "timestamp",
-                "timestamp_epoch",
-                "owner_id",
-                "agent_name",
-                "chunk_count",
+            self._client = redis_lib.Redis.from_url(
+                self.cfg["redis_url"], decode_responses=False
             )
-            if not data or data[0] is None:
-                continue
-            doc_id, content, ts, ts_epoch, owner, agent, chunk_count = (
-                _as_str(data[0]),
-                _as_str(data[1]),
-                _as_str(data[2]),
-                _as_str(data[3]),
-                _as_str(data[4]),
-                _as_str(data[5]),
-                _as_str(data[6]),
+            self._client.ping()
+            self._ok = True
+            return True
+        except Exception as e:
+            print(f"[n3mc] Redis connect failed: {e}", file=sys.stderr)
+            print(f"[n3mc] Hint: {_DOCKER_HINT}", file=sys.stderr)
+            self._ok = False
+            return False
+
+    def enforce_ephemeral(self) -> None:
+        if not self._ok:
+            return
+        try:
+            self._client.config_set("appendonly", "no")
+            self._client.config_set("save", "")
+        except Exception as e:
+            print(f"[n3mc] enforce_ephemeral: {e}", file=sys.stderr)
+
+    def ensure_index(self) -> None:
+        if not self._ok:
+            return
+        try:
+            self._client.execute_command(
+                "FT.CREATE", INDEX_NAME,
+                "ON", "HASH", "PREFIX", "1", "mem:",
+                "SCHEMA",
+                "content", "TEXT", "WEIGHT", "1.0",
+                "content_ngram", "TEXT", "WEIGHT", "0.8",
+                "timestamp_epoch", "NUMERIC", "SORTABLE",
+                "owner_id", "TAG",
+                "local_id", "TAG",
+                "agent_name", "TAG",
+                "session_id", "TAG",
+                "importance", "NUMERIC",
+                "access_count", "NUMERIC",
+                "parent_id", "TAG",
+                "embedding", "VECTOR", "FLAT", "6",
+                "TYPE", "FLOAT32",
+                "DIM", "768",
+                "DISTANCE_METRIC", "COSINE",
             )
-            if owner_id and owner != owner_id:
-                continue
-            try:
-                ts_sort = float(ts_epoch)
-            except Exception:
-                ts_sort = 0.0
-            rows.append({
-                "id": doc_id,
-                "content": content,
-                "timestamp": ts,
-                "timestamp_epoch": ts_sort,
-                "agent_name": agent,
-                "chunk_count": int(chunk_count) if chunk_count.isdigit() else 0,
-                "is_parent": True,
-            })
-        if cursor == 0 or scanned > 5000:
-            break
+        except Exception as e:
+            if "already exists" not in str(e).lower():
+                raise
 
-    rows.sort(key=lambda r: r.get("timestamp_epoch", 0.0), reverse=True)
-    return rows[:limit]
+    # ── save ────────────────────────────────────────────────────────────────
 
+    def save_memory(
+        self,
+        content: str,
+        agent_name: str = "",
+        owner_id: str = "",
+        importance: float = 1.0,
+    ) -> dict:
+        if not self._ok:
+            return {"status": "error", "saved": False, "reason": _DOCKER_HINT}
 
-def count_parent_docs(client: Redis, owner_id: Optional[str] = None) -> int:
-    """Best-effort count of parent docs (owner-scoped if provided)."""
-    cursor = 0
-    match = f"{DOC_KEY_PREFIX}*"
-    total = 0
-    scanned = 0
-    while True:
-        cursor, keys = client.scan(cursor=cursor, match=match, count=500)
-        for raw_key in keys:
-            scanned += 1
-            if scanned > 10000:
-                break
-            if owner_id is None:
-                total += 1
-                continue
-            owner = client.hget(raw_key, "owner_id")
-            owner_s = owner.decode("utf-8") if isinstance(owner, bytes) else (owner or "")
-            if owner_s == owner_id:
-                total += 1
-        if cursor == 0 or scanned > 10000:
-            break
-    return total
+        content = content.strip()
+        if not content:
+            return {"status": "error", "saved": False, "reason": "empty content"}
 
+        cfg_owner = self.cfg["owner_id"]
+        if owner_id and owner_id != cfg_owner:
+            return {"status": "error", "saved": False, "reason": "owner_id mismatch"}
+        owner_id = cfg_owner
 
-def check_exact_duplicate(client: Redis, content: str) -> bool:
-    """O(1) exact-content duplicate check."""
-    return bool(client.exists(f"{HASH_PREFIX}{sha1_of(content)}"))
+        importance = max(0.5, min(2.0, importance))
 
+        if self.cfg.get("skip_code_blocks", False) and _contains_code_block(content):
+            return {
+                "status": "skipped_code",
+                "saved": False,
+                "reason": "content contains a code fence (```); skip_code_blocks=true",
+            }
 
-def increment_access_counts(
-    client: Redis,
-    record_ids: list[str],
-    ttl_seconds: Optional[int] = None,
-) -> None:
-    """Atomically HINCRBY access_count for each id in a single pipeline.
+        # No `purify()` step: the spec's §3.11 verbatim-recall contract
+        # requires full fidelity of what the user saved — stripping code
+        # blocks would break round-tripping of specs/docs/snippets. The
+        # BM25 tokenizer tolerates code-punctuation just fine.
+        threshold = self.cfg.get("chunk_threshold", 400)
 
-    When ``ttl_seconds`` is provided, also refreshes each key's TTL so the
-    access-count update and TTL bump ride the same round-trip.
-    Silently ignores missing keys (already expired).
-    """
-    if not record_ids:
-        return
-    pipe = client.pipeline()
-    for rid in record_ids:
-        key = f"{KEY_PREFIX}{rid}"
-        pipe.hincrby(key, "access_count", 1)
-        if ttl_seconds is not None:
-            pipe.expire(key, ttl_seconds)
-    try:
+        if len(content) <= threshold:
+            return self._save_single(content, agent_name, owner_id, importance)
+        return self._save_parent_chunks(content, agent_name, owner_id, importance)
+
+    def _save_single(
+        self, content: str, agent_name: str, owner_id: str, importance: float
+    ) -> dict:
+        sha = _sha1(content)
+        sha_key = f"mem:sha:{sha}"
+
+        if self._client.exists(sha_key):
+            return {"status": "duplicate", "saved": False}
+
+        vec_bytes = embed(content, is_query=False)
+        if vec_bytes:
+            near = self._near_dedup(vec_bytes, owner_id)
+            if near is not None:
+                return {"status": "near_duplicate", "saved": False, "similarity": near}
+
+        mem_id = _new_id()
+        ngram = cjk_bigram_expand(content)
+        now_iso = _now_iso()
+        now_epoch = _now_epoch()
+        ttl = self.cfg["ttl_seconds"]
+
+        fields: dict = {
+            b"id": mem_id.encode(),
+            b"content": content.encode("utf-8"),
+            b"content_ngram": ngram.encode("utf-8"),
+            b"timestamp": now_iso.encode(),
+            b"timestamp_epoch": str(now_epoch).encode(),
+            b"owner_id": owner_id.encode(),
+            b"local_id": self.cfg.get("local_id", "").encode(),
+            b"agent_name": (agent_name or "").encode(),
+            b"session_id": self.cfg.get("_session_id", "").encode(),
+            b"importance": str(importance).encode(),
+            b"access_count": b"0",
+            b"parent_id": b"",
+        }
+        if vec_bytes:
+            fields[b"embedding"] = vec_bytes
+
+        mem_key = f"mem:{mem_id}"
+        pipe = self._client.pipeline()
+        pipe.hset(mem_key, mapping=fields)
+        pipe.expire(mem_key, ttl)
+        pipe.set(sha_key, mem_id.encode(), ex=ttl)
         pipe.execute()
-    except Exception:
-        pass  # non-critical: access count is a best-effort signal
 
+        return {"status": "saved", "saved": True, "id": mem_id, "ttl_seconds": ttl}
 
-def count_memories(
-    client: Redis,
-    owner_id: Optional[str] = None,
-    exclude_chunks: bool = True,
-) -> int:
-    """Total memory count (optionally filtered by owner).
+    def _save_parent_chunks(
+        self, content: str, agent_name: str, owner_id: str, importance: float
+    ) -> dict:
+        sha = _sha1(content)
+        docsha_key = f"docsha:{sha}"
 
-    When ``exclude_chunks`` is True (default), rows that belong to a parent
-    document are not counted — they are represented by the parent instead.
-    """
-    parts: list[str] = []
-    if owner_id:
-        parts.append(f"@owner_id:{{{_escape_tag(owner_id)}}}")
-    if exclude_chunks:
-        parts.append("-@parent_id:{*}")
-    q_str = " ".join(parts) if parts else "*"
-    q = Query(q_str).no_content().paging(0, 0).dialect(2)
-    try:
-        res = client.ft(INDEX_NAME).search(q)
-        return int(res.total)
-    except ResponseError:
-        # Index may not yet have parent_id field — fall back to unfiltered.
-        q2_str = f"@owner_id:{{{_escape_tag(owner_id)}}}" if owner_id else "*"
-        res = client.ft(INDEX_NAME).search(Query(q2_str).no_content().paging(0, 0).dialect(2))
-        return int(res.total)
+        if self._client.exists(docsha_key):
+            existing = self._client.get(docsha_key)
+            parent_id = existing.decode() if isinstance(existing, bytes) else str(existing)
+            return {"status": "duplicate", "saved": False, "parent_id": parent_id}
 
+        # Semantic near-dedup on the full body (symmetric with _save_single).
+        # e5-base-v2 truncates at ~512 tokens — enough to fingerprint the
+        # document's opening. KNN against indexed chunks surfaces prior
+        # parents whose chunks embed near the new full-content vector.
+        full_vec = embed(content, is_query=False)
+        if full_vec:
+            near = self._near_dedup(full_vec, owner_id)
+            if near is not None:
+                return {"status": "near_duplicate", "saved": False, "similarity": near}
 
-def get_all_memories(
-    client: Redis,
-    limit: int = 20,
-    owner_id: Optional[str] = None,
-    exclude_chunks: bool = True,
-) -> list[dict]:
-    """Return the most recent memories, newest first. Chunks are excluded by default."""
-    parts: list[str] = []
-    if owner_id:
-        parts.append(f"@owner_id:{{{_escape_tag(owner_id)}}}")
-    if exclude_chunks:
-        parts.append("-@parent_id:{*}")
-    q_str = " ".join(parts) if parts else "*"
-    q = (
-        Query(q_str)
-        .sort_by("timestamp_epoch", asc=False)
-        .return_fields("id", "content", "timestamp", "agent_name")
-        .paging(0, limit)
-        .dialect(2)
-    )
-    try:
-        res = client.ft(INDEX_NAME).search(q)
-    except ResponseError:
-        # Fallback: old index without parent_id field.
-        q2_str = f"@owner_id:{{{_escape_tag(owner_id)}}}" if owner_id else "*"
-        q2 = (
-            Query(q2_str)
-            .sort_by("timestamp_epoch", asc=False)
-            .return_fields("id", "content", "timestamp", "agent_name")
-            .paging(0, limit)
-            .dialect(2)
+        threshold = self.cfg.get("chunk_threshold", 400)
+        overlap = self.cfg.get("chunk_overlap", 100)
+        chunks = chunk_text(content, threshold, overlap)
+
+        parent_id = _new_id()
+        ttl = self.cfg["ttl_seconds"]
+        now_iso = _now_iso()
+        now_epoch = _now_epoch()
+        local_id = self.cfg.get("local_id", "")
+        session_id = self.cfg.get("_session_id", "")
+
+        doc_key = f"doc:{parent_id}"
+        pipe = self._client.pipeline()
+        pipe.hset(
+            doc_key,
+            mapping={
+                b"id": parent_id.encode(),
+                b"content": content.encode("utf-8"),
+                b"timestamp": now_iso.encode(),
+                b"timestamp_epoch": str(now_epoch).encode(),
+                b"owner_id": owner_id.encode(),
+                b"local_id": local_id.encode(),
+                b"agent_name": (agent_name or "").encode(),
+                b"session_id": session_id.encode(),
+                b"chunk_count": str(len(chunks)).encode(),
+            },
         )
-        res = client.ft(INDEX_NAME).search(q2)
-    rows: list[dict] = []
-    for doc in res.docs:
-        rows.append({
-            "id": _strip_key_prefix(_as_str(getattr(doc, "id", ""))),
-            "content": _as_str(getattr(doc, "content", "")),
-            "timestamp": _as_str(getattr(doc, "timestamp", "")),
-            "agent_name": _as_str(getattr(doc, "agent_name", "")),
-        })
-    return rows
+        pipe.expire(doc_key, ttl)
+        pipe.set(docsha_key, parent_id.encode(), ex=ttl)
+        pipe.execute()
 
+        # Build all chunk writes in a single pipeline to minimise round-trips
+        # and ensure every mem: key gets its TTL set atomically with the hset.
+        chunk_ids: list[str] = []
+        chunk_pipe = self._client.pipeline()
+        for chunk in chunks:
+            chunk_id = _new_id()
+            ngram = cjk_bigram_expand(chunk)
+            vec_bytes = embed(chunk, is_query=False)
+            fields: dict = {
+                b"id": chunk_id.encode(),
+                b"content": chunk.encode("utf-8"),
+                b"content_ngram": ngram.encode("utf-8"),
+                b"timestamp": now_iso.encode(),
+                b"timestamp_epoch": str(now_epoch).encode(),
+                b"owner_id": owner_id.encode(),
+                b"local_id": local_id.encode(),
+                b"agent_name": (agent_name or "").encode(),
+                b"session_id": session_id.encode(),
+                b"importance": str(importance).encode(),
+                b"access_count": b"0",
+                b"parent_id": parent_id.encode(),
+            }
+            if vec_bytes:
+                fields[b"embedding"] = vec_bytes
+            chunk_pipe.hset(f"mem:{chunk_id}", mapping=fields)
+            chunk_pipe.expire(f"mem:{chunk_id}", ttl)
+            chunk_ids.append(chunk_id)
+        chunk_pipe.execute()
 
-def get_memory_by_id(client: Redis, record_id: str) -> Optional[dict]:
-    """Fetch a single memory record by id (HGETALL; embedding stripped)."""
-    key = f"{KEY_PREFIX}{record_id}"
-    raw = client.hgetall(key)
-    if not raw:
-        return None
-    out: dict[str, Any] = {}
-    for k, v in raw.items():
-        k_s = k.decode("utf-8") if isinstance(k, bytes) else k
-        if k_s == "embedding":
-            continue
-        if isinstance(v, bytes):
-            try:
-                out[k_s] = v.decode("utf-8")
-            except Exception:
-                out[k_s] = ""
-        else:
-            out[k_s] = v
-    return out
+        return {
+            "status": "saved",
+            "saved": True,
+            "parent_id": parent_id,
+            "chunks": len(chunks),
+            "saved_count": len(chunks),
+            "ids": chunk_ids,
+            "ttl_seconds": ttl,
+        }
 
-
-# ---------------------------------------------------------------------------
-# Search
-# ---------------------------------------------------------------------------
-def search_vector(
-    client: Redis,
-    query_vec: list[float],
-    k: int = 50,
-    owner_id: Optional[str] = None,
-) -> list[tuple[str, float]]:
-    """
-    KNN vector search. Returns list of (record_id, cosine_distance).
-
-    Cosine distance is in [0, 2]; cosine similarity = 1.0 - distance.
-    """
-    prefilter = "*"
-    if owner_id:
-        prefilter = f"@owner_id:{{{_escape_tag(owner_id)}}}"
-
-    q = (
-        Query(f"({prefilter})=>[KNN {k} @embedding $vec AS vector_distance]")
-        .sort_by("vector_distance")
-        .return_fields("id", "vector_distance")
-        .paging(0, k)
-        .dialect(2)
-    )
-    try:
-        res = client.ft(INDEX_NAME).search(
-            q, query_params={"vec": vector_to_bytes(query_vec)}
-        )
-    except ResponseError:
-        return []
-
-    out: list[tuple[str, float]] = []
-    for doc in res.docs:
-        rid = _strip_key_prefix(_as_str(getattr(doc, "id", "")))
-        dist_raw = getattr(doc, "vector_distance", None)
+    def _near_dedup(self, vec_bytes: bytes, owner_id: str) -> Optional[float]:
+        # owner_id TAG filter omitted — UUID hyphens cause parse errors in RediSearch.
+        # We fetch KNN=5 and filter by owner_id in Python.
+        threshold = self.cfg.get("dedup_threshold", 0.95)
         try:
-            dist = float(_as_str(dist_raw)) if dist_raw is not None else 2.0
+            res = self._client.execute_command(
+                "FT.SEARCH", INDEX_NAME,
+                "*=>[KNN 5 @embedding $vec AS __dist]",
+                "PARAMS", "2", "vec", vec_bytes,
+                "RETURN", "2", "__dist", "owner_id",
+                "SORTBY", "__dist",
+                "LIMIT", "0", "5",
+                "DIALECT", "2",
+            )
+            if res and res[0] > 0:
+                i = 1
+                while i + 1 < len(res):
+                    fdict = _parse_fields(res[i + 1])
+                    if fdict.get("owner_id") != owner_id:
+                        i += 2
+                        continue
+                    dist = _to_float(fdict.get("__dist", "1.0"))
+                    sim = cosine_sim_from_distance(dist)
+                    if sim >= threshold:
+                        return sim
+                    i += 2
         except Exception:
-            dist = 2.0
-        if rid:
-            out.append((rid, dist))
-    return out
+            pass
+        return None
 
+    # ── search ──────────────────────────────────────────────────────────────
 
-def search_fts(
-    client: Redis,
-    query: str,
-    limit: int = 50,
-    owner_id: Optional[str] = None,
-) -> list[tuple[str, float]]:
-    """
-    BM25 text search over ``content`` and ``content_ngram`` fields.
-
-    Queries are CJK-expanded before matching so that Japanese/Chinese text
-    benefits from bigram tokenization. Falls back to content-only if the
-    content_ngram field is not yet present in the index.
-
-    Returns list of (record_id, bm25_score). Higher score = more relevant.
-    """
-    cleaned = strip_fts_punctuation(query).strip()
-    if not cleaned:
-        return []
-    expanded = cjk_bigram_expand(cleaned)
-    escaped = _escape_redis_query(expanded)
-
-    owner_filter = f" @owner_id:{{{_escape_tag(owner_id)}}}" if owner_id else ""
-    q_str = f"(@content:({escaped}) | @content_ngram:({escaped})){owner_filter}"
-
-    def _run(query_str: str) -> list[tuple[str, float]]:
-        q = (
-            Query(query_str)
-            .scorer("BM25")
-            .with_scores()
-            .return_fields("id")
-            .paging(0, limit)
-            .dialect(2)
-        )
-        try:
-            res = client.ft(INDEX_NAME).search(q)
-        except ResponseError:
+    def search_memory(self, query: str, limit: Optional[int] = None) -> list[dict]:
+        if not self._ok:
             return []
-        out: list[tuple[str, float]] = []
-        for doc in res.docs:
-            rid = _strip_key_prefix(_as_str(getattr(doc, "id", "")))
-            score = float(getattr(doc, "score", 0.0) or 0.0)
-            if rid:
-                out.append((rid, score))
+
+        if limit is None:
+            limit = self.cfg.get("search_result_limit", 20)
+
+        query = query[: self.cfg.get("search_query_max_chars", 2000)]
+        owner_id = self.cfg["owner_id"]
+        half_life = self.cfg.get("half_life_days", 3)
+        min_score_val = self.cfg.get("min_score", 0.2)
+        bm25_thr = self.cfg.get("bm25_min_threshold", 0.1)
+
+        vec_results = self._vector_search(query, owner_id, limit)
+        bm25_results = self._bm25_search(query, owner_id, limit)
+
+        all_keys = set(vec_results) | set(bm25_results)
+        max_bm25 = max((v["bm25_score"] for v in bm25_results.values()), default=1.0)
+
+        candidates: list[dict] = []
+        for key in all_keys:
+            vr = vec_results.get(key, {})
+            br = bm25_results.get(key, {})
+            content = vr.get("content") or br.get("content", "")
+            timestamp = vr.get("timestamp") or br.get("timestamp", "")
+            imp = _to_float(vr.get("importance") or br.get("importance", 1.0))
+            acc = _to_int(vr.get("access_count") or br.get("access_count", 0))
+            parent_id = vr.get("parent_id") or br.get("parent_id", "")
+            mem_id = vr.get("id") or br.get("id", "")
+
+            cos = vr.get("cos_sim", 0.0)
+            bm25 = br.get("bm25_score", 0.0)
+            kw = keyword_relevance(bm25, max_bm25, bm25_thr)
+            decay = time_decay(timestamp, half_life)
+            b = b_local(imp, acc, self.cfg)
+            score = final_score(cos, kw, decay, b)
+
+            if score >= min_score_val:
+                candidates.append({
+                    "key": key,
+                    "id": mem_id,
+                    "content": content,
+                    "timestamp": timestamp,
+                    "score": score,
+                    "parent_id": parent_id,
+                    "importance": imp,
+                    "access_count": acc,
+                })
+
+        # Resolve parent documents BEFORE reranking, so lexical rerank
+        # (token coverage + phrase bonus) sees the full verbatim body of
+        # parent-doc hits rather than just the chunk that happened to match.
+        # Also deduplicate multiple chunks that resolve to the same parent.
+        seen_parents: dict[str, bool] = {}
+        resolved: list[dict] = []
+        for c in candidates:
+            pid = c.get("parent_id", "")
+            if pid:
+                if pid in seen_parents:
+                    continue
+                seen_parents[pid] = True
+                try:
+                    doc_data = self._client.hgetall(f"doc:{pid}")
+                    if doc_data:
+                        chunk_count = doc_data.get(b"chunk_count", b"?").decode()
+                        c["content"] = doc_data[b"content"].decode("utf-8")
+                        c["id"] = pid
+                        c["_tag"] = f"[doc×{chunk_count}]"
+                        c["_parent_key"] = f"doc:{pid}"
+                except Exception:
+                    pass
+            resolved.append(c)
+        candidates = resolved
+
+        if self.cfg.get("lexical_rerank_enabled", True):
+            candidates = lexical_rerank(
+                candidates,
+                query,
+                self.cfg.get("rerank_weight", 0.3),
+                self.cfg.get("rerank_phrase_weight", 0.2),
+            )
+        else:
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        do_ttl_refresh = self.cfg.get("ttl_refresh_on_search", True)
+        ttl = self.cfg["ttl_seconds"]
+        if do_ttl_refresh:
+            top_k = self.cfg.get("ttl_refresh_top_k", 5)
+            for c in candidates[:top_k]:
+                try:
+                    # Refresh the chunk/standalone key and bump its access_count.
+                    self._client.expire(c["key"], ttl)
+                    self._client.hincrby(c["key"], "access_count", 1)
+                    # When this hit resolved to a parent doc, refresh the
+                    # doc: key TTL so verbatim recall stays alive alongside
+                    # its chunks.
+                    parent_key = c.get("_parent_key")
+                    if parent_key:
+                        self._client.expire(parent_key, ttl)
+                except Exception:
+                    pass
+
+        final: list[dict] = []
+        for c in candidates[:limit]:
+            c.pop("_parent_key", None)
+            final.append(c)
+
+        return final
+
+    def _vector_search(self, query: str, owner_id: str, limit: int) -> dict[str, dict]:
+        # owner_id TAG filter omitted — UUID hyphens cause parse errors in RediSearch.
+        # We fetch KNN candidates globally and filter by owner_id in Python.
+        vec_bytes = embed(query, is_query=True)
+        if not vec_bytes:
+            return {}
+        knn_limit = min(limit * 5, 100)
+        try:
+            res = self._client.execute_command(
+                "FT.SEARCH", INDEX_NAME,
+                f"*=>[KNN {knn_limit} @embedding $vec AS __dist]",
+                "PARAMS", "2", "vec", vec_bytes,
+                "RETURN", "8", "__dist", "owner_id", "content", "timestamp",
+                "importance", "access_count", "parent_id", "id",
+                "SORTBY", "__dist",
+                "LIMIT", "0", str(knn_limit),
+                "DIALECT", "2",
+            )
+        except Exception as e:
+            print(f"[n3mc] vector search: {e}", file=sys.stderr)
+            return {}
+
+        if not res or res[0] == 0:
+            return {}
+
+        out: dict[str, dict] = {}
+        i = 1
+        while i + 1 < len(res):
+            key = res[i].decode() if isinstance(res[i], bytes) else str(res[i])
+            fdict = _parse_fields(res[i + 1])
+            if fdict.get("owner_id") != owner_id:
+                i += 2
+                continue
+            dist = _to_float(fdict.get("__dist", "1.0"))
+            out[key] = {
+                "cos_sim": cosine_sim_from_distance(dist),
+                "content": fdict.get("content", ""),
+                "timestamp": fdict.get("timestamp", ""),
+                "importance": _to_float(fdict.get("importance", "1.0")),
+                "access_count": _to_int(fdict.get("access_count", "0")),
+                "parent_id": fdict.get("parent_id", ""),
+                "id": fdict.get("id", ""),
+            }
+            i += 2
         return out
 
-    results = _run(q_str)
-    if not results:
-        # Retry with content-only in case content_ngram field is absent.
-        fallback = f"@content:({escaped}){owner_filter}"
-        results = _run(fallback)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-def _strip_key_prefix(key: str) -> str:
-    """Strip the ``mem:`` prefix so callers see bare record ids (uuids)."""
-    if key.startswith(KEY_PREFIX):
-        return key[len(KEY_PREFIX):]
-    return key
-
-
-def _as_str(v: Any) -> str:
-    if v is None:
-        return ""
-    if isinstance(v, bytes):
+    def _bm25_search(self, query: str, owner_id: str, limit: int) -> dict[str, dict]:
+        # owner_id TAG filter omitted — UUID hyphens cause parse errors in RediSearch.
+        # We filter by owner_id in Python after fetching BM25 results.
+        fts_q = prepare_query(query)
+        if not fts_q:
+            return {}
+        bm25_limit = min(limit * 5, 100)
+        fts_query = f"(@content:({fts_q}) | @content_ngram:({fts_q}))"
         try:
-            return v.decode("utf-8")
+            res = self._client.execute_command(
+                "FT.SEARCH", INDEX_NAME,
+                fts_query,
+                "SCORER", "BM25",
+                "WITHSCORES",
+                "RETURN", "7", "owner_id", "content", "timestamp",
+                "importance", "access_count", "parent_id", "id",
+                "LIMIT", "0", str(bm25_limit),
+                "DIALECT", "2",
+            )
+        except Exception as e:
+            print(f"[n3mc] BM25 search: {e}", file=sys.stderr)
+            return {}
+
+        if not res or res[0] == 0:
+            return {}
+
+        out: dict[str, dict] = {}
+        i = 1
+        while i + 2 < len(res):
+            key = res[i].decode() if isinstance(res[i], bytes) else str(res[i])
+            score_raw = res[i + 1]
+            score = _to_float(score_raw.decode() if isinstance(score_raw, bytes) else score_raw)
+            fdict = _parse_fields(res[i + 2])
+            if fdict.get("owner_id") != owner_id:
+                i += 3
+                continue
+            out[key] = {
+                "bm25_score": score,
+                "content": fdict.get("content", ""),
+                "timestamp": fdict.get("timestamp", ""),
+                "importance": _to_float(fdict.get("importance", "1.0")),
+                "access_count": _to_int(fdict.get("access_count", "0")),
+                "parent_id": fdict.get("parent_id", ""),
+                "id": fdict.get("id", ""),
+            }
+            i += 3
+        return out
+
+    # ── list ────────────────────────────────────────────────────────────────
+
+    def list_memories(self, limit: int = 20) -> list[dict]:
+        if not self._ok:
+            return []
+        owner_id = self.cfg["owner_id"]
+        results: list[dict] = []
+
+        try:
+            # Use "*" to fetch all indexed memories, filter owner_id and parent_id in Python.
+            fetch_limit = max(limit * 5, 200)
+            res = self._client.execute_command(
+                "FT.SEARCH", INDEX_NAME,
+                "*",
+                "RETURN", "5", "owner_id", "parent_id", "content", "timestamp", "id",
+                "SORTBY", "timestamp_epoch", "DESC",
+                "LIMIT", "0", str(fetch_limit),
+                "DIALECT", "2",
+            )
+            if res and res[0] > 0:
+                i = 1
+                while i + 1 < len(res):
+                    fdict = _parse_fields(res[i + 1])
+                    # Only independent memories (no parent) belonging to this owner
+                    if fdict.get("owner_id") != owner_id or fdict.get("parent_id", ""):
+                        i += 2
+                        continue
+                    results.append({
+                        "id": fdict.get("id", ""),
+                        "content": fdict.get("content", ""),
+                        "timestamp": fdict.get("timestamp", ""),
+                        "tag": "",
+                    })
+                    i += 2
+        except Exception as e:
+            print(f"[n3mc] list_memories: {e}", file=sys.stderr)
+
+        try:
+            cursor = 0
+            parents: list[dict] = []
+            while True:
+                cursor, keys = self._client.scan(cursor, match="doc:*", count=100)
+                for key in keys:
+                    try:
+                        d = self._client.hgetall(key)
+                        if d.get(b"owner_id", b"").decode() == owner_id:
+                            preview = d[b"content"].decode("utf-8")
+                            tag = f"[doc×{d.get(b'chunk_count', b'?').decode()}]"
+                            parents.append({
+                                "id": d[b"id"].decode(),
+                                "content": preview[:200] + ("..." if len(preview) > 200 else ""),
+                                "timestamp": d.get(b"timestamp", b"").decode(),
+                                "tag": tag,
+                            })
+                    except Exception:
+                        pass
+                if cursor == 0:
+                    break
+            results.extend(parents)
+        except Exception as e:
+            print(f"[n3mc] parent scan: {e}", file=sys.stderr)
+
+        results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return results[:limit]
+
+    # ── delete ──────────────────────────────────────────────────────────────
+
+    def delete_memory(self, mem_id: str) -> dict:
+        if not self._ok:
+            return {"status": "error", "reason": _DOCKER_HINT}
+
+        doc_key = f"doc:{mem_id}"
+        if self._client.exists(doc_key):
+            d = self._client.hgetall(doc_key)
+            sha_key = None
+            try:
+                content = d[b"content"].decode("utf-8")
+                sha_key = f"docsha:{_sha1(content)}"
+            except Exception:
+                pass
+
+            chunk_keys: list[str] = []
+            esc_pid = _escape_tag(mem_id)
+            try:
+                res = self._client.execute_command(
+                    "FT.SEARCH", INDEX_NAME,
+                    f"@parent_id:{{{esc_pid}}}",
+                    "RETURN", "0",
+                    "LIMIT", "0", "1000",
+                    "DIALECT", "2",
+                )
+                if res and res[0] > 0:
+                    i = 1
+                    while i + 1 < len(res):
+                        raw = res[i]
+                        chunk_keys.append(raw.decode() if isinstance(raw, bytes) else str(raw))
+                        i += 2
+            except Exception:
+                pass
+
+            # Fallback: SCAN for any chunks FT.SEARCH missed
+            if not chunk_keys:
+                cursor = 0
+                while True:
+                    cursor, keys = self._client.scan(cursor, match="mem:*", count=200)
+                    for key in keys:
+                        raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                        if raw_key.startswith("mem:sha:"):
+                            continue
+                        try:
+                            pid_val = self._client.hget(key, b"parent_id")
+                            if pid_val and pid_val.decode() == mem_id:
+                                chunk_keys.append(raw_key)
+                        except Exception:
+                            pass
+                    if cursor == 0:
+                        break
+
+            pipe = self._client.pipeline()
+            pipe.delete(doc_key)
+            if sha_key:
+                pipe.delete(sha_key)
+            for ck in chunk_keys:
+                pipe.delete(ck)
+            pipe.execute()
+            return {"status": "deleted", "id": mem_id, "chunks_deleted": len(chunk_keys)}
+
+        mem_key = f"mem:{mem_id}"
+        if not self._client.exists(mem_key):
+            return {"status": "not_found", "id": mem_id}
+
+        sha_key = None
+        try:
+            raw_content = self._client.hget(mem_key, b"content")
+            if raw_content:
+                content = raw_content.decode("utf-8") if isinstance(raw_content, bytes) else raw_content
+                sha_key = f"mem:sha:{_sha1(content)}"
         except Exception:
-            return ""
-    return str(v)
+            pass
+
+        pipe = self._client.pipeline()
+        pipe.delete(mem_key)
+        if sha_key:
+            pipe.delete(sha_key)
+        pipe.execute()
+        return {"status": "deleted", "id": mem_id}
+
+    # ── repair ──────────────────────────────────────────────────────────────
+
+    def repair_memory(self) -> dict:
+        if not self._ok:
+            return {"status": "error", "message": _DOCKER_HINT}
+        try:
+            self.ensure_index()
+            return {"status": "ok", "message": "index ensured"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}

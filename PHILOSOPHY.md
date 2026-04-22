@@ -17,34 +17,33 @@ that speak MCP — can attach to it and gain memory across sessions.
 - **Client-agnostic** — the same store is reachable from every MCP
   client the user connects to it.
 
-## 🎁 Lite vs. Paid
+## 🎁 Lite vs. Pro (coming soon)
 
 This repository is the **Lite** build. It is free, intended for the
-Claude Marketplace distribution, and behaves identically to the paid
-build on the MCP surface — with one deliberate tradeoff:
+Claude Marketplace distribution, and shares the same MCP surface as
+the forthcoming Pro build — with one deliberate tradeoff:
 
-| Aspect          | Lite (this repo)               | Paid                       |
+| Aspect          | Lite (this repo)               | Pro (coming soon)          |
 | --------------- | ------------------------------- | -------------------------- |
 | Storage engine  | Redis Stack (RediSearch)        | SQLite + sqlite-vec        |
 | Durability      | 7 d TTL, volatile              | Permanent, disk-persistent |
 | External deps   | User runs Redis Stack container | None (self-contained)      |
-| Target audience | Agentic loops, multi-agent collab, short-term projects | Long-term knowledge accumulation |
+| Target audience | Agentic loops, multi-agent collab, short-term projects, working memory | Long-term knowledge accumulation |
 
 Why two builds? **They target different workflows, not different price
 points.**
 
-- **Lite — project-scoped memory.** The 7-day TTL and volatile Redis
-  storage are active features. Agentic loops, multi-agent sessions,
-  and short-lived experiments benefit from memory that resets cleanly
-  (`docker restart`) or evaporates on its own. No pruning, no
-  contamination from abandoned context.
-- **Paid — continuous memory.** SQLite-backed persistence is the
-  feature, not the luxury. For long-term projects where the assistant
-  needs to remember decisions across months or years.
+- **Lite — project-scoped working memory.** The 7-day TTL and volatile
+  Redis storage are active features. Agentic loops, multi-agent
+  sessions, and short-lived experiments benefit from memory that
+  resets cleanly (`docker restart`) or evaporates on its own. No
+  pruning, no contamination from abandoned context.
+- **Pro (coming soon) — continuous memory.** SQLite-backed persistence
+  will be the feature, not the luxury. For long-term projects where the
+  assistant needs to remember decisions across months or years.
 
-Claude Marketplace currently has no payment mechanism, so the Lite is
-the build you can get from there today — but it is not a crippled
-version of the Paid build, it is a different tool.
+The Pro build is **coming soon**; the Lite is the build you can get
+today — and it is a different tool, not a crippled preview of Pro.
 
 ## Extending and Modifying the Code
 
@@ -88,8 +87,8 @@ client.
 ## Project Details
 
 - **Architecture** — Python package implementing the N3 MCP protocol.
-  Storage layer is swappable; the Lite uses Redis Stack, the Paid build
-  uses SQLite.
+  Storage layer is swappable; the Lite uses Redis Stack, the forthcoming
+  Pro build will use SQLite + sqlite-vec.
 - **Focus** — Hands-free memory continuity across every MCP-capable tool.
 - **License** — Apache License 2.0 — free to use, modify, and redistribute
   (including commercial use).
@@ -111,33 +110,33 @@ Claude Desktop、Claude Code、その他 MCP 対応ツールなど、あらゆ�
 - **クライアント非依存** — ユーザーが接続するあらゆる MCP クライアント
   から同一のストアに到達可能。
 
-## 🎁 Lite 版と有償版
+## 🎁 Lite 版と Pro 版（公開予定）
 
 本リポジトリは **Lite 版** です。無償で、Claude Marketplace 配布を
-想定しており、MCP 的な外向き仕様は有償版と同一 — ただし以下の意図的な
-トレードオフがあります：
+想定しており、MCP 的な外向き仕様は **Pro 版（公開予定）** と同一 —
+ただし以下の意図的なトレードオフがあります：
 
-| 観点               | Lite（本リポジトリ）               | 有償版                        |
+| 観点               | Lite（本リポジトリ）               | Pro（公開予定）              |
 | ------------------ | ----------------------------------- | ----------------------------- |
 | ストレージエンジン | Redis Stack（RediSearch）            | SQLite + sqlite-vec           |
 | 耐久性             | 7d TTL・揮発                        | 永続（ディスク保存）          |
 | 外部依存           | ユーザーが Redis Stack コンテナを実行 | なし（セルフコンテイン）      |
-| 対象ユース        | エージェントループ・マルチエージェント・短期プロジェクト | 長期的な知識蓄積             |
+| 対象ユース        | エージェントループ・マルチエージェント・短期プロジェクト・ワーキングメモリ | 長期的な知識蓄積             |
 
 なぜ 2 版あるのか？**価格差ではなく、対象ワークフローが異なります。**
 
-- **Lite — プロジェクト境界内のメモリ**。7 日 TTL と揮発性 Redis は
-  積極的な特長です。エージェント的ループ、マルチエージェント会話、
-  短期的な実験では、メモリがクリーンにリセットされる（`docker restart`）
-  または自動蒸発することが有利に働きます。剪定不要、破棄済みコンテキスト
-  からの汚染なし。
-- **有償版 — 継続的なメモリ**。SQLite による永続化は「付加価値」では
-  なく「本質」。数ヶ月〜数年にわたってアシスタントに決定事項を記憶
-  させたい長期プロジェクト向け。
+- **Lite — プロジェクト境界内のワーキングメモリ**。7 日 TTL と揮発性
+  Redis は積極的な特長です。エージェント的ループ、マルチエージェント
+  会話、短期的な実験では、メモリがクリーンにリセットされる
+  （`docker restart`）または自動蒸発することが有利に働きます。剪定
+  不要、破棄済みコンテキストからの汚染なし。
+- **Pro（公開予定） — 継続的なメモリ**。SQLite による永続化は「付加
+  価値」ではなく「本質」。数ヶ月〜数年にわたってアシスタントに決定
+  事項を記憶させたい長期プロジェクト向け。
 
-現在の Claude Marketplace には課金機構が無いため、Marketplace から
-現時点で取得できるのは Lite 版ですが、これは有償版の機能制限版では
-なく、**別の用途を持つ別のツール**です。
+Pro 版は **公開予定** で、Marketplace から現時点で取得できるのは
+Lite 版です。Lite は Pro の機能制限版ではなく、**別の用途を持つ
+別のツール**です。
 
 ## コードの拡張・改造について
 
@@ -179,8 +178,8 @@ MCP への移行は結合を逆転させます：
 ## プロジェクト詳細
 
 - **アーキテクチャ** — N3 MCP プロトコルを実装した Python パッケージ。
-  ストレージ層は差し替え可能で、Lite は Redis Stack、有償版は SQLite
-  を使用。
+  ストレージ層は差し替え可能で、Lite は Redis Stack、Pro 版
+  （公開予定）は SQLite + sqlite-vec を使用。
 - **重点** — あらゆる MCP 対応ツールをまたいだ、ハンズフリーなメモリ
   継続性。
 - **ライセンス** — Apache License 2.0 — 使用・改変・再配布（商用含む）

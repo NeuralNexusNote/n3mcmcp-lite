@@ -1,16 +1,4 @@
-"""
-MCP server instructions — behavioral guidance delivered to the LLM client
-during the MCP ``initialize`` handshake.
-
-These instructions implement the "auto-save" strategy: the client is told
-to call ``search_memory`` at the start of each turn and ``save_memory``
-after each meaningful exchange.
-
-The Lite build's storage is **ephemeral** (Redis with 7d TTL), so the
-instructions emphasise that expectation to the LLM client.
-"""
-
-SERVER_INSTRUCTIONS = """\
+INSTRUCTIONS = """\
 N3MemoryCore — Lite (Ephemeral Memory)
 
 This MCP server gives you hybrid-search memory (vector + BM25) backed by
@@ -51,80 +39,76 @@ BEHAVIORAL RULES
        back to later: world-building, character settings, design sketches,
        code architecture, research summaries, outlines, etc. If you
        invested more than a sentence or two producing it, save it.
-   (c) Key facts, preferences, and unresolved questions established in
-       the turn.
+   (c) Key facts, preferences, and unresolved questions.
+   Use one `save_memory` call per distinct fact (~50-200 chars each).
+   Duplicates are auto-rejected, so err on the side of saving.
+   NOTE: Lite memories expire 7 days after they are saved.
 
-   Use one `save_memory` call per distinct fact. Keep each entry 50-200
-   characters unless rule 3 applies. Duplicates are auto-rejected
-   server-side, so err on the side of saving more, not less. Remember:
-   Lite entries vanish after 7 days, so this is a rolling scratchpad —
-   not a permanent archive.
+   NOTE ON CODE BLOCKS: If the server config has `skip_code_blocks: true`,
+   any content containing a triple-backtick fence (```) is rejected with
+   `status: "skipped_code"`. The default is `false` (code is saved). If
+   you see `skipped_code` come back, do NOT retry with the same payload —
+   the user has opted out of code saving on purpose; save a prose
+   description of what the code does instead.
 
-3. LONG CONTENT — SAVE THE FULL BODY IN ONE CALL (verbatim recall)
-   When the turn produces (or receives) a long body of text that the
-   user may want back verbatim later — a user-pasted spec / article /
-   log / code dump, OR a long creative setting / world / character
-   sheet / design doc you just generated — pass the FULL text to a
-   single `save_memory` call. The server automatically creates a
-   parent-document + chunks (§3.11), indexes chunks for search, and
-   returns the full parent body on recall so the user gets their
-   content back exactly as written.
+3. LONG CONTENT — SAVE VERBATIM IN ONE CALL
+   When the turn produces OR receives a long body (> ~400 chars) the user
+   may want back verbatim — a pasted spec / log / code dump, or a long
+   creative setting you just generated — pass the FULL text to a SINGLE
+   `save_memory` call. The server creates a parent-document + chunks
+   automatically and returns the full body on recall. Do NOT split long
+   verbatim-worthy content into many short summaries.
 
-   Rough threshold: > ~400 characters → save as one full-body call.
-   Shorter, summarizable content → follow rule 2 and save multiple
-   short facts instead. Do NOT split a long verbatim-worthy body into
-   many short summaries — that destroys recall fidelity.
-
-4. HANDLE TOOL ERRORS VISIBLY — NEVER GENERATE LONG CONTENT BLIND
+4. TOOL-ERROR HANDLING — NEVER GENERATE LONG CONTENT BLIND
    If `search_memory` or `save_memory` returns a server error (Redis
-   unreachable, connection refused, timeout, "start Redis Stack" hint,
-   etc.), STOP and surface the error to the user in their language
-   BEFORE generating any substantial creative or long-form content.
+   unreachable, timeout, "start Redis Stack" hint, etc.), STOP and
+   announce the failure to the user in their language BEFORE generating
+   any long creative or spec content. Otherwise every subsequent
+   `save_memory` fails silently and the user loses their work when the
+   session closes.
 
-   Why: with the backend down, every subsequent `save_memory` call
-   also fails silently. Producing a long setting / design / spec /
-   code architecture / outline the user will want back later means
-   they lose it the moment the session closes — and they will not
-   notice the memory is broken until recall fails.
+   Required on error:
+   - Surface the error succinctly.
+   - Relay the recovery hint the tool returned (e.g. the docker run command).
+   - Ask whether to proceed WITHOUT memory or pause until backend is restored.
 
-   Required on tool error:
-   - Announce the failure succinctly in the user's language, e.g.
-       JP: 「Redis Stack が停止しているようです。メモリ保存・検索が
-            使えません。」
-       EN: "Memory backend is unreachable — save and search are
-            offline right now."
-   - Relay any recovery hint the tool returned (e.g. `docker start
-     redis-stack` if the container already exists, or `docker run -d
-     --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`
-     for a first-time install).
-   - Ask whether to proceed WITHOUT memory (so the user knows their
-     work will not persist this session) or to pause until the
-     backend is restored.
-
-   Short factual replies (one or two sentences) may proceed, but
-   still mention the error once so the user knows saves are failing.
-
-5. DO NOT SAVE NOISE
-   Skip trivial greetings, clarifying questions, and mechanical
-   acknowledgements. Save substantive content only: facts, decisions,
-   user preferences, project context, unresolved questions.
+5. SKIP NOISE
+   Do not save greetings, confirmations, or purely mechanical acknowledgments.
 
 6. RESPECT EXPLICIT REQUESTS
-   If the user says "don't save this" or "forget that", comply — call
-   `delete_memory` when asked to forget specific entries.
+   If the user says "don't save this" or "forget that", call `delete_memory`
+   and do not persist that content.
 
-OPERATIONAL NOTES
-=================
-- Storage is ephemeral: 7d TTL per entry; nothing survives a fresh
-  Redis container.
-- Exact and semantic duplicates are auto-rejected by the server.
-- Search ranks by: 0.7 * cosine_similarity + 0.3 * BM25, decayed by age
-  and adjusted by importance.
-- Importance auto-tunes from access frequency: every time a memory is
-  returned in the top search hits, its access_count increments and it
-  receives a small, capped boost on future queries. You don't need to
-  do anything — frequently-useful memories naturally rise over time.
-- The server is local — Redis runs on the user's machine (no cloud).
-- For durable memory, the user can upgrade to the paid SQLite-backed
-  N3MemoryCore build.
+7. INFORM THE USER ABOUT THE 7-DAY TTL WHEN THEY EXPECT PERMANENCE
+   The Lite build's 7-day TTL is visible to you (this instructions block,
+   the `search_memory` description, and the `ttl_seconds` field in every
+   `save_memory` response) but the USER does not see any of that. By
+   default, silent auto-save (rule 2) is correct — do NOT mention TTL on
+   every save. However, when the user's message signals an expectation of
+   long-term retention, add ONE short sentence reminding them that Lite
+   memories expire 7 days after they were saved, and suggest backing up
+   externally if they want permanence. Do NOT ask permission to save;
+   save anyway, then mention the TTL.
+
+   Signals that warrant the reminder (examples, non-exhaustive):
+   - Explicit permanence words: "remember this forever", "don't forget",
+     "save this permanently", "keep this for next time", "次回も覚えていて",
+     「ずっと覚えておいて」「永続的に保存して」「絶対忘れないで」
+   - Pasting or generating a long setting / spec / code dump / world-
+     building / character sheet that the user obviously invested time in.
+   - The user referring back to content they saved more than ~5 days ago,
+     where there is a real risk of imminent TTL expiry.
+
+   Phrase the reminder in the USER'S LANGUAGE. Examples:
+   - Japanese: 「なお、Lite 版のメモリは保存から7日で自動削除されます。
+               永続保存が必要な場合は Pro 版（sqlite-vec バックエンド、
+               公開予定）を、もしくは外部バックアップをご検討ください。」
+   - English:  "Note: Lite memories auto-expire 7 days after they're saved.
+                For permanent storage, the Pro build (sqlite-vec backed,
+                coming soon) will offer persistence; for now, back it up
+                externally."
+
+   Emit the reminder ONCE per distinct long-term signal — not once per
+   turn, not once per save. Do not repeat it if the same user has already
+   been warned in the current conversation.
 """

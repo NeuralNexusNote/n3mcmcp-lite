@@ -1,73 +1,41 @@
-"""
-N3MemoryCore MCP **Lite** — test fixtures.
-
-These tests require a running Redis Stack instance (RediSearch module).
-If Redis is not reachable at ``N3MC_REDIS_TEST_URL`` (or the default
-``redis://localhost:6379/0``), the whole test session is skipped.
-
-IMPORTANT: RediSearch requires db 0 (``Cannot create index on db != 0``).
-The test suite FLUSHDBs db 0 before and after every test — do **not**
-point it at a Redis instance that holds data you care about. Run a
-dedicated container for testing.
-"""
-from __future__ import annotations
-
-import math
 import os
-import uuid
-
 import pytest
+import redis
 
 
-_TEST_REDIS_URL = os.environ.get(
-    "N3MC_REDIS_TEST_URL", "redis://localhost:6379/0"
-)
+REDIS_TEST_URL = os.environ.get("N3MC_REDIS_TEST_URL", "redis://localhost:6379/0")
 
 
-def _redis_available(url: str) -> bool:
+def _redis_available() -> bool:
     try:
-        from redis import Redis
-        c = Redis.from_url(url, decode_responses=False, socket_connect_timeout=1)
-        return bool(c.ping())
+        r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
+        r.ping()
+        return True
     except Exception:
         return False
 
 
-if not _redis_available(_TEST_REDIS_URL):
-    pytest.skip(
-        f"Redis Stack not reachable at {_TEST_REDIS_URL}; "
-        "first-time install: `docker run -d --name redis-stack -p 6379:6379 "
-        "redis/redis-stack-server:latest`, or if the container already "
-        "exists: `docker start redis-stack`.",
-        allow_module_level=True,
-    )
+requires_redis = pytest.mark.skipif(
+    not _redis_available(), reason="Redis Stack not available"
+)
 
 
 @pytest.fixture
 def redis_client():
-    """Yield a Redis client pointed at a flushed test DB with the index created."""
-    from n3mc_mcp.database import ensure_index, get_redis_client
-
-    client = get_redis_client(_TEST_REDIS_URL)
-    client.flushdb()
-    ensure_index(client)
-    yield client
-    client.flushdb()
+    r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
+    r.flushdb()
+    yield r
+    r.flushdb()
 
 
 @pytest.fixture
-def dummy_vec():
-    """Deterministic 768-dim unit vector."""
-    return [1.0 / math.sqrt(768)] * 768
-
-
-@pytest.fixture
-def base_config():
-    """Minimal config for testing."""
+def cfg(tmp_path):
+    import uuid
     return {
-        "owner_id": f"test-owner-{uuid.uuid4()}",
-        "local_id": f"test-local-{uuid.uuid4()}",
-        "redis_url": _TEST_REDIS_URL,
+        "owner_id": str(uuid.uuid4()),
+        "local_id": str(uuid.uuid4()),
+        "_session_id": str(uuid.uuid4()),
+        "redis_url": REDIS_TEST_URL,
         "ttl_seconds": 604800,
         "dedup_threshold": 0.95,
         "half_life_days": 3,
@@ -76,18 +44,26 @@ def base_config():
         "context_char_limit": 3000,
         "min_score": 0.0,
         "search_query_max_chars": 2000,
+        "chunk_threshold": 400,
+        "chunk_overlap": 100,
+        "access_count_enabled": True,
+        "access_count_weight": 0.02,
+        "access_count_max_boost": 0.5,
+        "ttl_refresh_on_search": False,
+        "ttl_refresh_top_k": 5,
+        "lexical_rerank_enabled": False,
+        "rerank_weight": 0.3,
+        "rerank_phrase_weight": 0.2,
     }
 
 
-@pytest.fixture(scope="session")
-def embedding_model():
-    """Load the embedding model once per session (~400MB first-run download)."""
-    from n3mc_mcp.processor import get_model
-    return get_model()
-
-
 @pytest.fixture
-def isolated_data_dir(tmp_path, monkeypatch):
-    """Point the package at a throw-away config directory."""
-    monkeypatch.setenv("N3MC_DATA_DIR", str(tmp_path))
-    yield tmp_path
+def db(cfg, redis_client):
+    from n3mc_mcp.database import Database
+    d = Database(cfg)
+    d.connect()
+    d.ensure_index()
+    return d
+
+
+DUMMY_VEC = bytes([0] * (768 * 4))
