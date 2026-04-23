@@ -15,7 +15,7 @@ from .processor import get_model
 
 _db: Database = None
 
-app = Server("n3memorycore-lite")
+app = Server("n3mc-workingmemory")
 
 
 @app.list_tools()

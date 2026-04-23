@@ -20,7 +20,7 @@
 
 - **ライセンス**：Apache License 2.0。詳細は `LICENSE` を参照。
 
-> **アンインストール**：`pip uninstall n3memorycore-mcp-lite` でパッケージを削除。`docker rm -f redis-stack` で Redis コンテナを停止・削除すれば保存済みメモリは即座に消えます。`${N3MC_DATA_DIR}`（またはプラットフォーム既定のデータディレクトリ）を削除すれば `config.json` も除去されます。MCP クライアント設定の `n3memorycore-lite` エントリも削除してください。
+> **アンインストール**：`pip uninstall n3memorycore-mcp-lite` でパッケージを削除。`docker rm -f redis-stack` で Redis コンテナを停止・削除すれば保存済みメモリは即座に消えます。`${N3MC_DATA_DIR}`（またはプラットフォーム既定のデータディレクトリ）を削除すれば `config.json` も除去されます。MCP クライアント設定の `n3mc-workingmemory` エントリも削除してください。
 >
 > **バックアップは？** Lite 版は **バックアップを想定していません**。7 日の滑り窓で消滅します。永続メモリが必要な場合は **Pro 版（公開予定）** をご利用ください。
 
@@ -103,7 +103,7 @@
    - **Claude Code プラグインマーケットプレイス**（pip/uvx コマンドを手動で打つ必要なし — プラグインが `uvx` 起動を設定するが、`uv` は PATH に必要）：
      ```
      /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
-     /plugin install n3memorycore-lite@neuralnexusnote
+     /plugin install n3mc-workingmemory@neuralnexusnote
      ```
 3. MCP クライアント設定にサーバーを登録（[§8](#8-mcp-クライアント設定) 参照）。プラグインマーケットプレイス経由でインストールした場合はこのステップ不要 — プラグインが自動登録します。
 4. クライアントを再起動。初回ツール呼び出しは ~400 MB の埋め込みモデルのダウンロードとロードで 30–60 秒かかります。
@@ -459,7 +459,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 サーバーが広告する内容：
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0" }`
+- `serverInfo: { name: "n3mc-workingmemory", version: "1.1.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 7 日で失効する」旨を明示する。**
 
@@ -558,9 +558,9 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 | OS      | パス                                                         |
 | ------- | ------------------------------------------------------------ |
-| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                         |
-| macOS   | `~/Library/Application Support/n3memorycore-lite/`          |
-| Linux   | `~/.local/share/n3memorycore-lite/`                         |
+| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                         |
+| macOS   | `~/Library/Application Support/n3mc-workingmemory/`          |
+| Linux   | `~/.local/share/n3mc-workingmemory/`                         |
 
 データディレクトリ内のファイル：
 - `config.json` — 設定（唯一のディスク上成果物）
@@ -579,7 +579,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "command": "n3mc-workingmemory",
       "args": []
     }
@@ -595,7 +595,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 ```
 /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
-/plugin install n3memorycore-lite@neuralnexusnote
+/plugin install n3mc-workingmemory@neuralnexusnote
 ```
 
 プラグインに同梱された `plugin.json` が `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` 経由でサーバーを起動する。`uv` が PATH にあることが前提。
@@ -605,7 +605,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "type": "stdio",
       "command": "n3mc-workingmemory",
       "args": []
@@ -619,7 +619,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "type": "stdio",
       "command": "uvx",
       "args": ["--from", "n3memorycore-mcp-lite", "n3mc-workingmemory"]
@@ -634,7 +634,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
 
-**プラグイン経由インストールは自動設定** — `/plugin install n3memorycore-lite@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3memorycore-lite/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 5 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`python` が `PATH` 上にあれば動作する。
+**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 5 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`python` が `PATH` 上にあれば動作する。
 
 **プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
 
@@ -642,11 +642,11 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 {
   "permissions": {
     "allow": [
-      "mcp__n3memorycore-lite__search_memory",
-      "mcp__n3memorycore-lite__save_memory",
-      "mcp__n3memorycore-lite__list_memories",
-      "mcp__n3memorycore-lite__delete_memory",
-      "mcp__n3memorycore-lite__repair_memory"
+      "mcp__n3mc-workingmemory__search_memory",
+      "mcp__n3mc-workingmemory__save_memory",
+      "mcp__n3mc-workingmemory__list_memories",
+      "mcp__n3mc-workingmemory__delete_memory",
+      "mcp__n3mc-workingmemory__repair_memory"
     ]
   }
 }

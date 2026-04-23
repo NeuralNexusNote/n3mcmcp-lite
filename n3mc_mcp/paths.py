@@ -3,7 +3,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-APP_NAME = "n3memorycore-lite"
+APP_NAME = "n3mc-workingmemory"
 
 
 def get_data_dir() -> Path:

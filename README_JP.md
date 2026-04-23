@@ -202,7 +202,7 @@ Desktop アプリからは読まれません。
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "command": "n3mc-workingmemory",
       "args": []
     }
@@ -241,7 +241,7 @@ Desktop アプリからは読まれません。
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "type": "stdio",
       "command": "n3mc-workingmemory",
       "args": []
@@ -258,9 +258,9 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
 
 | OS      | パス                                                        |
 | ------- | ----------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                        |
-| macOS   | `~/Library/Application Support/n3memorycore-lite/`         |
-| Linux   | `~/.local/share/n3memorycore-lite/`                        |
+| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                        |
+| macOS   | `~/Library/Application Support/n3mc-workingmemory/`         |
+| Linux   | `~/.local/share/n3mc-workingmemory/`                        |
 
 環境変数 `N3MC_DATA_DIR` で上書き可能です。
 

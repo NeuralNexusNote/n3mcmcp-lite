@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "type": "stdio",
       "command": "n3mc-workingmemory",
       "args": []

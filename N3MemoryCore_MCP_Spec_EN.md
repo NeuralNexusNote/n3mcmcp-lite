@@ -20,7 +20,7 @@ By using this software, you agree to the terms above.
 
 - **License**: Apache License 2.0. See the `LICENSE` file for details.
 
-> **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-lite` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3memorycore-lite` entry from your MCP client's config file.
+> **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-lite` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3mc-workingmemory` entry from your MCP client's config file.
 >
 > **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, the **Pro build (coming soon)** will offer persistent storage.
 
@@ -104,7 +104,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
    - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin configures `uvx` launch for you, but `uv` must still be on PATH):
      ```
      /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
-     /plugin install n3memorycore-lite@neuralnexusnote
+     /plugin install n3mc-workingmemory@neuralnexusnote
      ```
 3. Register the server in your MCP client's config (see [§8](#8-mcp-client-configuration)). Skip this step when installing via the plugin marketplace — the plugin registers the server automatically.
 4. Restart the client. The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
@@ -463,7 +463,7 @@ stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `std
 
 The server advertises:
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3memorycore-lite", version: "1.1.0" }`
+- `serverInfo: { name: "n3mc-workingmemory", version: "1.1.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
 
@@ -561,9 +561,9 @@ By default, only `config.json` lives on disk:
 
 | OS      | Path                                                        |
 | ------- | ----------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                        |
-| macOS   | `~/Library/Application Support/n3memorycore-lite/`         |
-| Linux   | `~/.local/share/n3memorycore-lite/`                        |
+| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                        |
+| macOS   | `~/Library/Application Support/n3mc-workingmemory/`         |
+| Linux   | `~/.local/share/n3mc-workingmemory/`                        |
 
 Files inside the data directory:
 - `config.json` — configuration (the only on-disk artifact)
@@ -582,7 +582,7 @@ Override via the environment variable `N3MC_DATA_DIR` (absolute path). Redis sta
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "command": "n3mc-workingmemory",
       "args": []
     }
@@ -598,7 +598,7 @@ Three equivalent paths are supported. Pick one; do not combine.
 
 ```
 /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
-/plugin install n3memorycore-lite@neuralnexusnote
+/plugin install n3mc-workingmemory@neuralnexusnote
 ```
 
 The plugin ships a `plugin.json` that launches the server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`. Requires `uv` on PATH.
@@ -608,7 +608,7 @@ The plugin ships a `plugin.json` that launches the server via `uvx --from n3memo
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "type": "stdio",
       "command": "n3mc-workingmemory",
       "args": []
@@ -622,7 +622,7 @@ The plugin ships a `plugin.json` that launches the server via `uvx --from n3memo
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "type": "stdio",
       "command": "uvx",
       "args": ["--from", "n3memorycore-mcp-lite", "n3mc-workingmemory"]
@@ -635,9 +635,9 @@ Restart the client after editing the config. Ensure Redis Stack is running *befo
 
 ### Auto-approve tool calls (Claude Code only)
 
-By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3memorycore-lite` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
+By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3mc-workingmemory` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
 
-**Plugin install auto-configures this** — installing via `/plugin install n3memorycore-lite@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3memorycore-lite/hooks/install_permissions.py)) that idempotently adds the five `mcp__n3memorycore-lite__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing, leaves unrelated fields untouched, and requires `python` on `PATH`.
+**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds the five `mcp__n3mc-workingmemory__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing, leaves unrelated fields untouched, and requires `python` on `PATH`.
 
 **If you installed without the plugin** (`claude mcp add`, manual `.mcp.json`, or Python is not available), add the block below manually to `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
 
@@ -645,11 +645,11 @@ By default, Claude Code prompts the user for each MCP tool call. **For the auto-
 {
   "permissions": {
     "allow": [
-      "mcp__n3memorycore-lite__search_memory",
-      "mcp__n3memorycore-lite__save_memory",
-      "mcp__n3memorycore-lite__list_memories",
-      "mcp__n3memorycore-lite__delete_memory",
-      "mcp__n3memorycore-lite__repair_memory"
+      "mcp__n3mc-workingmemory__search_memory",
+      "mcp__n3mc-workingmemory__save_memory",
+      "mcp__n3mc-workingmemory__list_memories",
+      "mcp__n3mc-workingmemory__delete_memory",
+      "mcp__n3mc-workingmemory__repair_memory"
     ]
   }
 }

@@ -208,7 +208,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "command": "n3mc-workingmemory",
       "args": []
     }
@@ -245,7 +245,7 @@ For other projects, add the following to that project's `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "n3memorycore-lite": {
+    "n3mc-workingmemory": {
       "type": "stdio",
       "command": "n3mc-workingmemory",
       "args": []
@@ -258,13 +258,13 @@ For other projects, add the following to that project's `.mcp.json`:
 
 By default, Claude Code prompts the user for each MCP tool call. For a
 fully automatic memory loop — so the connected AI never blocks on an
-"Allow?" prompt — the `n3memorycore-lite` tools must be listed under
+"Allow?" prompt — the `n3mc-workingmemory` tools must be listed under
 `permissions.allow` in Claude Code settings.
 
 **Plugin install auto-configures this** — when you install via
-`/plugin install n3memorycore-lite@neuralnexusnote`, a `SessionStart`
-hook runs [`hooks/install_permissions.py`](plugins/n3memorycore-lite/hooks/install_permissions.py)
-which idempotently adds the five `mcp__n3memorycore-lite__*` tools to
+`/plugin install n3mc-workingmemory@neuralnexusnote`, a `SessionStart`
+hook runs [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
+which idempotently adds the five `mcp__n3mc-workingmemory__*` tools to
 `~/.claude/settings.json`. No manual editing needed. The hook only
 writes if at least one entry is missing and never touches unrelated
 fields. Requires `python` on `PATH`.
@@ -278,11 +278,11 @@ or `.claude/settings.json` (per-project):
 {
   "permissions": {
     "allow": [
-      "mcp__n3memorycore-lite__search_memory",
-      "mcp__n3memorycore-lite__save_memory",
-      "mcp__n3memorycore-lite__list_memories",
-      "mcp__n3memorycore-lite__delete_memory",
-      "mcp__n3memorycore-lite__repair_memory"
+      "mcp__n3mc-workingmemory__search_memory",
+      "mcp__n3mc-workingmemory__save_memory",
+      "mcp__n3mc-workingmemory__list_memories",
+      "mcp__n3mc-workingmemory__delete_memory",
+      "mcp__n3mc-workingmemory__repair_memory"
     ]
   }
 }
@@ -300,9 +300,9 @@ platform-standard user data directory:
 
 | OS      | Path                                                       |
 | ------- | ---------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3memorycore-lite\`                       |
-| macOS   | `~/Library/Application Support/n3memorycore-lite/`        |
-| Linux   | `~/.local/share/n3memorycore-lite/`                       |
+| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                       |
+| macOS   | `~/Library/Application Support/n3mc-workingmemory/`        |
+| Linux   | `~/.local/share/n3mc-workingmemory/`                       |
 
 Override with the `N3MC_DATA_DIR` environment variable.
 
