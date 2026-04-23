@@ -44,6 +44,59 @@ The server refuses to start if Redis is unreachable, and the Claude Code plugin 
 
 ---
 
+## Features
+
+- 💾 **Fully local** — Your conversations stay in your own Redis instance. Nothing sent to the cloud.
+- 🔍 **Semantic search** — Finds relevant past conversations even when the exact words differ.
+- 🔄 **Context across sessions** — Working memory that lasts **7 days** (auto-expires via Redis TTL; use Pro for long-term memory).
+- ⚡ **Works automatically** — Saving and searching happen automatically. The MCP `initialize` response ships behavioral instructions, so no user action is required.
+- 🤖 **Multi-agent ready** — Multiple AI agents share one Redis. The `b_local` bias prioritizes each agent's own memories while still surfacing the team's collective knowledge.
+- 🏢 **Team & organization support** — Deploy Redis on a shared server and point `N3MC_REDIS_URL` to it for team-wide memory sharing (⚠️ authentication must be handled at the Redis layer).
+- 🧹 **Ephemerality is a design feature** — 7-day auto-expiry means failed attempts and abandoned designs don't bleed into the next task. `docker restart redis-stack` wipes everything instantly.
+- 💰 **Reduces token waste** — No more re-explaining past context. Memory search uses local embeddings (`intfloat/e5-base-v2`) and costs zero Claude tokens, and accurate context injection means fewer corrections and back-and-forth.
+
+## How It Works
+
+```
+User's message
+    │
+    ▼
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  1. Auto-save │────▶│ 2. Semantic   │────▶│ 3. Context    │
+│  Save last    │     │    search     │     │    injection   │
+│  response to  │     │  Find related │     │  Feed to       │
+│  Redis        │     │  memories     │     │  Claude        │
+└──────────────┘     └──────────────┘     └──────────────┘
+                                                 │
+                                                 ▼
+                                          Claude responds
+                                          with full context
+```
+
+Everything runs automatically via the **behavioral instructions** shipped
+in the MCP `initialize` response. No Claude Code hooks are involved — the
+only client-side setup is adding the tools to `permissions.allow`. No user
+action required.
+
+### Relationship with Claude's built-in auto-memory
+
+Claude Code has a built-in auto-memory system
+(`~/.claude/projects/.../memory/`). N3MemoryCore **complements it rather
+than competing with it**.
+
+|                 | Claude auto-memory                                      | N3MemoryCore RAG                                     |
+| --------------- | ------------------------------------------------------- | ---------------------------------------------------- |
+| **Strengths**   | Reliable, loads every session, great for fixed facts    | Conversation context, detailed history               |
+| **Weaknesses**  | Cannot capture conversation flow or context             | Depends on search quality; not guaranteed to surface |
+| **Best for**    | User profile, folder paths, stable settings             | Conversation threads, past decisions, reasoning      |
+
+**Recommended usage:**
+
+- **Fixed information needed every session** (folder paths, user preferences) → save to auto-memory
+- **Conversation context and history** (discussion threads, past decisions) → N3MemoryCore accumulates automatically (7 days in Lite, permanent in Pro)
+
+---
+
 ## Lite vs. Pro (coming soon)
 
 | Build                      | Storage                           | Durability        | Where                 |
