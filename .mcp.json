@@ -2,7 +2,7 @@
   "mcpServers": {
     "n3memorycore-lite": {
       "type": "stdio",
-      "command": "C:\\Users\\ttake\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\n3mc-workingmemory.exe",
+      "command": "n3mc-workingmemory",
       "args": []
     }
   }
