@@ -9,6 +9,32 @@ not a long-term store.
 BEHAVIORAL RULES
 ================
 
+0. ROLE WHEN PRO IS ALSO CONNECTED (coexistence policy)
+   If `n3mc-longtermmemory` (N3MemoryCore Pro, persistent SQLite+sqlite-vec
+   backend) is also registered as an MCP server in the same session, treat
+   the two servers as complementary, not redundant:
+
+   - THIS SERVER (Lite, ephemeral) is the working-memory / scratchpad.
+     Route here: in-session progress notes, temporary debugging state,
+     throwaway intermediate results, transient task context — anything
+     that will be irrelevant next week.
+
+   - PRO is the canonical long-term store. Route THERE (not here):
+     user profile / preferences, project specs and architecture decisions,
+     world-building / character settings / design artifacts, API contracts,
+     research summaries, outlines, and anything the user wants retained
+     across sessions.
+
+   - When in doubt, prefer Pro. "Painful if lost" > "fine if it vanishes".
+   - Search order at the start of a turn: Pro first, then Lite.
+   - Do NOT double-save the same fact to both servers.
+   - When Pro is connected, the TTL warning (rule 7 below) is generally
+     unnecessary — just route long-term content to Pro instead.
+
+   If Pro is NOT connected, this server is the sole memory store. Accept
+   all content, and emit the TTL warning (rule 7) when the user signals
+   an expectation of permanence.
+
 1. SEARCH FIRST, THEN ACKNOWLEDGE WHEN YOU USE MEMORY
    At the start of every user turn, call `search_memory` with a concise
    representation of the user's intent (key nouns + verbs). Use the
@@ -44,6 +70,9 @@ BEHAVIORAL RULES
    Duplicates are auto-rejected, so err on the side of saving.
    NOTE: Lite memories expire 7 days after they are saved.
 
+   Routing reminder: if Pro is also connected, long-lived content goes to
+   Pro, not here. See rule 0.
+
    NOTE ON CODE BLOCKS: If the server config has `skip_code_blocks: true`,
    any content containing a triple-backtick fence (```) is rejected with
    `status: "skipped_code"`. The default is `false` (code is saved). If
@@ -58,6 +87,9 @@ BEHAVIORAL RULES
    `save_memory` call. The server creates a parent-document + chunks
    automatically and returns the full body on recall. Do NOT split long
    verbatim-worthy content into many short summaries.
+
+   If Pro is connected, long verbatim content that the user may want
+   months later belongs in Pro, not here.
 
 4. TOOL-ERROR HANDLING — NEVER GENERATE LONG CONTENT BLIND
    If `search_memory` or `save_memory` returns a server error (Redis
@@ -90,6 +122,10 @@ BEHAVIORAL RULES
    externally if they want permanence. Do NOT ask permission to save;
    save anyway, then mention the TTL.
 
+   IF PRO IS CONNECTED: prefer routing the long-term content to Pro
+   (see rule 0) rather than emitting this warning. The warning is
+   primarily for sessions where Lite is the only memory backend.
+
    Signals that warrant the reminder (examples, non-exhaustive):
    - Explicit permanence words: "remember this forever", "don't forget",
      "save this permanently", "keep this for next time", "次回も覚えていて",
@@ -101,12 +137,11 @@ BEHAVIORAL RULES
 
    Phrase the reminder in the USER'S LANGUAGE. Examples:
    - Japanese: 「なお、Lite 版のメモリは保存から7日で自動削除されます。
-               永続保存が必要な場合は Pro 版（sqlite-vec バックエンド、
-               公開予定）を、もしくは外部バックアップをご検討ください。」
+               永続保存が必要な場合は Pro 版（sqlite-vec バックエンド）を、
+               もしくは外部バックアップをご検討ください。」
    - English:  "Note: Lite memories auto-expire 7 days after they're saved.
-                For permanent storage, the Pro build (sqlite-vec backed,
-                coming soon) will offer persistence; for now, back it up
-                externally."
+                For permanent storage, use the Pro build (sqlite-vec backed)
+                or back it up externally."
 
    Emit the reminder ONCE per distinct long-term signal — not once per
    turn, not once per save. Do not repeat it if the same user has already
