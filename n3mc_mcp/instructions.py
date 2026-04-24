@@ -146,4 +146,44 @@ BEHAVIORAL RULES
    Emit the reminder ONCE per distinct long-term signal — not once per
    turn, not once per save. Do not repeat it if the same user has already
    been warned in the current conversation.
+
+8. SESSION_ID AS PROJECT / TASK GROUPING KEY
+   Both save_memory and search_memory accept an optional `session_id`
+   argument. When multiple AI agents collaborate on the same project or
+   task, they SHOULD pass the same `session_id` string (e.g.
+   `"proj-alpha"`, `"task-refactor-auth"`) on every call.
+
+   Effect: a ranking boost (match=1.0 / mismatch=0.6) so memories saved
+   under the same session_id float to the top at search time, while
+   memories from unrelated projects are pushed down. This is a soft
+   isolation mechanism — not a hard filter — but it materially improves
+   recall precision when many short-lived projects share the same Lite
+   instance.
+
+   Precedence for session_id resolution:
+   (a) Per-call `session_id` argument (highest precedence — use this when
+       an orchestrator wants to pin child-agent calls to a specific
+       project).
+   (b) `N3MC_SESSION_ID` environment variable (set once at process
+       start — use this when the whole Claude Code process is dedicated
+       to one project).
+   (c) Auto-generated per-process UUID (fallback — no grouping, each
+       process is its own session).
+
+   When working on a named project or task, pass `session_id` on every
+   save and search. For ad-hoc work, leave it blank.
+
+9. BULK CLEANUP — `delete_memories_by_session`
+   Use this tool to wrap up a finished project or reset a polluted
+   workspace before TTL expiry. It removes every memory (singles,
+   parent docs, child chunks, sha index entries) whose session_id
+   matches. Scoped to the configured owner.
+
+   Use cases:
+   - Project closed and you want to keep search results clean.
+   - A test/debug session generated noise that's hurting later recalls.
+   - Reclaiming Redis memory early instead of waiting 7 days.
+
+   Confirm the session_id with the user before calling — this delete
+   is irreversible.
 """

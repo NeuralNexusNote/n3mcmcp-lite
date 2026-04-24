@@ -154,6 +154,7 @@ class Database:
         agent_name: str = "",
         owner_id: str = "",
         importance: float = 1.0,
+        session_id: str = "",
     ) -> dict:
         if not self._ok:
             return {"status": "error", "saved": False, "reason": _DOCKER_HINT}
@@ -166,6 +167,8 @@ class Database:
         if owner_id and owner_id != cfg_owner:
             return {"status": "error", "saved": False, "reason": "owner_id mismatch"}
         owner_id = cfg_owner
+
+        effective_session = session_id.strip() or self.cfg.get("_session_id", "")
 
         importance = max(0.5, min(2.0, importance))
 
@@ -183,11 +186,11 @@ class Database:
         threshold = self.cfg.get("chunk_threshold", 400)
 
         if len(content) <= threshold:
-            return self._save_single(content, agent_name, owner_id, importance)
-        return self._save_parent_chunks(content, agent_name, owner_id, importance)
+            return self._save_single(content, agent_name, owner_id, importance, effective_session)
+        return self._save_parent_chunks(content, agent_name, owner_id, importance, effective_session)
 
     def _save_single(
-        self, content: str, agent_name: str, owner_id: str, importance: float
+        self, content: str, agent_name: str, owner_id: str, importance: float, session_id: str
     ) -> dict:
         sha = _sha1(content)
         sha_key = f"mem:sha:{sha}"
@@ -216,7 +219,7 @@ class Database:
             b"owner_id": owner_id.encode(),
             b"local_id": self.cfg.get("local_id", "").encode(),
             b"agent_name": (agent_name or "").encode(),
-            b"session_id": self.cfg.get("_session_id", "").encode(),
+            b"session_id": session_id.encode(),
             b"importance": str(importance).encode(),
             b"access_count": b"0",
             b"parent_id": b"",
@@ -234,7 +237,7 @@ class Database:
         return {"status": "saved", "saved": True, "id": mem_id, "ttl_seconds": ttl}
 
     def _save_parent_chunks(
-        self, content: str, agent_name: str, owner_id: str, importance: float
+        self, content: str, agent_name: str, owner_id: str, importance: float, session_id: str
     ) -> dict:
         sha = _sha1(content)
         docsha_key = f"docsha:{sha}"
@@ -263,7 +266,6 @@ class Database:
         now_iso = _now_iso()
         now_epoch = _now_epoch()
         local_id = self.cfg.get("local_id", "")
-        session_id = self.cfg.get("_session_id", "")
 
         doc_key = f"doc:{parent_id}"
         pipe = self._client.pipeline()
@@ -356,7 +358,12 @@ class Database:
 
     # ── search ──────────────────────────────────────────────────────────────
 
-    def search_memory(self, query: str, limit: Optional[int] = None) -> list[dict]:
+    def search_memory(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        session_id: str = "",
+    ) -> list[dict]:
         if not self._ok:
             return []
 
@@ -368,6 +375,9 @@ class Database:
         half_life = self.cfg.get("half_life_days", 3)
         min_score_val = self.cfg.get("min_score", 0.2)
         bm25_thr = self.cfg.get("bm25_min_threshold", 0.1)
+        effective_session = session_id.strip() or self.cfg.get("_session_id", "")
+        b_sess_match = self.cfg.get("b_session_match", 1.0)
+        b_sess_mismatch = self.cfg.get("b_session_mismatch", 0.6)
 
         vec_results = self._vector_search(query, owner_id, limit)
         bm25_results = self._bm25_search(query, owner_id, limit)
@@ -385,13 +395,15 @@ class Database:
             acc = _to_int(vr.get("access_count") or br.get("access_count", 0))
             parent_id = vr.get("parent_id") or br.get("parent_id", "")
             mem_id = vr.get("id") or br.get("id", "")
+            row_session = vr.get("session_id") or br.get("session_id", "")
 
             cos = vr.get("cos_sim", 0.0)
             bm25 = br.get("bm25_score", 0.0)
             kw = keyword_relevance(bm25, max_bm25, bm25_thr)
             decay = time_decay(timestamp, half_life)
             b = b_local(imp, acc, self.cfg)
-            score = final_score(cos, kw, decay, b)
+            b_sess = b_sess_match if (effective_session and row_session == effective_session) else b_sess_mismatch
+            score = final_score(cos, kw, decay, b, b_sess)
 
             if score >= min_score_val:
                 candidates.append({
@@ -477,8 +489,8 @@ class Database:
                 "FT.SEARCH", INDEX_NAME,
                 f"*=>[KNN {knn_limit} @embedding $vec AS __dist]",
                 "PARAMS", "2", "vec", vec_bytes,
-                "RETURN", "8", "__dist", "owner_id", "content", "timestamp",
-                "importance", "access_count", "parent_id", "id",
+                "RETURN", "9", "__dist", "owner_id", "content", "timestamp",
+                "importance", "access_count", "parent_id", "id", "session_id",
                 "SORTBY", "__dist",
                 "LIMIT", "0", str(knn_limit),
                 "DIALECT", "2",
@@ -507,6 +519,7 @@ class Database:
                 "access_count": _to_int(fdict.get("access_count", "0")),
                 "parent_id": fdict.get("parent_id", ""),
                 "id": fdict.get("id", ""),
+                "session_id": fdict.get("session_id", ""),
             }
             i += 2
         return out
@@ -525,8 +538,8 @@ class Database:
                 fts_query,
                 "SCORER", "BM25",
                 "WITHSCORES",
-                "RETURN", "7", "owner_id", "content", "timestamp",
-                "importance", "access_count", "parent_id", "id",
+                "RETURN", "8", "owner_id", "content", "timestamp",
+                "importance", "access_count", "parent_id", "id", "session_id",
                 "LIMIT", "0", str(bm25_limit),
                 "DIALECT", "2",
             )
@@ -555,6 +568,7 @@ class Database:
                 "access_count": _to_int(fdict.get("access_count", "0")),
                 "parent_id": fdict.get("parent_id", ""),
                 "id": fdict.get("id", ""),
+                "session_id": fdict.get("session_id", ""),
             }
             i += 3
         return out
@@ -705,6 +719,112 @@ class Database:
             pipe.delete(sha_key)
         pipe.execute()
         return {"status": "deleted", "id": mem_id}
+
+    # ── bulk delete by session ──────────────────────────────────────────────
+
+    def delete_by_session(self, session_id: str) -> dict:
+        """Delete every memory (singles + parent docs + child chunks + sha keys)
+        whose session_id matches. Scoped to the configured owner_id.
+        """
+        if not self._ok:
+            return {"status": "error", "reason": _DOCKER_HINT}
+        session_id = session_id.strip()
+        if not session_id:
+            return {"status": "error", "reason": "session_id required"}
+
+        owner_id = self.cfg["owner_id"]
+        deleted_singles = 0
+        deleted_chunks = 0
+        deleted_docs = 0
+        sha_keys: list[str] = []
+        keys_to_delete: list[str] = []
+
+        # Phase 1: scan mem:* (skip mem:sha:*) and collect matches
+        cursor = 0
+        while True:
+            cursor, keys = self._client.scan(cursor, match="mem:*", count=200)
+            for key in keys:
+                raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                if raw_key.startswith("mem:sha:"):
+                    continue
+                try:
+                    fields = self._client.hmget(
+                        raw_key, b"session_id", b"owner_id", b"parent_id", b"content"
+                    )
+                    sid = fields[0].decode() if fields[0] else ""
+                    oid = fields[1].decode() if fields[1] else ""
+                    pid = fields[2].decode() if fields[2] else ""
+                    content_b = fields[3]
+                except Exception:
+                    continue
+                if sid != session_id or oid != owner_id:
+                    continue
+                keys_to_delete.append(raw_key)
+                if pid:
+                    deleted_chunks += 1
+                else:
+                    deleted_singles += 1
+                    if content_b:
+                        try:
+                            sha_keys.append(
+                                f"mem:sha:{_sha1(content_b.decode('utf-8'))}"
+                            )
+                        except Exception:
+                            pass
+            if cursor == 0:
+                break
+
+        # Phase 2: scan doc:* for matching session_id
+        cursor = 0
+        while True:
+            cursor, keys = self._client.scan(cursor, match="doc:*", count=100)
+            for key in keys:
+                raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                try:
+                    fields = self._client.hmget(
+                        raw_key, b"session_id", b"owner_id", b"content"
+                    )
+                    sid = fields[0].decode() if fields[0] else ""
+                    oid = fields[1].decode() if fields[1] else ""
+                    content_b = fields[2]
+                except Exception:
+                    continue
+                if sid != session_id or oid != owner_id:
+                    continue
+                keys_to_delete.append(raw_key)
+                deleted_docs += 1
+                if content_b:
+                    try:
+                        sha_keys.append(
+                            f"docsha:{_sha1(content_b.decode('utf-8'))}"
+                        )
+                    except Exception:
+                        pass
+            if cursor == 0:
+                break
+
+        if not keys_to_delete and not sha_keys:
+            return {
+                "status": "not_found",
+                "session_id": session_id,
+                "deleted": 0,
+            }
+
+        pipe = self._client.pipeline()
+        for k in keys_to_delete:
+            pipe.delete(k)
+        for sk in sha_keys:
+            pipe.delete(sk)
+        pipe.execute()
+
+        return {
+            "status": "deleted",
+            "session_id": session_id,
+            "documents_deleted": deleted_docs,
+            "chunks_deleted": deleted_chunks,
+            "singles_deleted": deleted_singles,
+            "deleted": deleted_singles + deleted_chunks + deleted_docs,
+        }
 
     # ── repair ──────────────────────────────────────────────────────────────
 

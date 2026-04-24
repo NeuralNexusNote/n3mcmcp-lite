@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 import uuid
 from typing import Any
@@ -41,6 +42,15 @@ async def list_tools() -> list[Tool]:
                         "minimum": 1,
                         "maximum": 100,
                     },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional project/task grouping key. If set, memories with "
+                            "the same session_id get a ranking boost (match=1.0, "
+                            "mismatch=0.6). Leave blank to use the server's default "
+                            "(N3MC_SESSION_ID env var, or a per-process UUID)."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -67,6 +77,15 @@ async def list_tools() -> list[Tool]:
                     "importance": {
                         "type": "number",
                         "description": "Importance weight 0.5-2.0 (default 1.0).",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional project/task grouping key. Collaborating agents "
+                            "should pass the same session_id so their memories boost "
+                            "together at search time. Leave blank to use the server's "
+                            "default (N3MC_SESSION_ID env var, or a per-process UUID)."
+                        ),
                     },
                 },
                 "required": ["content"],
@@ -103,6 +122,24 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="delete_memories_by_session",
+            description=(
+                "Delete every memory (singles, parent docs, child chunks, sha index keys) "
+                "whose session_id matches. Scoped to the configured owner. Use this to "
+                "wrap up a finished project or reset a polluted session before TTL expiry."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "session_id whose memories should be removed.",
+                    },
+                },
+                "required": ["session_id"],
+            },
+        ),
+        Tool(
             name="repair_memory",
             description="Re-ensure the RediSearch index (idempotent). Returns {status, message}.",
             inputSchema={"type": "object", "properties": {}},
@@ -119,6 +156,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             results = _db.search_memory(
                 arguments.get("query", ""),
                 arguments.get("limit"),
+                arguments.get("session_id", ""),
             )
             if not results:
                 text = "_No memories found._"
@@ -142,7 +180,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 arguments.get("agent_name", ""),
                 arguments.get("owner_id", ""),
                 float(arguments.get("importance", 1.0)),
+                arguments.get("session_id", ""),
             )
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+
+        elif name == "delete_memories_by_session":
+            result = _db.delete_by_session(arguments.get("session_id", ""))
             return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
 
         elif name == "list_memories":
@@ -181,7 +224,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 async def _main() -> None:
     global _db
     cfg = load_config()
-    cfg["_session_id"] = str(uuid.uuid4())
+    cfg["_session_id"] = (
+        os.environ.get("N3MC_SESSION_ID", "").strip() or str(uuid.uuid4())
+    )
 
     _db = Database(cfg)
     _db.connect()

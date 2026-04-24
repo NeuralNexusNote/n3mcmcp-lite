@@ -135,8 +135,14 @@ def b_local(stored_importance: float, access_count: int, cfg: dict) -> float:
     return max(0.5, min(2.0, stored_importance + boost))
 
 
-def final_score(cos_sim: float, kw_rel: float, decay: float, b: float) -> float:
-    return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b
+def final_score(
+    cos_sim: float,
+    kw_rel: float,
+    decay: float,
+    b_local: float,
+    b_session: float = 1.0,
+) -> float:
+    return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b_session * b_local
 
 
 def lexical_rerank(

@@ -26,6 +26,8 @@ DEFAULTS: dict[str, Any] = {
     "lexical_rerank_enabled": True,
     "rerank_weight": 0.3,
     "rerank_phrase_weight": 0.2,
+    "b_session_match": 1.0,
+    "b_session_mismatch": 0.6,
     "skip_code_blocks": False,
 }
 
