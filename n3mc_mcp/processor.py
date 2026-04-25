@@ -1,13 +1,36 @@
+import contextlib
 import math
 import re
 import struct
 import sys
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
 
 _model = None
+# Serializes get_model() so a synchronous startup preload and any
+# late-arriving lazy-retry call from a tool handler cannot both run
+# the heavy `from sentence_transformers import SentenceTransformer`
+# path at the same time. The double-check pattern (cheap pre-lock
+# read, then re-check inside the lock) keeps the fast path lock-free
+# once the model is loaded.
+_model_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _silenced_stdout():
+    """Python-level stdout redirect used on the lazy-retry path inside
+    `get_model()`. Once `mcp.run()` is active, fd 1 is the JSON-RPC
+    channel and we cannot safely fd-redirect (a concurrent tool
+    response write would land on stderr and break the client). The
+    asyncio main thread serialises tool handlers, so a Python-level
+    redirect via `sys.stdout` is race-free here. Startup-time
+    preloads should use the fd-level recipe in `server._main`
+    instead — see Pro spec §3.9 step 4."""
+    with contextlib.redirect_stdout(sys.stderr):
+        yield
 
 _CJK_RANGES = [
     (0x3000, 0x9FFF),
@@ -22,12 +45,22 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?])')
 
 def get_model():
     global _model
-    if _model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("intfloat/e5-base-v2")
-        except Exception as e:
-            print(f"[n3mc] embedding model load failed: {e}", file=sys.stderr)
+    if _model is not None:
+        return _model
+    with _model_lock:
+        # Re-check inside the lock: another caller may have finished
+        # loading while we were waiting on the lock.
+        if _model is None:
+            try:
+                # Python-level stdout redirect for the lazy-retry path.
+                # Startup preload (server._main) does the stronger
+                # fd-level redirect outside this function before the
+                # MCP stdio session is active.
+                with _silenced_stdout():
+                    from sentence_transformers import SentenceTransformer
+                    _model = SentenceTransformer("intfloat/e5-base-v2")
+            except Exception as e:
+                print(f"[n3mc] embedding model load failed: {e}", file=sys.stderr)
     return _model
 
 
@@ -140,9 +173,13 @@ def final_score(
     kw_rel: float,
     decay: float,
     b_local: float,
-    b_session: float = 1.0,
 ) -> float:
-    return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b_session * b_local
+    # Lite intentionally has no `b_session` factor — Pro spec §3.6:
+    # "Lite は 7 日窓で自然に収束するため `b_session` を持たない".
+    # The 7-day TTL window collapses freshness via `time_decay`, so
+    # per-session bias would be redundant and would silently dampen
+    # borderline cross-restart hits below `min_score`.
+    return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b_local
 
 
 def lexical_rerank(

@@ -143,7 +143,7 @@ n3memorycore-mcp-lite/
 ├── n3mc_mcp/                       # Python package
 │   ├── __init__.py                 # Version marker
 │   ├── __main__.py                 # Entry point: python -m n3mc_mcp
-│   ├── server.py                   # MCP server definition + 5 tools
+│   ├── server.py                   # MCP server definition + 6 tools
 │   ├── instructions.py             # Behavioral instructions delivered at initialize
 │   ├── database.py                 # Redis layer: index, CRUD, TTL, dedup
 │   ├── processor.py                # Embedding, ranking, CJK tokenization, reranker
@@ -176,7 +176,7 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 | `id` (PK)    | Redis hash      | Per record (UUIDv7, time-ordered)  | **One record**       | Unique identifier for each memory — used for deletion and dedup                                    |
 | `owner_id`   | `config.json`   | First startup (UUIDv4)             | **Owner**            | Identifies whose data this is — stored as a TAG field and returned in results; filtering is done in Python (see §3.12) |
 | `local_id` (agent_id)   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Lite ranking.            |
-| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which server process wrote the record (stored for compatibility; not used in Lite ranking). |
+| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which process wrote the record. Override per call via the `save_memory` / `search_memory` argument or the `N3MC_SESSION_ID` env var. **In Lite this field is NOT a ranking signal** (per Pro spec §3.6: "Lite has no `b_session` because the 7-day TTL window already collapses freshness via `time_decay`"). It is stored on every row for surface compatibility with Pro and is the filter key for `delete_memories_by_session`. |
 | `agent_name`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`).                                   |
 
 ### 3.2 Embeddings
@@ -469,17 +469,18 @@ The server advertises:
 
 ### 4.3 Tools
 
-Five tools are exposed via `tools/list` (same names as the forthcoming Pro build):
+Six tools are exposed via `tools/list` (same names as the forthcoming Pro build, except `delete_memories_by_session` which is Lite-only — Pro will keep only the per-record `delete_memory` to minimize accidental-deletion risk on a persistent store):
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| `search_memory` | `query: string, limit?: int`              | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Returns markdown. |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number` | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. |
+| `search_memory` | `query: string, limit?: int, session_id?: string` | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). **The `session_id` argument has no effect on ranking in Lite** (per Pro spec §3.6: Lite has no `b_session` factor — the 7-day TTL window already collapses freshness via `time_decay`). The argument is accepted for surface compatibility with Pro and for future Pro migration. Returns markdown. |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag (the filter key for `delete_memories_by_session`). |
 | `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). |
 | `delete_memory` | `id: string`                              | If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk with matching `parent_id`. Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
+| `delete_memories_by_session` | `session_id: string`         | Bulk-delete every standalone memory, parent document, child chunk, and sha guard tied to the given `session_id`, scoped to the configured `owner_id`. Response: `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. When nothing matches: `{"status":"not_found", "session_id": ..., "deleted": 0}` (a re-call is a safe no-op). **Irreversible — confirm `session_id` with the user before calling.** Lite-only (see [§10 Test 6](#10-self-evaluation-evidence-report)). |
 | `repair_memory` | —                                         | `ensure_index()`; see [§3.10](#310-repair).                            |
 
-All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `repair_memory` return JSON strings for easy parsing; `search_memory` / `list_memories` return human-readable markdown.
+All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
 
 ### 4.4 Error Handling
 
@@ -637,7 +638,7 @@ Restart the client after editing the config. Ensure Redis Stack is running *befo
 
 By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3mc-workingmemory` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
 
-**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds the five `mcp__n3mc-workingmemory__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing, leaves unrelated fields untouched, and requires `python` on `PATH`.
+**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds the six `mcp__n3mc-workingmemory__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing, leaves unrelated fields untouched, and requires `python` on `PATH`.
 
 **If you installed without the plugin** (`claude mcp add`, manual `.mcp.json`, or Python is not available), add the block below manually to `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
 
@@ -649,6 +650,7 @@ By default, Claude Code prompts the user for each MCP tool call. **For the auto-
       "mcp__n3mc-workingmemory__save_memory",
       "mcp__n3mc-workingmemory__list_memories",
       "mcp__n3mc-workingmemory__delete_memory",
+      "mcp__n3mc-workingmemory__delete_memories_by_session",
       "mcp__n3mc-workingmemory__repair_memory"
     ]
   }
@@ -725,7 +727,7 @@ n3mcmcp-lite/
 
 | Test class | What it covers | Area |
 |---|---|---|
-| `TestToolRegistration` | Five tools registered, schema types, description non-empty | MCP registration |
+| `TestToolRegistration` | Six tools registered, schema types, description non-empty | MCP registration |
 | `TestSaveAndSearch` | Save→search round-trip, exact-duplicate rejection, empty-content rejection | Single chunk |
 | `TestListAndDelete` | Three recent entries listed, delete non-existent id | List / delete |
 | `TestRepair` | `repair_memory` on empty DB → ok | Repair |
@@ -770,13 +772,7 @@ pytest tests/ -v -k "not TestEmbedding"
    - Stock replies (`ok`, `yes`, `thanks`) passed to `save_memory` **are saved** (exact/near duplicates may be rejected server-side — if so, retry with a different string).
    - Empty or whitespace-only input is rejected with `empty content`.
 
-6. **Fully-automatic save test (behavioral-instruction compliance)**: Verify that the client-side Claude honours the §5 behavioral instructions.
-   1. Record the DB count via `list_memories` before the test.
-   2. Have at least a **3-turn** substantive conversation with Claude (technical Q&A round trips). Do **not** ask Claude to save anything explicitly during the run.
-   3. After the conversation ends, re-check `list_memories` and confirm that for each turn Claude wrote a 50–200-character entry containing **intent paraphrase + key conclusion**.
-   4. **Pass criterion**: Claude called `save_memory` on its own volition for most turns, long pastes were split into per-fact entries (not one blob), and trivial greetings / clarifying questions were skipped (§5 rule #4).
-
-7. **Bulk-delete-by-session test (`delete_memories_by_session`)**: Confirm that working memory belonging to a finished project/task can be wiped without waiting for the 7-day TTL.
+6. **Bulk-delete-by-session test (`delete_memories_by_session`)**: Confirm that working memory belonging to a finished project/task can be wiped without waiting for the 7-day TTL.
    1. Pick a unique `session_id` (e.g. `eval-cleanup-YYYY-MM-DD`) and call `save_memory` several times under that session_id, covering **multiple shapes**:
       - a short single record (a 2–10-char string such as `はい` / `ok`)
       - a medium single record (a few dozen to a few hundred chars carrying one fact)
@@ -807,7 +803,7 @@ This spec uses all three. Even so, **whether the LLM follows through is non-dete
 
 ### What this looks like in practice
 
-Most turns auto-save correctly. But **short answers, fact-correction turns, and turns where the LLM is heavily focused on the user's question** sometimes skip the save. This can happen even when §10 Test 6 (auto-save discipline) passes its acceptance criteria. "If it skipped, it stays skipped" — you don't notice until the next session, when you find the fact missing.
+Most turns auto-save correctly. But **short answers, fact-correction turns, and turns where the LLM is heavily focused on the user's question** sometimes skip the save. The behavior is hard to evaluate automatically, so it is not part of the §10 Evidence Report. "If it skipped, it stays skipped" — you don't notice until the next session, when you find the fact missing.
 
 ### Two paths when guaranteed save matters
 
@@ -849,7 +845,20 @@ All three extensions are additive — none of them require changes to the Redis 
 |---|---|---|
 | 1. Implementation | Paste the prompt to kick off the build | **Sonnet** (fast) |
 | 2. Debugging | Paste three prompts **in order** to verify | **Sonnet** |
-| 3. Quality review | Paste the review prompt | **Opus** (deep reasoning) |
+| 3. Evidence Report | **Restart Claude Code first**, then paste the prompt to run §10 | **Sonnet** or **Opus** |
+| 4. Quality review | Paste the review prompt | **Opus** (deep reasoning) |
+
+> **⚠️ A full Claude Code restart is required before Phase 3**
+>
+> The MCP server runs as a stdio child process spawned by Claude Code at startup, and the same process is reused for the rest of the session. Right after Phase 1 / 2 generated or modified code, the running server still holds the **old bytecode**, so the Evidence Report would not reflect the current implementation. §10-1 also measures the `initialize` response time and the very first `search_memory` latency, **which can only be observed at server startup**.
+>
+> Pre-restart checklist:
+> 1. Confirm the latest code is on the import path (`pip install -e .` or reinstall).
+> 2. Confirm `n3mc-workingmemory` is registered — user scope: `~/.claude.json` (recommended for Claude Code), project scope: `.mcp.json` at the project root, Claude Desktop: `claude_desktop_config.json` (see [§8](#8-mcp-client-configuration)).
+> 3. Confirm `~/.claude/settings.json` already has the `mcp__n3mc-workingmemory__*` allow block (see [§8 tool auto-allow](#tool-auto-allow-claude-code-specific)).
+> 4. Confirm Redis Stack is up (`docker ps`; if not, `docker start redis-stack` or `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`).
+> 5. **Fully exit and relaunch Claude Code.** On **Windows**: closing the window with × or running `/exit` can leave background processes alive — open **Task Manager** and end every `Claude` / `claude` process (including the child `python.exe` whose command line is `n3mc-workingmemory.exe`).
+> 6. The first tool call after relaunch takes 2–10 minutes if the e5-base-v2 (~440 MB) HF cache is missing. With the cache warm, `initialize` finishes in ~17 s (see [§3.9 step 4](#39-startup-sequence-and-self-recovery)).
 
 ---
 
@@ -860,11 +869,17 @@ Set the model to **Sonnet** and paste:
 ```
 Please build n3mcmcp-lite from this spec (N3MemoryCore_MCP_Spec_EN.md).
 Redis Stack is already running in Docker. Run it as an MCP stdio server
-and register the five tools (save_memory / search_memory / list_memories
-/ delete_memory / repair_memory).
+and register the six tools (save_memory / search_memory / list_memories
+/ delete_memory / delete_memories_by_session / repair_memory).
 ```
 
 Sonnet handles package scaffolding, RediSearch index creation, MCP tool registration, and stdio launch automatically. When it finishes, move on to phase 2 ("it runs" ≠ "it matches the spec" — do not stop here).
+
+> **⚠️ Fully restart Claude Code between Phase 1 and Phase 2**
+>
+> When Claude Code launched at the start of Phase 1, `n3mc-workingmemory` did not yet exist, so Claude Code is not connected to this MCP server. Before pasting the Phase 2 debugging prompts, **fully exit Claude Code and reopen it** so it picks up the freshly-registered MCP server and can actually exercise `save_memory` / `search_memory` while debugging.
+>
+> **How to fully exit on Windows**: closing the window with × or running `/exit` can leave background processes alive. Open **Task Manager**, end every `Claude` / `claude` process (including child `python.exe` processes whose command line is `n3mc-workingmemory.exe`), and then relaunch Claude Code. After relaunch, verify in the settings panel that `n3mc-workingmemory` is listed as **connected** before proceeding (the first `initialize` response takes ~17 s — see §3.9 step 4).
 
 ---
 
@@ -904,7 +919,40 @@ When all three are done, proceed to phase 3.
 
 ---
 
-### Phase 3: Quality review (Opus)
+### Phase 3: Evidence Report
+
+> **Fully exit and relaunch Claude Code before running this phase** (see the "⚠️ A full Claude Code restart is required before Phase 3" box above). Without the restart, (a) the MCP server still runs old bytecode and the Evidence Report won't match the current implementation, and (b) §10-1's `initialize` and first-call timings cannot be captured.
+
+The model can be **Sonnet** or **Opus** — Sonnet is sufficient to verify the items; Opus tends to grade harder. After the restart, paste:
+
+```
+For n3mcmcp-lite:
+Run the §10 Evidence Report from the spec. Actually call the MCP tools
+(mcp__n3mc-workingmemory__*) and verify items 1 through 6 in order.
+Score each item on a 1–5 ⭐ scale and write up a short Evidence Report.
+
+Be explicit about:
+- §10-1: initialize response time, first search_memory latency, and the
+         median of 5 steady-state search_memory latencies; verify the
+         server returns a hint (no crash) when Redis is down
+- §10-3: byte-for-byte verbatim recall of a >400-char body (parent-doc
+         contract and [doc×N] tag)
+- §10-4: bracketed save text retrieved via a bracket-free query within
+         the top 3 (CJK bigram coverage)
+- §10-6: mixed inserts (short / medium / long-exceeding-chunk_threshold)
+         under one session_id → delete_memories_by_session → matches
+         the inserted count, leaves other sessions untouched, second
+         call returns not_found
+
+If anything fails, identify the root cause and fix the implementation,
+then rerun. When all items are ⭐⭐⭐⭐⭐, advance to Phase 4.
+```
+
+Once the Evidence Report is green, proceed to Phase 4 (quality review).
+
+---
+
+### Phase 4: Quality review (Opus)
 
 Switch the model to **Opus** and paste:
 

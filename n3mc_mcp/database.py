@@ -375,9 +375,12 @@ class Database:
         half_life = self.cfg.get("half_life_days", 3)
         min_score_val = self.cfg.get("min_score", 0.2)
         bm25_thr = self.cfg.get("bm25_min_threshold", 0.1)
-        effective_session = session_id.strip() or self.cfg.get("_session_id", "")
-        b_sess_match = self.cfg.get("b_session_match", 1.0)
-        b_sess_mismatch = self.cfg.get("b_session_mismatch", 0.6)
+        # `session_id` is accepted for tool-surface symmetry with Pro
+        # but Lite does not apply a `b_session` factor (Pro spec §3.6:
+        # "Lite は 7 日窓で自然に収束するため `b_session` を持たない").
+        # The argument and the per-process fallback are unused at search
+        # ranking time; session_id remains useful as a hard filter for
+        # `delete_memories_by_session` and as a write-time tag.
 
         vec_results = self._vector_search(query, owner_id, limit)
         bm25_results = self._bm25_search(query, owner_id, limit)
@@ -395,15 +398,13 @@ class Database:
             acc = _to_int(vr.get("access_count") or br.get("access_count", 0))
             parent_id = vr.get("parent_id") or br.get("parent_id", "")
             mem_id = vr.get("id") or br.get("id", "")
-            row_session = vr.get("session_id") or br.get("session_id", "")
 
             cos = vr.get("cos_sim", 0.0)
             bm25 = br.get("bm25_score", 0.0)
             kw = keyword_relevance(bm25, max_bm25, bm25_thr)
             decay = time_decay(timestamp, half_life)
             b = b_local(imp, acc, self.cfg)
-            b_sess = b_sess_match if (effective_session and row_session == effective_session) else b_sess_mismatch
-            score = final_score(cos, kw, decay, b, b_sess)
+            score = final_score(cos, kw, decay, b)
 
             if score >= min_score_val:
                 candidates.append({
@@ -420,7 +421,20 @@ class Database:
         # Resolve parent documents BEFORE reranking, so lexical rerank
         # (token coverage + phrase bonus) sees the full verbatim body of
         # parent-doc hits rather than just the chunk that happened to match.
-        # Also deduplicate multiple chunks that resolve to the same parent.
+        #
+        # Spec §3.11 contract:
+        #   1. When multiple chunks share a parent_id, keep the
+        #      HIGHEST-SCORING chunk's base score on the collapsed parent
+        #      ("最高スコアのヒットのみ残す"). The merge above iterates an
+        #      unordered set, so we sort by score descending here to make
+        #      the first chunk encountered for a given parent the best one.
+        #   2. If `doc:<pid>` is missing (parent expired or was deleted),
+        #      the orphan chunks must each surface as individual memories
+        #      ("孤児チャンクは個別メモリとして表示", graceful degrade).
+        #      Do NOT mark `seen_parents` in that case, so siblings of a
+        #      dead parent each render on their own.
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+
         seen_parents: dict[str, bool] = {}
         resolved: list[dict] = []
         for c in candidates:
@@ -428,17 +442,20 @@ class Database:
             if pid:
                 if pid in seen_parents:
                     continue
-                seen_parents[pid] = True
                 try:
                     doc_data = self._client.hgetall(f"doc:{pid}")
-                    if doc_data:
-                        chunk_count = doc_data.get(b"chunk_count", b"?").decode()
-                        c["content"] = doc_data[b"content"].decode("utf-8")
-                        c["id"] = pid
-                        c["_tag"] = f"[doc×{chunk_count}]"
-                        c["_parent_key"] = f"doc:{pid}"
                 except Exception:
-                    pass
+                    doc_data = None
+                if doc_data:
+                    seen_parents[pid] = True
+                    chunk_count = doc_data.get(b"chunk_count", b"?").decode()
+                    c["content"] = doc_data[b"content"].decode("utf-8")
+                    c["id"] = pid
+                    c["_tag"] = f"[doc×{chunk_count}]"
+                    c["_parent_key"] = f"doc:{pid}"
+                # else: parent gone — graceful degrade per §3.11. Leave
+                # this chunk untouched, do not flag the parent as seen,
+                # so any sibling orphan chunks survive too.
             resolved.append(c)
         candidates = resolved
 

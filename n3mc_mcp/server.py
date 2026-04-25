@@ -39,6 +39,17 @@ _NUDGE_AFTER_SAVE = (
     "long content (>400 chars). Duplicates are auto-rejected, so err "
     "on the side of saving._"
 )
+# Spec §11 / §4.3: every tool response ends with a short reminder that
+# re-anchors the auto-save discipline mid-turn. list/delete/repair tools
+# don't directly carry retrieval or save semantics, but the spec is
+# explicit ("each tool's response ends with a short reminder"), so we
+# append a generic nudge here too.
+_NUDGE_GENERIC = (
+    "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
+    "to persist the user's intent (paraphrased) and any substantive "
+    "output you produced. Lite entries expire 7 days after save, so "
+    "saving more is safer than saving less._"
+)
 
 
 @app.list_tools()
@@ -67,10 +78,13 @@ async def list_tools() -> list[Tool]:
                     "session_id": {
                         "type": "string",
                         "description": (
-                            "Optional project/task grouping key. If set, memories with "
-                            "the same session_id get a ranking boost (match=1.0, "
-                            "mismatch=0.6). Leave blank to use the server's default "
-                            "(N3MC_SESSION_ID env var, or a per-process UUID)."
+                            "Optional project/task grouping key. **Has NO ranking "
+                            "effect in Lite** — accepted for surface compatibility "
+                            "with Pro (where it drives b_session_match/mismatch). "
+                            "In Lite the 7-day TTL window collapses freshness via "
+                            "time_decay, so explicit session bias is unnecessary. "
+                            "Leave blank to use the server's default (N3MC_SESSION_ID "
+                            "env var, or per-process UUIDv4)."
                         ),
                     },
                 },
@@ -103,10 +117,13 @@ async def list_tools() -> list[Tool]:
                     "session_id": {
                         "type": "string",
                         "description": (
-                            "Optional project/task grouping key. Collaborating agents "
-                            "should pass the same session_id so their memories boost "
-                            "together at search time. Leave blank to use the server's "
-                            "default (N3MC_SESSION_ID env var, or a per-process UUID)."
+                            "Optional project/task grouping key. Stored on the row "
+                            "and used as the filter for delete_memories_by_session. "
+                            "**Does NOT affect search ranking in Lite** (Pro applies "
+                            "b_session_match/mismatch, but Lite's 7-day TTL window "
+                            "makes that redundant). Leave blank to use the server's "
+                            "default (N3MC_SESSION_ID env var, or per-process "
+                            "UUIDv4)."
                         ),
                     },
                 },
@@ -208,7 +225,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         elif name == "delete_memories_by_session":
             result = _db.delete_by_session(arguments.get("session_id", ""))
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, ensure_ascii=False) + _NUDGE_GENERIC,
+            )]
 
         elif name == "list_memories":
             if not _db._ok:
@@ -226,15 +246,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     preview = m.get("content", "")
                     lines.append(f"**{tag_str}[{m['id']}]** {ts}\n{preview}")
                 text = "\n\n---\n\n".join(lines)
-            return [TextContent(type="text", text=text)]
+            return [TextContent(type="text", text=text + _NUDGE_GENERIC)]
 
         elif name == "delete_memory":
             result = _db.delete_memory(arguments.get("id", ""))
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, ensure_ascii=False) + _NUDGE_GENERIC,
+            )]
 
         elif name == "repair_memory":
             result = _db.repair_memory()
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, ensure_ascii=False) + _NUDGE_GENERIC,
+            )]
 
         else:
             return [TextContent(type="text", text=f"Error: unknown tool '{name}'")]
@@ -246,6 +272,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 async def _main() -> None:
     global _db
     cfg = load_config()
+    # Resolve the auto-fallback session_id used when a tool call does
+    # not pass `session_id` explicitly. Pro spec §3.1 / §3.6 fallback
+    # order, mirrored here for surface compatibility:
+    #   1. `N3MC_SESSION_ID` env var
+    #   2. Per-process UUID (fresh each startup)
+    #
+    # Lite has no `b_session` ranking factor (see config.py), so the
+    # value is only used as a default tag for save_memory and as the
+    # default scope for delete_memories_by_session. A per-process UUID
+    # is therefore safe — it does not affect cross-restart retrieval.
     cfg["_session_id"] = (
         os.environ.get("N3MC_SESSION_ID", "").strip() or str(uuid.uuid4())
     )
@@ -255,18 +291,53 @@ async def _main() -> None:
     _db.enforce_ephemeral()
     _db.ensure_index()
 
-    # Model is loaded lazily on first search/save via processor.get_model().
-    # We do not pre-load here: sync load blocks the MCP initialize handshake
-    # (Claude Code marks the server as `failed`), and background-thread
-    # preload caused first-call deadlocks in practice. Lazy load means the
-    # first search/save takes 14-40 s once per server lifetime; subsequent
-    # calls are ~50 ms.
-
     init_opts = app.create_initialization_options()
     try:
         init_opts.instructions = INSTRUCTIONS
     except AttributeError:
         pass
+
+    # Synchronously preload the embedding model BEFORE entering the
+    # stdio_server context. sentence_transformers / transformers /
+    # huggingface_hub print progress bars, "BertModel LOAD REPORT",
+    # HTTP request logs, and HF auth warnings to **stdout** during
+    # load. Once stdio_server is active, fd 1 is the JSON-RPC
+    # channel and any stray bytes destroy protocol framing — the
+    # observed symptom is the client hanging forever ("Processing
+    # request of type CallToolRequest" logged to stderr but no
+    # response ever reaches the client over fd 1).
+    #
+    # `contextlib.redirect_stdout(sys.stderr)` only diverts Python's
+    # `sys.stdout` wrapper; C extensions, inherited file descriptors
+    # and subprocess writes still go to fd 1. We therefore redirect
+    # at the OS level via `os.dup2(2, 1)` for the duration of the
+    # preload, then restore fd 1 before mcp.run() takes over.
+    #
+    # **Synchronous + fd-level is the only safe combination.** A
+    # background-thread preload (e.g. via run_in_executor) is
+    # actively wrong: while the worker thread is mid-load and fd 1
+    # has been redirected, the asyncio main thread can begin writing
+    # JSON-RPC responses and they land on stderr, disconnecting the
+    # client. See N3MC Pro spec §3.9 step 4 for the full design
+    # rationale; this is the same recipe Pro uses, ported to Lite.
+    #
+    # Cost: `initialize` response is delayed by ~17 s on a cached HF
+    # cache (longer on first download). This is well within Claude
+    # Code's MCP startup timeout in practice. If the load fails
+    # (offline / no HF cache), tool handlers fall back to the lazy
+    # path in `processor.get_model()` which uses a Python-level
+    # redirect (race-free because handlers are serialised by the
+    # asyncio main thread).
+    try:
+        saved_stdout_fd = os.dup(1)
+        try:
+            os.dup2(2, 1)
+            get_model()
+        finally:
+            os.dup2(saved_stdout_fd, 1)
+            os.close(saved_stdout_fd)
+    except Exception as e:
+        print(f"[n3mc] model preload failed (will lazy-retry): {e}", file=sys.stderr)
 
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, init_opts)

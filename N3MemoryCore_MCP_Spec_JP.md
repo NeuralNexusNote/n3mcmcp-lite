@@ -142,7 +142,7 @@ n3memorycore-mcp-lite/
 ├── n3mc_mcp/                       # Python パッケージ
 │   ├── __init__.py                 # バージョンマーカー
 │   ├── __main__.py                 # エントリポイント: python -m n3mc_mcp
-│   ├── server.py                   # MCP サーバー定義 + 5 ツール
+│   ├── server.py                   # MCP サーバー定義 + 6 ツール
 │   ├── instructions.py             # initialize 時の振る舞い指示
 │   ├── database.py                 # Redis 層：インデックス・CRUD・TTL・重複判定
 │   ├── processor.py                # 埋め込み・ランキング・CJK トークナイズ・リランカー
@@ -175,7 +175,7 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 | `id` (PK)    | Redis ハッシュ    | レコード毎（UUIDv7、時刻順）             | **1 レコード**          | 各メモリの一意識別子 — 削除・重複判定に使用                                                    |
 | `owner_id`   | `config.json`    | 初回起動時（UUIDv4）                     | **オーナー**            | 誰のデータか — HASH フィールドとして保存・返却し、Python 側でフィルタリングする（§3.12 参照）  |
 | `local_id` (agent_id)   | `config.json`    | 初回起動時（UUIDv4）                     | **エージェント / 導入** | インストールの UUIDv4 識別子。互換性のため保存（Lite のランキングでは未使用）。                |
-| `session_id` | メモリ内          | サーバープロセス起動時（UUIDv4）         | **サーバープロセス**    | どのサーバープロセスが書いたか（互換性のため保存、Lite のランキングでは未使用）。              |
+| `session_id` | メモリ内          | サーバープロセス起動時（UUIDv4）         | **サーバープロセス**    | どのプロセスが書いたかの label。`save_memory` / `search_memory` の引数、または `N3MC_SESSION_ID` 環境変数で上書き可。**Lite ではランキング非依存**（Pro 仕様 §3.6 のとおり「Lite は 7 日窓で自然に収束するため `b_session` を持たない」— time_decay が同等の役割を果たす）。Pro との互換のためフィールドはレコードに保存され、`delete_memories_by_session` のフィルタキーや将来の Pro 移行用の write-time tag として機能する。 |
 | `agent_name`   | Redis ハッシュ    | `save_memory` 呼び出し毎（自由文字列）   | **エージェント表示名**  | 人間向けラベル（例：`"claude-desktop"`、`"claude-code"`）。                                    |
 
 ### 3.2 埋め込み
@@ -465,17 +465,18 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 ### 4.3 ツール
 
-`tools/list` で公開する 5 ツール（名前は Pro 版（公開予定）と同じ）：
+`tools/list` で公開する 6 ツール（名前は Pro 版（公開予定）と揃える。`delete_memories_by_session` のみ Lite 専用 — Pro 版は永続化を重視するため誤削除リスクを避け個別 `delete_memory` のみを公開する予定）：
 
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
-| `search_memory` | `query: string, limit?: int`              | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブーストランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。markdown を返す。 |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number` | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `ttl_seconds` を含む JSON を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。 |
+| `search_memory` | `query: string, limit?: int, session_id?: string` | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブーストランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。**`session_id` 引数はランキングに作用しない**（Pro 仕様 §3.6 のとおり Lite は `b_session` を持たない — 7 日 TTL 内で `time_decay` が同等の役割を果たす）。引数は将来の Pro 移行および surface 互換のために受け入れる。markdown を返す。 |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `ttl_seconds` を含む JSON を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー）。 |
 | `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。親は `[doc×N]` タグ付き。チャンクは隠蔽（FT.SEARCH `*` クエリ後に Python 側で `parent_id` 空文字列フィルタ、§3.12 参照）。 |
 | `delete_memory` | `id: string`                              | ID が親（`doc:<uuid>`）なら親＋`docsha:`＋該当 `parent_id` を持つ全チャンクを連鎖削除。それ以外は `mem:<uuid>` とその sha ガードをアトミック削除。 |
+| `delete_memories_by_session` | `session_id: string`         | 指定 `session_id` に紐づく独立メモリ・親ドキュメント・子チャンク・sha ガードを、設定 `owner_id` のレコードに限定して一括削除。応答は `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`。ヒットゼロのときは `{"status":"not_found", "session_id": ..., "deleted": 0}`（再呼び出しは安全な no-op）。**不可逆操作のため呼び出し前に `session_id` をユーザーに確認すること。** Lite 専用（[§10 Test 6](#10-自律評価evidence-report) 参照）。 |
 | `repair_memory` | —                                         | `ensure_index()` を実行。[§3.10](#310-修復) 参照。                         |
 
-全ツールの応答は単一の `TextContent`。`save_memory` / `delete_memory` / `repair_memory` は JSON 文字列、`search_memory` / `list_memories` は人間可読 markdown。
+全ツールの応答は単一の `TextContent`。`save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` は JSON 文字列、`search_memory` / `list_memories` は人間可読 markdown。**いずれの応答も末尾に短い auto-save リマインダ（[§11](#11-保存の確実性と-mcp-プロトコルの限界) で利用するナッジチャネル）を `\n---\n` 区切りで付加する。** 機械的に応答 JSON をパースする呼び出し側は、先頭から JSON ドキュメント 1 つを取り出すストリーミングデコード（例：`json.JSONDecoder().raw_decode()`）を使うこと。
 
 ### 4.4 エラー処理
 
@@ -634,7 +635,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
 
-**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 5 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`python` が `PATH` 上にあれば動作する。
+**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 6 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`python` が `PATH` 上にあれば動作する。
 
 **プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
 
@@ -646,6 +647,7 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
       "mcp__n3mc-workingmemory__save_memory",
       "mcp__n3mc-workingmemory__list_memories",
       "mcp__n3mc-workingmemory__delete_memory",
+      "mcp__n3mc-workingmemory__delete_memories_by_session",
       "mcp__n3mc-workingmemory__repair_memory"
     ]
   }
@@ -722,7 +724,7 @@ n3mcmcp-lite/
 
 | テストクラス | テスト内容 | カバレッジ |
 |---|---|---|
-| `TestToolRegistration` | 5 ツール登録、スキーマ型、description 非空 | MCP 登録 |
+| `TestToolRegistration` | 6 ツール登録、スキーマ型、description 非空 | MCP 登録 |
 | `TestSaveAndSearch` | 保存→検索往復、完全重複拒否、空内容拒否 | 単一チャンク |
 | `TestListAndDelete` | 新着 3 件の列挙、存在しない ID の削除 | 一覧・削除 |
 | `TestRepair` | 空 DB に対する `repair_memory`→ok | 修復 |
@@ -767,13 +769,7 @@ pytest tests/ -v -k "not TestEmbedding"
    - 定型語（例: `ok`、`yes`、`thanks`）を `save_memory` に渡し、**レコードが保存される**こと（ただし完全重複・近似重複は server-side で拒否されうる — その場合は別文字列で再試行）。
    - 空文字列・空白のみの入力は `empty content` で拒否されることを確認。
 
-6. **全自動保存テスト（指示書遵守の検証）**: §5 の振る舞い指示をクライアント側 Claude が守っているかを確認せよ。
-   1. テスト前の DB レコード件数を `list_memories` で記録する。
-   2. Claude に **3 ターン以上**の実質的な会話を依頼する（技術的質問＋回答の往復）。この間、ユーザーは「保存して」と明示的に指示しない。
-   3. 会話終了後、`list_memories` でレコード件数を再確認し、各ターンで **意図パラフレーズ＋結論**が 50〜200 文字程度で自動保存されていることを確認する。
-   4. **合格基準**: 3 ターン以上のうち大半で Claude が自発的に `save_memory` を呼んでいること。長文ペーストは単発 blob でなく事実ごとに分割保存されていること。挨拶・確認質問はスキップされていること（§5 ルール #4）。
-
-7. **session_id 一括削除テスト（`delete_memories_by_session`）**: 不要になったプロジェクト／タスクのワーキングメモリを TTL を待たずに整理できることを確認せよ。
+6. **session_id 一括削除テスト（`delete_memories_by_session`）**: 不要になったプロジェクト／タスクのワーキングメモリを TTL を待たずに整理できることを確認せよ。
    1. 一意な `session_id`（例: `eval-cleanup-YYYY-MM-DD`）を決め、その session_id を渡しながら **複数の異なる形態**のレコードを `save_memory` する：
       - 短い single レコード（例: `はい` / `ok` などの 2〜10 文字）
       - 中程度の single レコード（数十〜数百字の事実 1 件）
@@ -804,7 +800,7 @@ pytest tests/ -v -k "not TestEmbedding"
 
 ### 実運用で起きること
 
-大半のターンでは正しく auto-save される。だが**短い返答・事実訂正のターン・LLM がユーザの質問に強く集中しているターン**では飛ぶ。これは §10 Test 6（全自動保存テスト）の合格基準を満たしていても起こる。「飛んだら飛んだまま」── 次セッションで失われていることに気づくまで分からない。
+大半のターンでは正しく auto-save される。だが**短い返答・事実訂正のターン・LLM がユーザの質問に強く集中しているターン**では飛ぶ。観察可能な症状であっても自動評価は困難で、「飛んだら飛んだまま」── 次セッションで失われていることに気づくまで分からない。
 
 ### 確実な保存が必要なときの 2 つの経路
 
@@ -846,7 +842,20 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 |---|---|---|
 | 1. 実装 | プロンプトを貼って実装を依頼 | **Sonnet**（高速） |
 | 2. デバッグ | 3 つのプロンプトを**順番に**貼って検証 | **Sonnet** |
-| 3. 品質レビュー | プロンプトを貼って評価・改善を依頼 | **Opus**（深い推論） |
+| 3. 自律評価 | **Claude Code を再起動**してからプロンプトを貼って §10 の Evidence Report 実行を依頼 | **Sonnet** または **Opus** |
+| 4. 品質レビュー | プロンプトを貼って評価・改善を依頼 | **Opus**（深い推論） |
+
+> **⚠️ フェーズ 3 の前に Claude Code の再起動が必須**
+>
+> MCP サーバーは Claude Code 起動時に stdio 子プロセスとして起動され、以降は同じプロセスが使い回されます。フェーズ 1・2 でコード生成・修正を行った直後は、実行中のサーバープロセスが**古いバイトコード**のままのため、Evidence Report の結果が実装と一致しません。また §10-1 は `initialize` 応答時間と初回 `search_memory` の所要時間を計測するため、**サーバー起動の瞬間にしか測れません**。
+>
+> 再起動前のチェックリスト：
+> 1. `pip install -e .`（または再インストール）で最新コードがインポートパスに載っているか確認
+> 2. `n3mc-workingmemory` が登録済みか確認 — ユーザースコープなら `~/.claude.json`（推奨、Claude Code）、プロジェクトスコープならプロジェクト直下の `.mcp.json`（Claude Code）、Claude Desktop なら `claude_desktop_config.json`（[§8](#8-mcp-クライアント設定)）
+> 3. `~/.claude/settings.json` に `mcp__n3mc-workingmemory__*` の allow ブロックを追加済みか確認（[§8 ツール自動許可](#ツール自動許可claude-code-固有)）
+> 4. Redis Stack が起動していること（`docker ps` で確認、無ければ `docker start redis-stack` または `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`）
+> 5. Claude Code を**完全に終了 → 再起動**（**Windows**：右上 × ボタンや `/exit` だけでは残ることがあるため、**タスクマネージャ**で `Claude` / `claude` 関連プロセスおよび子の `python.exe`（`n3mc-workingmemory.exe` 系）をすべて終了させる）
+> 6. 再起動後の初回ツール呼び出しは e5-base-v2（~440 MB）の HF キャッシュ未生成なら 2〜10 分。キャッシュ済みなら `initialize` は ~17 秒（[§3.9 step 4](#39-起動シーケンスと自己回復)）で完了する
 
 ---
 
@@ -857,11 +866,17 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 ```
 この指示書（N3MemoryCore_MCP_Spec_JP.md）に従って n3mcmcp-lite を実装してください。
 Redis Stack は docker で起動済みです。MCP stdio サーバーとして動かし、
-5 つのツール（save_memory / search_memory / list_memories / delete_memory /
-repair_memory）を登録してください。
+6 つのツール（save_memory / search_memory / list_memories / delete_memory /
+delete_memories_by_session / repair_memory）を登録してください。
 ```
 
 Sonnet がパッケージ構成・RediSearch インデックス作成・MCP ツール登録・stdio 起動まで自動で行います。完了したらフェーズ 2 に進んでください（「動いた」≠「仕様通り」なので、ここで終わりにしないでください）。
+
+> **⚠️ フェーズ 1 → フェーズ 2 の間に Claude Code を完全再起動してください**
+>
+> フェーズ 1 で Claude Code が起動した時点では `n3mc-workingmemory` はまだ存在しないため、Claude Code はこの MCP サーバーに接続していません。フェーズ 2 のデバッグプロンプトを Sonnet に貼る前に、**Claude Code を完全終了して再起動**してください — そうすると新しく登録された MCP サーバーに接続し、デバッグ中に実機で `save_memory` / `search_memory` を呼び出して挙動を確認できるようになります。
+>
+> **Windows で完全終了する手順**：右上 × ボタンや `/exit` だけではバックグラウンドプロセスが残ることがあるため、**タスクマネージャ**を開き、`Claude` および `claude` 関連のプロセス（および子プロセスとして起動している `python.exe` の `n3mc-workingmemory.exe` 系）をすべて終了させてから Claude Code を再起動してください。再起動後、設定で MCP サーバー一覧に `n3mc-workingmemory` が **connected** で表示されることを確認してから次に進みます（初回接続時は `initialize` 応答に ~17 秒かかります — §3.9 step 4 参照）。
 
 ---
 
@@ -900,7 +915,35 @@ n3mcmcp-lite について：
 
 ---
 
-### フェーズ 3：品質レビュー（Opus）
+### フェーズ 3：自律評価（Evidence Report）
+
+> **先に Claude Code を完全終了 → 再起動してから以下を実行**（上記 "⚠️ フェーズ 3 の前に Claude Code の再起動が必須" 参照）。再起動せずに実行すると、(a) MCP サーバーが古いバイトコードのままのため結果が実装と一致せず、(b) §10-1 の `initialize` 応答時間・初回 `search_memory` の計測ができません。
+
+モデルは **Sonnet** または **Opus**（自律評価項目の検証は Sonnet で十分。Opus に渡せばよりシビアな採点になりやすい）。再起動後に以下を貼り付けてください。
+
+```
+n3mcmcp-lite について：
+指示書 §10 の自律評価（Evidence Report）を実行してください。
+実際に MCP ツール（mcp__n3mc-workingmemory__*）を呼び出し、§10 の 1〜6 の
+各項目を順に検証し、各項目を ⭐⭐⭐⭐⭐ で採点した Evidence Report を
+生成してください。
+
+特に以下を明示的に記録してください：
+- §10-1: initialize 応答時間、初回 search_memory、定常 search_memory（5 回計測の中央値）の実測値、Redis 停止時のヒント返却（クラッシュなし）
+- §10-3: 400 字超テキストの一字一句復元（親ドキュメント verbatim 契約と [doc×N] タグ）
+- §10-4: 括弧付き保存テキストを無括弧クエリで上位 3 件以内ヒット（CJK バイグラム）
+- §10-6: 短／中／長（chunk_threshold 超）の混合投入 → delete_memories_by_session
+         → 投入数と deleted 合計の一致、他 session の無干渉、2 回目 not_found
+
+失敗した項目があれば原因を特定し、必要に応じて修正後に再実行してください。
+合格 5 項目すべてが ⭐⭐⭐⭐⭐ を達成したらフェーズ 4 に進んでください。
+```
+
+Evidence Report が緑になったら、フェーズ 4（品質レビュー）に進みます。
+
+---
+
+### フェーズ 4：品質レビュー（Opus）
 
 モデルを **Opus** に切り替え、以下を貼り付けてください。
 

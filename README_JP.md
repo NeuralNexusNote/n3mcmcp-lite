@@ -101,7 +101,7 @@ Claude Code には標準の auto-memory 機能（`~/.claude/projects/.../memory/
 | **Lite（本リポジトリ）**  | Redis Stack（RediSearch）            | 7d TTL・揮発   | Claude Marketplace  |
 | **Pro（公開予定）**       | SQLite + sqlite-vec（ローカルファイル） | 永続            | 別途配布             |
 
-MCP の外向き仕様は同じ（5 ツール・同じランキング式）。7 日 TTL と
+MCP の外向き仕様は同じ（6 ツール・同じランキング式。`delete_memories_by_session` のみ Lite 専用）。7 日 TTL と
 揮発性 Redis ストレージは**設計上の特長であり制約ではありません** —
 以下のワークフローでは Lite 版の方が適しています：
 
@@ -249,6 +249,44 @@ Desktop アプリからは読まれません。
   }
 }
 ```
+
+### ツール自動許可（Claude Code 固有）
+
+Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを
+出します。**「AI が意識せず保存・検索する」自動ループを成立させるには**、
+`n3mc-workingmemory` のツールを Claude Code 設定の `permissions.allow` に
+事前登録しておく必要があります。
+
+**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote`
+でインストールすると、`SessionStart` フック [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
+が `~/.claude/settings.json` の `permissions.allow` に 6 つの
+`mcp__n3mc-workingmemory__*` ツールを冪等追加します。手動編集不要。
+1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは
+温存します。`python` が `PATH` 上にあることが前提。
+
+**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` /
+Python 不在）の場合は、下記ブロックを `~/.claude/settings.json`（ユーザー
+グローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）
+に手動追記してください：
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__n3mc-workingmemory__search_memory",
+      "mcp__n3mc-workingmemory__save_memory",
+      "mcp__n3mc-workingmemory__list_memories",
+      "mcp__n3mc-workingmemory__delete_memory",
+      "mcp__n3mc-workingmemory__delete_memories_by_session",
+      "mcp__n3mc-workingmemory__repair_memory"
+    ]
+  }
+}
+```
+
+これがないと、`save_memory` / `search_memory` のたびに承認ダイアログが出て
+AI が停止します（ユーザーが席を外していれば動作不能）。Claude Desktop には
+ツール単位のパーミッションゲートが無いため、この設定は不要です。
 
 ## データ保存先
 

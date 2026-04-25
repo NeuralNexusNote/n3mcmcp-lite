@@ -104,7 +104,7 @@ than competing with it**.
 | **Lite (this repo)**       | Redis Stack (RediSearch)          | 7d TTL, volatile  | Claude Marketplace    |
 | **Pro (coming soon)**      | SQLite + sqlite-vec (local file)  | Permanent         | Separate distribution |
 
-Same MCP surface (five tools, same ranking formula). The 7-day TTL and
+Same MCP surface (six tools, same ranking formula; `delete_memories_by_session` is Lite-only). The 7-day TTL and
 volatile Redis storage are **design features, not limitations** —
 they make the Lite build the better fit for:
 
@@ -264,7 +264,7 @@ fully automatic memory loop — so the connected AI never blocks on an
 **Plugin install auto-configures this** — when you install via
 `/plugin install n3mc-workingmemory@neuralnexusnote`, a `SessionStart`
 hook runs [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
-which idempotently adds the five `mcp__n3mc-workingmemory__*` tools to
+which idempotently adds the six `mcp__n3mc-workingmemory__*` tools to
 `~/.claude/settings.json`. No manual editing needed. The hook only
 writes if at least one entry is missing and never touches unrelated
 fields. Requires `python` on `PATH`.
@@ -282,6 +282,7 @@ or `.claude/settings.json` (per-project):
       "mcp__n3mc-workingmemory__save_memory",
       "mcp__n3mc-workingmemory__list_memories",
       "mcp__n3mc-workingmemory__delete_memory",
+      "mcp__n3mc-workingmemory__delete_memories_by_session",
       "mcp__n3mc-workingmemory__repair_memory"
     ]
   }

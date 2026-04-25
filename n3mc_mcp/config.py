@@ -26,8 +26,6 @@ DEFAULTS: dict[str, Any] = {
     "lexical_rerank_enabled": True,
     "rerank_weight": 0.3,
     "rerank_phrase_weight": 0.2,
-    "b_session_match": 1.0,
-    "b_session_mismatch": 0.6,
     "skip_code_blocks": False,
 }
 
@@ -50,6 +48,16 @@ def load_config() -> dict[str, Any]:
     if "local_id" not in cfg:
         cfg["local_id"] = str(uuid.uuid4())
         changed = True
+    # `session_id` is intentionally NOT persisted in config.json. Pro
+    # spec §3.1 / §3.6 defines it as a per-process UUID, used by Pro's
+    # `b_session` ranking factor to prefer the current session's writes
+    # over stale cross-session ones. **Lite has no `b_session`** (Pro
+    # spec §3.6: "Lite は 7 日窓で自然に収束するため `b_session` を
+    # 持たない") because the 7-day TTL window already collapses
+    # freshness via `time_decay`, so a per-process fallback that
+    # changes across restarts is harmless here. The field is still
+    # stored on each row for compatibility with Pro and for
+    # `delete_memories_by_session`, but it is not a ranking signal.
 
     for k, v in DEFAULTS.items():
         if k not in cfg:

@@ -153,12 +153,17 @@ BEHAVIORAL RULES
    task, they SHOULD pass the same `session_id` string (e.g.
    `"proj-alpha"`, `"task-refactor-auth"`) on every call.
 
-   Effect: a ranking boost (match=1.0 / mismatch=0.6) so memories saved
-   under the same session_id float to the top at search time, while
-   memories from unrelated projects are pushed down. This is a soft
-   isolation mechanism — not a hard filter — but it materially improves
-   recall precision when many short-lived projects share the same Lite
-   instance.
+   Effect in Lite: session_id is stored on every row but **does NOT
+   affect search ranking** — the 7-day TTL window already collapses
+   freshness via time_decay (Pro spec §3.6: "Lite has no b_session
+   because the 7-day TTL window already collapses freshness"). Pro
+   applies a match=1.0 / mismatch=0.6 ranking boost; Lite does not.
+
+   The value of passing session_id in Lite is therefore (a) the
+   filter key for `delete_memories_by_session` (tear down a finished
+   project's memories without waiting for TTL), and (b) write-time
+   compatibility with Pro (when the same workload migrates to Pro,
+   the stored session_id immediately starts driving b_session).
 
    Precedence for session_id resolution:
    (a) Per-call `session_id` argument (highest precedence — use this when
@@ -167,8 +172,10 @@ BEHAVIORAL RULES
    (b) `N3MC_SESSION_ID` environment variable (set once at process
        start — use this when the whole Claude Code process is dedicated
        to one project).
-   (c) Auto-generated per-process UUID (fallback — no grouping, each
-       process is its own session).
+   (c) Per-process UUIDv4 (fallback — fresh on each server start, same
+       as Pro). Lite has no `b_session` ranking factor, so the
+       per-process value does NOT cause cross-restart score loss; it
+       only serves as a write-time tag for `delete_memories_by_session`.
 
    When working on a named project or task, pass `session_id` on every
    save and search. For ad-hoc work, leave it blank.

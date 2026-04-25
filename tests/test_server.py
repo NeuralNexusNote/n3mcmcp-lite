@@ -4,15 +4,31 @@ import pytest
 from tests.conftest import requires_redis
 
 
+def _parse_json_response(text: str) -> dict:
+    """Strip the trailing auto-save reminder (spec §11 / §4.3 — every tool
+    response ends with a short nudge) and return the JSON payload. Plain
+    `json.loads` would fail on the trailing markdown."""
+    return json.JSONDecoder().raw_decode(text)[0]
+
+
 # ── TestToolRegistration ──────────────────────────────────────────────────────
 
 class TestToolRegistration:
-    def test_five_tools_registered(self):
+    def test_six_tools_registered(self):
         import asyncio
         from n3mc_mcp.server import list_tools
         tools = asyncio.get_event_loop().run_until_complete(list_tools())
         names = {t.name for t in tools}
-        assert names == {"search_memory", "save_memory", "list_memories", "delete_memory", "repair_memory"}
+        # §4.3 で documented な 6 ツール（`delete_memories_by_session`
+        # は Lite 専用、§10 Test 6 と §3.1+ session_id ガイダンス参照）。
+        assert names == {
+            "search_memory",
+            "save_memory",
+            "list_memories",
+            "delete_memory",
+            "delete_memories_by_session",
+            "repair_memory",
+        }
 
     def test_tools_have_descriptions(self):
         import asyncio
@@ -59,7 +75,7 @@ class TestSaveAndSearch:
             call_tool("save_memory", {"content": "server layer test content"})
         )
         assert len(result) == 1
-        data = json.loads(result[0].text)
+        data = _parse_json_response(result[0].text)
         assert data["saved"] is True
 
     def test_search_finds_saved(self, db):
@@ -86,7 +102,7 @@ class TestSaveAndSearch:
         result = asyncio.get_event_loop().run_until_complete(
             call_tool("save_memory", {"content": content})
         )
-        data = json.loads(result[0].text)
+        data = _parse_json_response(result[0].text)
         assert data["saved"] is False
 
     def test_empty_content_error(self, db):
@@ -96,7 +112,7 @@ class TestSaveAndSearch:
         result = asyncio.get_event_loop().run_until_complete(
             call_tool("save_memory", {"content": ""})
         )
-        data = json.loads(result[0].text)
+        data = _parse_json_response(result[0].text)
         assert data["saved"] is False
 
     def test_search_empty_db_no_error(self, db):
@@ -106,7 +122,9 @@ class TestSaveAndSearch:
         result = asyncio.get_event_loop().run_until_complete(
             call_tool("search_memory", {"query": "nothing here"})
         )
-        assert result[0].text == "_No memories found._"
+        # The body starts with "_No memories found._" and is followed by
+        # the §11 / §4.3 auto-save nudge; substring check is enough.
+        assert result[0].text.startswith("_No memories found._")
 
 
 # ── TestListAndDelete ─────────────────────────────────────────────────────────
@@ -137,7 +155,7 @@ class TestListAndDelete:
         result = asyncio.get_event_loop().run_until_complete(
             call_tool("delete_memory", {"id": "nonexistent-id-xyz"})
         )
-        data = json.loads(result[0].text)
+        data = _parse_json_response(result[0].text)
         assert data["status"] == "not_found"
 
 
@@ -153,7 +171,7 @@ class TestRepair:
         result = asyncio.get_event_loop().run_until_complete(
             call_tool("repair_memory", {})
         )
-        data = json.loads(result[0].text)
+        data = _parse_json_response(result[0].text)
         assert data["status"] == "ok"
 
 
@@ -192,7 +210,7 @@ class TestParentDocRecall:
         save_result = asyncio.get_event_loop().run_until_complete(
             call_tool("save_memory", {"content": long_text})
         )
-        data = json.loads(save_result[0].text)
+        data = _parse_json_response(save_result[0].text)
         assert data["saved"] is True
         parent_id = data["parent_id"]
 
@@ -207,6 +225,6 @@ class TestParentDocRecall:
         del_result = asyncio.get_event_loop().run_until_complete(
             call_tool("delete_memory", {"id": parent_id})
         )
-        del_data = json.loads(del_result[0].text)
+        del_data = _parse_json_response(del_result[0].text)
         assert del_data["status"] == "deleted"
         assert del_data.get("chunks_deleted", 0) > 0
