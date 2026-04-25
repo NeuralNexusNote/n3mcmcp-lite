@@ -375,12 +375,16 @@ class Database:
         half_life = self.cfg.get("half_life_days", 3)
         min_score_val = self.cfg.get("min_score", 0.2)
         bm25_thr = self.cfg.get("bm25_min_threshold", 0.1)
-        # `session_id` is accepted for tool-surface symmetry with Pro
-        # but Lite does not apply a `b_session` factor (Pro spec §3.6:
-        # "Lite は 7 日窓で自然に収束するため `b_session` を持たない").
-        # The argument and the per-process fallback are unused at search
-        # ranking time; session_id remains useful as a hard filter for
-        # `delete_memories_by_session` and as a write-time tag.
+        # Per-row b_session ranking: rows whose stored session_id matches
+        # the request's effective session get b_match (default 1.0); the
+        # rest get b_mismatch (default 0.6). Resolution order for the
+        # "effective session" matches save_memory and Pro spec §3.1:
+        #   (1) per-call argument
+        #   (2) N3MC_SESSION_ID env var (resolved into cfg["_session_id"])
+        #   (3) per-process UUIDv4 fallback (also in cfg["_session_id"])
+        effective_session = session_id.strip() or self.cfg.get("_session_id", "")
+        b_sess_match = self.cfg.get("b_session_match", 1.0)
+        b_sess_mismatch = self.cfg.get("b_session_mismatch", 0.6)
 
         vec_results = self._vector_search(query, owner_id, limit)
         bm25_results = self._bm25_search(query, owner_id, limit)
@@ -404,7 +408,13 @@ class Database:
             kw = keyword_relevance(bm25, max_bm25, bm25_thr)
             decay = time_decay(timestamp, half_life)
             b = b_local(imp, acc, self.cfg)
-            score = final_score(cos, kw, decay, b)
+            row_session = vr.get("session_id") or br.get("session_id", "")
+            b_sess = (
+                b_sess_match
+                if (effective_session and row_session == effective_session)
+                else b_sess_mismatch
+            )
+            score = final_score(cos, kw, decay, b, b_sess)
 
             if score >= min_score_val:
                 candidates.append({

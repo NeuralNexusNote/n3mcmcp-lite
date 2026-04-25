@@ -9,6 +9,19 @@
 > (vector + BM25) memory exposed as a Model Context Protocol server, backed
 > by Redis Stack with a 7-day TTL per entry.
 
+> 💬 **The MCP protocol can only nudge the LLM to call `save_memory`, so
+> which conversations actually get saved is ultimately up to the LLM. But
+> if you ask Claude Code, it can also wire up hook-based auto-saving of
+> every conversation.**
+> Just say "after every turn, automatically save the full Claude Code
+> transcript to Lite" and Claude Code will drop a script under
+> `~/.claude/hooks/` and add a `Stop` hook to `~/.claude/settings.json`.
+> The harness runs the hook deterministically — it does not depend on the
+> LLM remembering to call `save_memory`, so Claude can never accidentally
+> skip a save. See the
+> [Hook-based full-transcript saving](#hook-based-full-transcript-saving)
+> section below for details.
+
 > 🇯🇵 **[日本語版はこちら](./README_JP.md)**
 > 🛡️ **[Development Philosophy](./PHILOSOPHY.md)**
 
@@ -450,8 +463,7 @@ take it.
 
 ### When you need a guaranteed save
 
-Within the MCP framing, only two paths reliably bypass this
-non-determinism:
+Within the MCP framing, three paths bypass this non-determinism:
 
 **Path 1 — ask the LLM explicitly in your prompt** (operational workaround,
 immediate). Write *"save this to N3MemoryCore"* or *"record this in
@@ -459,17 +471,55 @@ memory"* into your prompt. LLMs almost always honour explicit user
 requests. Pros: zero infrastructure, works today, works with every MCP
 client. Cons: cognitive load — you must remember to say it; not automatic.
 
-**Path 2 — bypass MCP and call the first-party Anthropic Messages API
+### Hook-based full-transcript saving
+
+**Path 2 — Claude Code hook that saves the full transcript** (Claude Code
+only, deterministic). Claude Code exposes harness-level hooks (`Stop`,
+etc.) that the harness runs deterministically — they do not depend on the
+LLM remembering anything. Setup is one prompt to Claude Code:
+
+> *"After every turn, automatically save the full Claude Code transcript
+> to Lite."*
+
+Claude Code then provisions:
+
+- A script at `~/.claude/hooks/save_transcript.py` that reads
+  `transcript_path` from hook input, imports `n3mc_mcp.database.Database`
+  directly, and calls `save_memory` on the Lite DB (no MCP round-trip).
+- A `hooks.Stop` block in `~/.claude/settings.json` that runs the script
+  after every assistant turn with `async: true` (so model load never
+  blocks the UI).
+
+Behavioral notes:
+
+- **Claude can never accidentally skip a save** — the harness fires the
+  hook regardless of what the LLM does.
+- No MCP round-trip overhead; the hook talks to Redis directly.
+- As a session grows, the per-turn transcripts collide via near-duplicate
+  detection (`dedup_threshold`), so the DB stays close to **one entry per
+  session** instead of one per turn.
+- Transcripts shorter than ~200 chars are skipped as noise.
+- Pros: deterministic / independent of model behavior / no save anxiety.
+- Cons: Claude Code only (Cursor / Windsurf need a different approach) /
+  the hook process loads the embedding model each turn (async, so no UI
+  block, but there is CPU/IO cost) /
+  **Lite's 7-day TTL still applies**, so transcripts saved this way still
+  expire within a week — point the same hook at the forthcoming Pro build
+  (SQLite-backed, persistent) when long-term retention matters.
+
+**Path 3 — bypass MCP and call the first-party Anthropic Messages API
 yourself** (architecture change). Step outside MCP clients (Claude Code,
 etc.) and drive `messages.create` `tool_use` directly from your own
 application code; you can then fire `save_memory` deterministically every
-turn regardless of what the LLM "decided" to do. Pros: deterministic.
-Cons: you have to write the orchestration application.
+turn regardless of what the LLM "decided" to do. Pros: deterministic /
+works with any model and any client. Cons: you have to write the
+orchestration application.
 
 The convenience of "MCP + LLM handles it for me" and the guarantee of
 "every turn saves" sit at opposite ends of a tradeoff. This server packs
 its persuasion levers as hard as the protocol allows; any stronger
-guarantee is your call as the user or client implementer.
+guarantee is your call as the user or client implementer (and if you're
+on Claude Code, Path 2 is by far the lowest-cost option).
 
 ## License
 

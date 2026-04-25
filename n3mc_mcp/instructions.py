@@ -153,17 +153,20 @@ BEHAVIORAL RULES
    task, they SHOULD pass the same `session_id` string (e.g.
    `"proj-alpha"`, `"task-refactor-auth"`) on every call.
 
-   Effect in Lite: session_id is stored on every row but **does NOT
-   affect search ranking** — the 7-day TTL window already collapses
-   freshness via time_decay (Pro spec §3.6: "Lite has no b_session
-   because the 7-day TTL window already collapses freshness"). Pro
-   applies a match=1.0 / mismatch=0.6 ranking boost; Lite does not.
+   Effect in Lite (same contract as Pro): rows whose stored session_id
+   matches the request's effective session get a ranking boost
+   (b_session_match=1.0); non-matching rows are dampened
+   (b_session_mismatch=0.6). Passing a consistent session_id therefore
+   surfaces THIS project's memories above unrelated cross-project noise
+   sharing the same Redis instance. The boost is multiplicative on top
+   of the existing (cos·0.7 + bm25·0.3) · time_decay · b_local score.
 
-   The value of passing session_id in Lite is therefore (a) the
-   filter key for `delete_memories_by_session` (tear down a finished
-   project's memories without waiting for TTL), and (b) write-time
-   compatibility with Pro (when the same workload migrates to Pro,
-   the stored session_id immediately starts driving b_session).
+   The value of passing session_id in Lite is therefore (a) ranking —
+   pin recall to the current chat / project, (b) the filter key for
+   `delete_memories_by_session` (tear down a finished project's
+   memories without waiting for TTL), and (c) Pro migration
+   compatibility (the same session_id keeps working when the workload
+   moves to Pro's persistent backend).
 
    Precedence for session_id resolution:
    (a) Per-call `session_id` argument (highest precedence — use this when
@@ -172,10 +175,11 @@ BEHAVIORAL RULES
    (b) `N3MC_SESSION_ID` environment variable (set once at process
        start — use this when the whole Claude Code process is dedicated
        to one project).
-   (c) Per-process UUIDv4 (fallback — fresh on each server start, same
-       as Pro). Lite has no `b_session` ranking factor, so the
-       per-process value does NOT cause cross-restart score loss; it
-       only serves as a write-time tag for `delete_memories_by_session`.
+   (c) Per-process UUIDv4 (fallback — fresh on each server start). Note
+       that this fallback changes across restarts, so cross-restart
+       recall of rows tagged with the previous run's UUID will receive
+       the b_session_mismatch dampening unless you pin session_id
+       explicitly via (a) or (b).
 
    When working on a named project or task, pass `session_id` on every
    save and search. For ad-hoc work, leave it blank.

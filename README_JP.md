@@ -8,6 +8,14 @@
 > 揮発性ハイブリッド（ベクトル + BM25）メモリを Model Context Protocol
 > サーバーとして提供します。各エントリは 7 日で自動失効します。
 
+> 💬 **MCP サーバの制限により、保存する会話は基本的に LLM 任せになります。
+> ただし Claude Code に依頼すれば、hook を使った全会話の自動記録もセットアップ可能です。**
+> 「毎ターン終わったら、Claude Code の会話全文を Lite に自動保存して」と頼めば、
+> Claude Code が `~/.claude/hooks/` にスクリプトを置き、`~/.claude/settings.json`
+> に `Stop` hook を追加します。これは LLM の判断を介さず harness が決定論的に
+> 実行するため、Claude が `save_memory` を呼び忘れる事故が構造的に発生しません。
+> 詳細は本 README の [hook による全会話保存](#hook-による全会話保存) 節を参照。
+
 > 🇺🇸 **[English README](./README.md)**
 > 🛡️ **[開発ポリシー](./PHILOSOPHY.md)**
 
@@ -429,9 +437,9 @@ auto-save を促す短い reminder を埋め込んでいます。それでも、
 保存していてほしかった事実が次のセッションで失われていたら、「保存して」と
 明示的に言えば取り戻せます。
 
-### 確実な保存が必要なときの 2 つの経路
+### 確実な保存が必要なときの 3 つの経路
 
-MCP の建付けの中では、この非決定性を回避する経路は **2 通りしかありません**：
+MCP の建付けの中で、この非決定性を回避する経路は **3 通り**あります：
 
 **経路 1 — ユーザがプロンプトで明示する**（運用回避・即効）
 - 「**N3MemoryCore に保存して**」「**メモリに記録して**」をプロンプトに書く
@@ -439,16 +447,40 @@ MCP の建付けの中では、この非決定性を回避する経路は **2 �
 - 利点: 何のインフラも要らない／今すぐ効く／すべての MCP クライアントで動く
 - 欠点: ユーザの認知負荷（毎回明示する必要、自動化されない）
 
-**経路 2 — MCP を抜けて first-party API（Anthropic Messages API）に自分で繋ぐ**（アーキテクチャ変更）
+### hook による全会話保存
+
+**経路 2 — Claude Code hook で全会話保存**（Claude Code 専用・決定論的）
+- Claude Code には `Stop` などの harness レベル hook があり、これは LLM の判断を**一切介さず**
+  harness が決定論的に実行する
+- セットアップは Claude Code に依頼するだけ：
+  > 「毎ターン終わったら、Claude Code の会話全文を Lite に自動保存して」
+- Claude Code が以下を自動構築します：
+  - `~/.claude/hooks/save_transcript.py` — `transcript_path` を読んで `n3mc_mcp.database.Database`
+    を直接 import し、Lite DB に `save_memory` を呼び出すスクリプト
+  - `~/.claude/settings.json` の `hooks.Stop` セクション — 上記スクリプトを毎ターン末に
+    `async: true` で実行する設定
+- 動作仕様：
+  - **Claude が `save_memory` を呼び忘れる事故が構造的に発生しない**（harness が直接呼ぶ）
+  - MCP の往復を経由しないため、ツール呼び出しコストゼロ
+  - 同一セッションは turn ごとに transcript が成長 → 重複判定（`dedup_threshold`）が
+    効くため近似一致は自動却下、DB は **1 セッション 1 エントリ近傍**に収束
+  - 200 文字未満の短い transcript は noise として skip
+- 利点: 決定論的／LLM の傾向に依存しない／ノイズや忘却の心配なし
+- 欠点: Claude Code 専用（Cursor / Windsurf など他クライアントでは別の仕組みが必要）／
+  hook プロセスが毎ターン埋め込みモデルをロード（async なので UI ブロックなしだが CPU/IO コストはあり）／
+  **Lite は 7 日 TTL なので保存した transcript もその窓内で失効する** — 長期保存が必要なら
+  Pro 版（公開予定・SQLite 永続）へ同じ hook で繋ぎ替えるのが筋
+
+**経路 3 — MCP を抜けて first-party API（Anthropic Messages API）に自分で繋ぐ**（アーキテクチャ変更）
 - MCP クライアント（Claude Code 等）から外れて、`messages.create` の `tool_use` を自前のアプリで直接制御する
 - 「LLM が呼ぼうが呼ぶまいが、コード側で毎ターン `save_memory` を確実に発火する」決定論的動作を組める
-- 利点: コードが書いた通り動く／保存保証
+- 利点: コードが書いた通り動く／保存保証／どのモデル・どのクライアントとも独立
 - 欠点: そのオーケストレーションアプリを書く労力
 
 「**MCP 経由で LLM に丸投げする利便性**」と「**毎ターン確実に保存される保証**」は
 トレードオフの両端で、片方を取ったらもう片方は捨てる構造です。本サーバは MCP プロトコル
 が許す限りの説得材料を盛り込んでいますが、それ以上の保証はユーザ／クライアント実装者
-の選択になります。
+の選択になります（Claude Code を使っているなら経路 2 が最小コスト）。
 
 ## ライセンス
 

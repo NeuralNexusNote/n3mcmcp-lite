@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.1.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.5.0 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
@@ -176,7 +176,7 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 | `id` (PK)    | Redis hash      | Per record (UUIDv7, time-ordered)  | **One record**       | Unique identifier for each memory — used for deletion and dedup                                    |
 | `owner_id`   | `config.json`   | First startup (UUIDv4)             | **Owner**            | Identifies whose data this is — stored as a TAG field and returned in results; filtering is done in Python (see §3.12) |
 | `local_id` (agent_id)   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Lite ranking.            |
-| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which process wrote the record. Override per call via the `save_memory` / `search_memory` argument or the `N3MC_SESSION_ID` env var. **In Lite this field is NOT a ranking signal** (per Pro spec §3.6: "Lite has no `b_session` because the 7-day TTL window already collapses freshness via `time_decay`"). It is stored on every row for surface compatibility with Pro and is the filter key for `delete_memories_by_session`. |
+| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which process wrote the record. Override per call via the `save_memory` / `search_memory` argument or the `N3MC_SESSION_ID` env var. **Lite applies the same `b_session` ranking as Pro** (match=1.0, mismatch=0.6 by default). Pinning a consistent `session_id` per project surfaces that project's memories above unrelated cross-project rows in the same Redis instance. Also serves as the filter key for `delete_memories_by_session`. |
 | `agent_name`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`).                                   |
 
 ### 3.2 Embeddings
@@ -281,7 +281,7 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
 Identical to the forthcoming Pro build:
 
 ```
-Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local
+Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local × b_session
 ```
 
 Where `b_local` is the **importance coefficient**:
@@ -295,6 +295,19 @@ access_boost = min(access_count_max_boost, access_count × access_count_weight)
 - `access_boost`: **automatic CPU-only frequency boost**. Every `search_memory` call increments `access_count` by 1 for each memory returned in the top `ttl_refresh_top_k` hits. On subsequent queries that memory receives an additive boost of `access_count × access_count_weight` (default `0.02`), capped at `access_count_max_boost` (default `0.5`). This creates a self-adjusting "frequently-used memories rank higher" loop with zero LLM involvement.
 
 Set `access_count_enabled: false` in config to disable the boost (the formula falls back to `stored_importance` only).
+
+`b_session` is the **session-match coefficient** (same contract as Pro):
+
+```
+b_session = b_session_match     if  row.session_id == effective_session
+          = b_session_mismatch  otherwise
+```
+
+- `b_session_match`: default `1.0`. Multiplied into rows whose stored `session_id` matches the request's `effective_session` (resolved via per-call argument → `N3MC_SESSION_ID` env var → per-process startup UUID).
+- `b_session_mismatch`: default `0.6`. Pushes rows from other projects sharing the same Redis instance below the current session's results.
+- This is the primary signal for ChatLink-style "one chat = one session_id" workflows: surfacing the current chat's memories above unrelated cross-project noise. Pass the same `session_id` to both `save_memory` and `search_memory` to make this work.
+
+When `effective_session` is empty, the match check always fails and every row receives `b_session_mismatch` — symmetrically, so no row gains an advantage. To explicitly disable the bias, set both `b_session_match` and `b_session_mismatch` to `1.0`.
 
 **cos_sim** — **derived directly from RediSearch's cosine distance**:
 
@@ -463,7 +476,7 @@ stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `std
 
 The server advertises:
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3mc-workingmemory", version: "1.1.0" }`
+- `serverInfo: { name: "n3mc-workingmemory", version: "1.5.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
 
@@ -473,8 +486,8 @@ Six tools are exposed via `tools/list` (same names as the forthcoming Pro build,
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| `search_memory` | `query: string, limit?: int, session_id?: string` | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). **The `session_id` argument has no effect on ranking in Lite** (per Pro spec §3.6: Lite has no `b_session` factor — the 7-day TTL window already collapses freshness via `time_decay`). The argument is accepted for surface compatibility with Pro and for future Pro migration. Returns markdown. |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag (the filter key for `delete_memories_by_session`). |
+| `search_memory` | `query: string, limit?: int, session_id?: string` | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
 | `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). |
 | `delete_memory` | `id: string`                              | If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk with matching `parent_id`. Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
 | `delete_memories_by_session` | `session_id: string`         | Bulk-delete every standalone memory, parent document, child chunk, and sha guard tied to the given `session_id`, scoped to the configured `owner_id`. Response: `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. When nothing matches: `{"status":"not_found", "session_id": ..., "deleted": 0}` (a re-call is a safe no-op). **Irreversible — confirm `session_id` with the user before calling.** Lite-only (see [§10 Test 6](#10-self-evaluation-evidence-report)). |
@@ -536,6 +549,8 @@ Complete schema (missing fields auto-filled with defaults below):
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
   "rerank_phrase_weight":     0.2,
+  "b_session_match":          1.0,
+  "b_session_mismatch":       0.6,
   "skip_code_blocks":         false
 }
 ```
@@ -550,6 +565,7 @@ Complete schema (missing fields auto-filled with defaults below):
 - `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — enable flag, per-hit weight, and cap for the frequency boost (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` disables the feature entirely and the formula falls back to `stored_importance` only.
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL-reset and `access_count` increment for the top-K hits after each search. Reset-only (no lifetime extension beyond a fresh save). When a chunk hit expands to its parent document, the `doc:<parent_id>` key's TTL is also refreshed alongside the chunk's `mem:` key, keeping verbatim recall ability alive in sync with the chunks.
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` passes the fused score through unchanged.
+- `b_session_match` / `b_session_mismatch` — the `b_session` factor in the ranking formula (see [§3.6](#36-ranking-formula)). For each row, the search compares the request's `effective_session` (per-call argument → `N3MC_SESSION_ID` env var → per-process startup UUID) against the row's stored `session_id`: matches multiply the score by `b_session_match` (default `1.0`), mismatches by `b_session_mismatch` (default `0.6`). Set both to `1.0` to disable the bias entirely (all rows symmetric).
 - `skip_code_blocks` — when `true`, `save_memory` rejects any content containing a triple-backtick fence (```` ``` ````) and returns `{"status": "skipped_code", "saved": false}`. Default `false` (inherit the FastAPI-era N3MemoryCore behavior where users who did not want code in memory could opt out). Heuristic only — the fence marker is the signal; mixed prose+code is rejected wholesale, not stripped. The LLM is instructed (§5) to avoid retrying the same payload on `skipped_code` and to save a prose description instead.
 
 > **Multi-account on a single PC**: each OS user runs the server under their own `config.json` by default. To share a Redis across accounts, set the same `redis_url` in both configs — entries are segregated via the `owner_id` TAG filter.

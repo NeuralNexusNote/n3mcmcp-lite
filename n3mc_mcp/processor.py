@@ -173,13 +173,15 @@ def final_score(
     kw_rel: float,
     decay: float,
     b_local: float,
+    b_session: float = 1.0,
 ) -> float:
-    # Lite intentionally has no `b_session` factor — Pro spec §3.6:
-    # "Lite は 7 日窓で自然に収束するため `b_session` を持たない".
-    # The 7-day TTL window collapses freshness via `time_decay`, so
-    # per-session bias would be redundant and would silently dampen
-    # borderline cross-restart hits below `min_score`.
-    return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b_local
+    # Lite applies the same b_session factor as Pro (match=1.0,
+    # mismatch=0.6 by default) so a request scoped to a specific
+    # session_id surfaces that session's rows above unrelated
+    # cross-project noise sharing the same Redis instance.
+    # Caller may pass 1.0 (the default) to skip the bias when no
+    # session_id was supplied or matched.
+    return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b_local * b_session
 
 
 def lexical_rerank(

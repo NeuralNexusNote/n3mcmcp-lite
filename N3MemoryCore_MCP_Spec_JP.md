@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.1.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.5.0 [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版（公開予定）** との差別化を明確化しています。
@@ -138,7 +138,7 @@ Lite は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリ�
 
 ```
 n3memorycore-mcp-lite/
-├── pyproject.toml                  # パッケージメタデータ、エントリポイント 'n3mc-workingmemory'（`n3mc-mcp-lite` は deprecated alias として 1.1.4 のみ存続）
+├── pyproject.toml                  # パッケージメタデータ、エントリポイント 'n3mc-workingmemory'（`n3mc-mcp-lite` は deprecated alias として残置）
 ├── n3mc_mcp/                       # Python パッケージ
 │   ├── __init__.py                 # バージョンマーカー
 │   ├── __main__.py                 # エントリポイント: python -m n3mc_mcp
@@ -175,7 +175,7 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 | `id` (PK)    | Redis ハッシュ    | レコード毎（UUIDv7、時刻順）             | **1 レコード**          | 各メモリの一意識別子 — 削除・重複判定に使用                                                    |
 | `owner_id`   | `config.json`    | 初回起動時（UUIDv4）                     | **オーナー**            | 誰のデータか — HASH フィールドとして保存・返却し、Python 側でフィルタリングする（§3.12 参照）  |
 | `local_id` (agent_id)   | `config.json`    | 初回起動時（UUIDv4）                     | **エージェント / 導入** | インストールの UUIDv4 識別子。互換性のため保存（Lite のランキングでは未使用）。                |
-| `session_id` | メモリ内          | サーバープロセス起動時（UUIDv4）         | **サーバープロセス**    | どのプロセスが書いたかの label。`save_memory` / `search_memory` の引数、または `N3MC_SESSION_ID` 環境変数で上書き可。**Lite ではランキング非依存**（Pro 仕様 §3.6 のとおり「Lite は 7 日窓で自然に収束するため `b_session` を持たない」— time_decay が同等の役割を果たす）。Pro との互換のためフィールドはレコードに保存され、`delete_memories_by_session` のフィルタキーや将来の Pro 移行用の write-time tag として機能する。 |
+| `session_id` | メモリ内          | サーバープロセス起動時（UUIDv4）         | **サーバープロセス**    | どのプロセスが書いたかの label。`save_memory` / `search_memory` の引数、または `N3MC_SESSION_ID` 環境変数で上書き可。**Lite でも Pro と同じ `b_session` ランキングが適用される**（match=1.0 / mismatch=0.6）。同一 `session_id` をプロジェクトごとに固定して渡すことで、その chat / プロジェクトのメモリを他プロジェクト由来のノイズより上位に押し上げられる。`delete_memories_by_session` のフィルタキーも兼ねる。 |
 | `agent_name`   | Redis ハッシュ    | `save_memory` 呼び出し毎（自由文字列）   | **エージェント表示名**  | 人間向けラベル（例：`"claude-desktop"`、`"claude-code"`）。                                    |
 
 ### 3.2 埋め込み
@@ -277,7 +277,7 @@ n3mc_idx                    RediSearch インデックス、ON HASH PREFIX 1 mem
 Pro 版（公開予定）と同一：
 
 ```
-Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local
+Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local × b_session
 ```
 
 ここで `b_local` は **重要度係数**：
@@ -291,6 +291,19 @@ access_boost = min(access_count_max_boost, access_count × access_count_weight)
 - `access_boost`：**CPU のみで自動算出される頻度ブースト**。`search_memory` がその記憶を上位 `ttl_refresh_top_k` 件に含めるたび `access_count` が +1 され、次回以降の検索で `access_count × access_count_weight`（既定 `0.02`）だけ `b_local` を押し上げる（上限 `access_count_max_boost = 0.5`）。LLM の介在なく「よく使われる記憶ほど上位に来る」自己調整ループが成立する。
 
 設定で `access_count_enabled: false` にすればブーストを無効化できる（`stored_importance` のみで重み付け）。
+
+`b_session` は **セッション一致係数**（Pro と同一の挙動）：
+
+```
+b_session = b_session_match     if  row.session_id == effective_session
+          = b_session_mismatch  otherwise
+```
+
+- `b_session_match`：既定 `1.0`。リクエストの `effective_session`（呼び出し時引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUID の優先順）と一致した行に乗算。
+- `b_session_mismatch`：既定 `0.6`。同一 Redis インスタンスを共有する他プロジェクトのメモリを順位の下に押す。
+- ChatLink 風「1 chat = 1 session_id」運用で、現在の chat に紐づくメモリを他プロジェクトのノイズより上位に出すための主要シグナル。`save_memory` / `search_memory` の両方で同一 `session_id` を固定して渡すことが前提。
+
+`effective_session` が空文字列のときはマッチ判定が常に偽となるため、すべての行に `b_session_mismatch` が乗る — つまり session_id を一切渡さなければ全レコードが対称に扱われる（実質的に b_session 無効化と等価）。明示的に無効化したい場合は `b_session_match` と `b_session_mismatch` を両方 `1.0` に設定する。
 
 **cos_sim** — **RediSearch のコサイン距離から直接導出**：
 
@@ -459,7 +472,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 サーバーが広告する内容：
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3mc-workingmemory", version: "1.1.0" }`
+- `serverInfo: { name: "n3mc-workingmemory", version: "1.5.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 7 日で失効する」旨を明示する。**
 
@@ -469,8 +482,8 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
-| `search_memory` | `query: string, limit?: int, session_id?: string` | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブーストランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。**`session_id` 引数はランキングに作用しない**（Pro 仕様 §3.6 のとおり Lite は `b_session` を持たない — 7 日 TTL 内で `time_decay` が同等の役割を果たす）。引数は将来の Pro 移行および surface 互換のために受け入れる。markdown を返す。 |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `ttl_seconds` を含む JSON を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー）。 |
+| `search_memory` | `query: string, limit?: int, session_id?: string` | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `ttl_seconds` を含む JSON を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー、および後続 `search_memory` の `b_session` マッチ対象）。 |
 | `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。親は `[doc×N]` タグ付き。チャンクは隠蔽（FT.SEARCH `*` クエリ後に Python 側で `parent_id` 空文字列フィルタ、§3.12 参照）。 |
 | `delete_memory` | `id: string`                              | ID が親（`doc:<uuid>`）なら親＋`docsha:`＋該当 `parent_id` を持つ全チャンクを連鎖削除。それ以外は `mem:<uuid>` とその sha ガードをアトミック削除。 |
 | `delete_memories_by_session` | `session_id: string`         | 指定 `session_id` に紐づく独立メモリ・親ドキュメント・子チャンク・sha ガードを、設定 `owner_id` のレコードに限定して一括削除。応答は `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`。ヒットゼロのときは `{"status":"not_found", "session_id": ..., "deleted": 0}`（再呼び出しは安全な no-op）。**不可逆操作のため呼び出し前に `session_id` をユーザーに確認すること。** Lite 専用（[§10 Test 6](#10-自律評価evidence-report) 参照）。 |
@@ -533,6 +546,8 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
   "rerank_phrase_weight":     0.2,
+  "b_session_match":          1.0,
+  "b_session_mismatch":       0.6,
   "skip_code_blocks":         false
 }
 ```
@@ -547,6 +562,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — アクセス頻度ブーストの有効化・係数・上限（[§3.6](#36-ランキング式)）。`false` で完全無効化、`stored_importance` のみが重みになる。
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索上位 K 件に対する TTL 再設定と `access_count` インクリメント。再設定は既存エントリの TTL をリセットするのみで、新規エントリの寿命を超えて延長することはない。チャンクがヒットして親ドキュメントを展開する際は、`mem:<chunk_id>` の TTL と同時に `doc:<parent_id>` の TTL も更新されるため、verbatim recall 能力はチャンクと同期して維持される。
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — 融合スコア後の軽量語彙リランカー（[§3.6](#36-ランキング式)）。`false` で従来スコア素通し。
+- `b_session_match` / `b_session_mismatch` — ランキング式の `b_session` 係数（[§3.6](#36-ランキング式)）。検索リクエストの `effective_session`（呼び出し時引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUID）と行の保存時 `session_id` を比較し、一致なら `b_session_match`（既定 `1.0`）、それ以外なら `b_session_mismatch`（既定 `0.6`）を最終スコアに乗算する。両方を `1.0` に設定すれば実質無効化（全行対称）。
 - `skip_code_blocks` — `true` のとき `save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含む本文を拒否し、`{"status": "skipped_code", "saved": false}` を返す。既定は `false`（FastAPI 時代の N3MemoryCore に倣い「コードをメモリに入れたくない」ユーザー向けのオプトイン）。ヒューリスティックはフェンス記号のみ — 散文とコード混在でも一括拒否であり、コード部分だけを剥離する処理は行わない。LLM は §5 の指示で、`skipped_code` を受けた同一ペイロードを再送せず、代わりにコードの要約散文を保存するよう誘導される。
 
 > **1 PC 内の複数アカウント**：OS ユーザーごとに各自の `config.json` で動く。Redis を共有したい場合は両方の設定の `redis_url` を揃える — エントリは `owner_id` TAG フィルタで分離される。

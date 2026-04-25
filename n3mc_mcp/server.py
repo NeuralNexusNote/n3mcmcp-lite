@@ -78,13 +78,15 @@ async def list_tools() -> list[Tool]:
                     "session_id": {
                         "type": "string",
                         "description": (
-                            "Optional project/task grouping key. **Has NO ranking "
-                            "effect in Lite** — accepted for surface compatibility "
-                            "with Pro (where it drives b_session_match/mismatch). "
-                            "In Lite the 7-day TTL window collapses freshness via "
-                            "time_decay, so explicit session bias is unnecessary. "
-                            "Leave blank to use the server's default (N3MC_SESSION_ID "
-                            "env var, or per-process UUIDv4)."
+                            "Optional project/task grouping key. Memories whose "
+                            "stored session_id matches this value receive a ranking "
+                            "boost (b_session_match=1.0); non-matching rows are "
+                            "dampened (b_session_mismatch=0.6). Pass the same "
+                            "session_id used at save time to surface that "
+                            "project's memories above unrelated rows in the same "
+                            "Redis instance. Leave blank to use the server's "
+                            "default (N3MC_SESSION_ID env var, or per-process "
+                            "UUIDv4 — same fallback chain as save_memory)."
                         ),
                     },
                 },
@@ -118,12 +120,13 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": (
                             "Optional project/task grouping key. Stored on the row "
-                            "and used as the filter for delete_memories_by_session. "
-                            "**Does NOT affect search ranking in Lite** (Pro applies "
-                            "b_session_match/mismatch, but Lite's 7-day TTL window "
-                            "makes that redundant). Leave blank to use the server's "
-                            "default (N3MC_SESSION_ID env var, or per-process "
-                            "UUIDv4)."
+                            "and used both as the filter for "
+                            "delete_memories_by_session and as the ranking key for "
+                            "search_memory's b_session boost (match=1.0, "
+                            "mismatch=0.6). Pass the same value across all calls "
+                            "for one project so they cluster together at recall "
+                            "time. Leave blank to use the server's default "
+                            "(N3MC_SESSION_ID env var, or per-process UUIDv4)."
                         ),
                     },
                 },
