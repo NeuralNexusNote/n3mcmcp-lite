@@ -18,6 +18,28 @@ _db: Database = None
 
 app = Server("n3mc-workingmemory")
 
+# Short turn-end reminders appended to tool responses. The MCP server
+# cannot force the LLM to call save_memory; these nudges arrive in the
+# tool-response text mid-turn (when the LLM is most likely to act on
+# them) and try to re-anchor the auto-save discipline that the static
+# `instructions` field is too easily ignored to enforce on its own.
+# See README §"MCP compliance is probabilistic" for the design rationale.
+_NUDGE_AFTER_SEARCH = (
+    "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
+    "to persist the user's intent (paraphrased) and any substantive "
+    "output you generate. If Pro (`n3mc-longtermmemory`) is also "
+    "connected, route long-lived artifacts there; this server is for "
+    "transient task scratch (7-day TTL). Do not skip the save just "
+    "because no memory hit was returned above._"
+)
+_NUDGE_AFTER_SAVE = (
+    "\n_Reminder: if this turn produced multiple distinct facts or a "
+    "long verbatim artifact, make sure each was saved — one "
+    "`save_memory` call per fact, or one full-text call for verbatim "
+    "long content (>400 chars). Duplicates are auto-rejected, so err "
+    "on the side of saving._"
+)
+
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
@@ -172,7 +194,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                         f"### {tag_str}[{mem_id}] score={score:.3f} {ts}\n{r['content']}"
                     )
                 text = "\n\n---\n\n".join(lines)
-            return [TextContent(type="text", text=text)]
+            return [TextContent(type="text", text=text + _NUDGE_AFTER_SEARCH)]
 
         elif name == "save_memory":
             result = _db.save_memory(
@@ -182,7 +204,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 float(arguments.get("importance", 1.0)),
                 arguments.get("session_id", ""),
             )
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False) + _NUDGE_AFTER_SAVE)]
 
         elif name == "delete_memories_by_session":
             result = _db.delete_by_session(arguments.get("session_id", ""))
@@ -233,10 +255,12 @@ async def _main() -> None:
     _db.enforce_ephemeral()
     _db.ensure_index()
 
-    try:
-        get_model()
-    except Exception as e:
-        print(f"[n3mc] model preload warning: {e}", file=sys.stderr)
+    # Model is loaded lazily on first search/save via processor.get_model().
+    # We do not pre-load here: sync load blocks the MCP initialize handshake
+    # (Claude Code marks the server as `failed`), and background-thread
+    # preload caused first-call deadlocks in practice. Lazy load means the
+    # first search/save takes 14-40 s once per server lifetime; subsequent
+    # calls are ~50 ms.
 
     init_opts = app.create_initialization_options()
     try:

@@ -393,6 +393,83 @@ If you want to modify behavior (change the ranking formula, drop in a cross-enco
 
 Appendix A of the spec lists optional extensions (cross-encoder reranker, save-time chunking, HyDE, Japanese morphological analysis) with drop-in points and library candidates. Use it as reference when you want to edit the code without breaking the TTL, dedup, or RediSearch contracts.
 
+## Why N3MemoryCore? (vs. built-in memory)
+
+The auto-save *reliability* of N3MemoryCore is no better than the memory
+features built into modern LLM products (e.g. Claude's built-in memory)
+— both depend on the LLM voluntarily calling a save tool, and both share
+the non-determinism described in *On compliance* below. The differentiation
+sits elsewhere:
+
+| Aspect | Built-in memory | N3MemoryCore (Lite) |
+|---|---|---|
+| **Data ownership** | Vendor-hosted | **Your own Redis Stack on your machine** |
+| **Client surface** | The vendor's product only | **Any MCP-compliant client** (Claude Code, Cursor, Cline, Goose, your own app) |
+| **Multi-AI collaboration** | One AI's memory | **`session_id` lets multiple agents share the same memory namespace; `delete_memories_by_session` wraps up a finished task** |
+| **Verbatim recall** | Opaque (may be summarized) | **Parent-document contract — byte-exact full text returned** |
+| **Search internals** | Black box | **Hybrid BM25 + e5 vectors + CJK bigram + time decay + lightweight reranker, all parameters visible and tunable** |
+| **Inspect / control** | UI only | **`list_memories` / `delete_memory` / `delete_memories_by_session` operate on raw records** |
+| **Persistence** | Tied to the vendor's service lifetime | **In-memory Redis with 7-day TTL** — short-lived by design, but you own the container and can swap it for the Pro build (SQLite, persistent) for long-term storage |
+| **Tunability** | Fixed | `half_life_days`, `chunk_threshold`, `dedup_threshold`, rerank weights — all editable |
+
+So the value of running N3MemoryCore Lite is **not** "more reliable
+auto-save" — it is **owning a transparent, multi-client working-memory
+layer** that several AIs can collaborate on under a shared `session_id`,
+where search behaviour is editable and verbatim recall is contractually
+guaranteed. (For long-term, persistent storage of user-invested artifacts,
+pair it with the Pro build.)
+
+If those properties matter to your workflow, Lite earns its keep. If you
+only need "the LLM remembers something across sessions" inside one
+vendor's product, the built-in memory is simpler.
+
+## On compliance — MCP can persuade, not force
+
+This server cannot make the LLM call its tools. The MCP protocol gives a
+server only three persuasion levers:
+
+1. **Tool descriptions** in `tools/list` — visible to the LLM on every turn.
+2. **The `instructions` field** sent at session start — usually surfaced to
+   the LLM as a system-level hint.
+3. **Tool response text** — read by the LLM when it does call a tool.
+
+We use all three: tool descriptions are explicit, `instructions` lays out a
+rule set, and `search_memory` / `save_memory` responses end with short
+reminders that re-anchor the auto-save discipline mid-turn. Even with all
+of that, **whether the LLM follows through is non-deterministic**.
+Compliance depends on the model's tool-calling bias, the MCP client's
+prompt construction (some clients summarize or drop the `instructions`
+field), and competing instructions from the user prompt, `CLAUDE.md`, etc.
+
+In practice: **most turns will auto-save correctly, but some won't** —
+especially short answers, fact-correction turns, or turns where the LLM is
+heavily focused on the user's question. If a fact you wanted saved is
+missing next session, just say "save this" — the server is still ready to
+take it.
+
+### When you need a guaranteed save
+
+Within the MCP framing, only two paths reliably bypass this
+non-determinism:
+
+**Path 1 — ask the LLM explicitly in your prompt** (operational workaround,
+immediate). Write *"save this to N3MemoryCore"* or *"record this in
+memory"* into your prompt. LLMs almost always honour explicit user
+requests. Pros: zero infrastructure, works today, works with every MCP
+client. Cons: cognitive load — you must remember to say it; not automatic.
+
+**Path 2 — bypass MCP and call the first-party Anthropic Messages API
+yourself** (architecture change). Step outside MCP clients (Claude Code,
+etc.) and drive `messages.create` `tool_use` directly from your own
+application code; you can then fire `save_memory` deterministically every
+turn regardless of what the LLM "decided" to do. Pros: deterministic.
+Cons: you have to write the orchestration application.
+
+The convenience of "MCP + LLM handles it for me" and the guarantee of
+"every turn saves" sit at opposite ends of a tradeoff. This server packs
+its persuasion levers as hard as the protocol allows; any stronger
+guarantee is your call as the user or client implementer.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](./LICENSE).

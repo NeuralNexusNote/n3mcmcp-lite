@@ -776,6 +776,57 @@ pytest tests/ -v -k "not TestEmbedding"
    3. After the conversation ends, re-check `list_memories` and confirm that for each turn Claude wrote a 50–200-character entry containing **intent paraphrase + key conclusion**.
    4. **Pass criterion**: Claude called `save_memory` on its own volition for most turns, long pastes were split into per-fact entries (not one blob), and trivial greetings / clarifying questions were skipped (§5 rule #4).
 
+7. **Bulk-delete-by-session test (`delete_memories_by_session`)**: Confirm that working memory belonging to a finished project/task can be wiped without waiting for the 7-day TTL.
+   1. Pick a unique `session_id` (e.g. `eval-cleanup-YYYY-MM-DD`) and call `save_memory` several times under that session_id, covering **multiple shapes**:
+      - a short single record (a 2–10-char string such as `はい` / `ok`)
+      - a medium single record (a few dozen to a few hundred chars carrying one fact)
+      - **a long body that exceeds `chunk_threshold` (default 400)** — the server auto-splits it into a parent document (`doc:<uuid>`) plus child chunks.
+   2. Before deletion, confirm via `search_memory(query=..., session_id=<the test session>)` that the records are retrievable, and via `list_memories` that the parent shows the `[doc×N]` tag.
+   3. Call `delete_memories_by_session(session_id=<the test session>)` **once**. The response must take the form `{"status": "deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. Verify the numbers reconcile with what was inserted (parent + every child chunk must cascade out together).
+   4. Immediately re-run `search_memory` against the same session_id and confirm **zero results** for the previously inserted content. Records under other session_ids must be unaffected — the operation is a hard, session-scoped delete, not a soft demotion.
+   5. **Idempotency check**: call `delete_memories_by_session` again with the same session_id; the server must respond `{"status": "not_found", ..., "deleted": 0}` cleanly — no errors, no crashes.
+   6. **Pass criterion**: insertion count matches the server's `deleted` total, parent→chunk cascade is complete, no collateral effect on other sessions, and the second call is a safe no-op. **This is an irreversible operation. Run this test only against a dedicated test session_id; never against a production session_id.**
+
+---
+
+## 11. Save guarantees and the limit of the MCP protocol
+
+> **Stated up front as a design premise**: this server can persuade the LLM to save and search via MCP, but **whether the LLM actually calls those tools cannot be enforced at the MCP-protocol level**. This is not an implementation defect — it is a limit of what an MCP server is allowed to do.
+
+### The three persuasion levers an MCP server has
+
+1. **The `description` field of each tool in `tools/list`** — visible to the LLM on every turn.
+2. **The `instructions` field** — sent once to the client at session start.
+3. **`tools/call` response text** — read by the LLM whenever it does call a tool. (See §4.3: each tool's response ends with a short reminder that re-anchors the auto-save discipline mid-turn.)
+
+This spec uses all three. Even so, **whether the LLM follows through is non-deterministic**. Compliance depends on:
+
+- the model's own training and tool-calling bias,
+- the MCP client's prompt construction (some clients summarize or drop the `instructions` field),
+- competing instructions from the user prompt, the project's `CLAUDE.md`, etc.
+
+### What this looks like in practice
+
+Most turns auto-save correctly. But **short answers, fact-correction turns, and turns where the LLM is heavily focused on the user's question** sometimes skip the save. This can happen even when §10 Test 6 (auto-save discipline) passes its acceptance criteria. "If it skipped, it stays skipped" — you don't notice until the next session, when you find the fact missing.
+
+### Two paths when guaranteed save matters
+
+When you cannot rely on the LLM's voluntary discipline, **only these two paths exist within the MCP framing**:
+
+**Path 1: ask the LLM explicitly in your prompt** (operational workaround, immediate)
+- Write `"save this to N3MemoryCore"` / `"record this in memory"` into the prompt.
+- LLMs almost always honour explicit user requests.
+- **Pros**: zero infrastructure, works today, works with every MCP client.
+- **Cons**: cognitive load on the user (you must remember to say it; not auto).
+
+**Path 2: bypass MCP and orchestrate against the first-party Anthropic Messages API** (architecture change)
+- Drop the MCP path entirely and drive `messages.create` `tool_use` directly from your own application code.
+- You can then make `save_memory` fire deterministically every turn regardless of what the LLM "decided" to do.
+- **Pros**: deterministic — code does what code is written to do; saves are guaranteed.
+- **Cons**: you have to write that orchestration application; you step outside MCP clients (Claude Code, etc.).
+
+In short, **the convenience of "let MCP + the LLM handle it" and the guarantee of "every turn saves" sit at opposite ends of a tradeoff** — picking either side means giving up the other. The most this server can do is "pack the response with persuasion to make the LLM want to comply"; any stronger guarantee is, by spec, the user's or the client implementer's choice.
+
 ---
 
 ## Appendix A: Optional Extensions (not shipped)
