@@ -1,0 +1,20 @@
+{
+  "name": "neuralnexusnote",
+  "owner": {
+    "name": "NeuralNexusNote",
+    "email": "arnolfjp019@gmail.com"
+  },
+  "metadata": {
+    "description": "Memory-focused MCP servers from NeuralNexusNote",
+    "version": "1.6.0"
+  },
+  "plugins": [
+    {
+      "name": "n3mc-workingmemory",
+      "source": "./plugins/n3mc-workingmemory",
+      "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory for Claude Code, backed by Redis Stack. Multilingual (NFKC + bigram for CJK / Hangul / Thai / Lao / Myanmar / Khmer + diacritic fold). Requires a Redis Stack container running on localhost:6379 and uv (for uvx) on PATH.",
+      "category": "memory",
+      "tags": ["memory", "rag", "redis", "vector-search", "bm25", "embedding", "ephemeral", "multilingual", "japanese", "cjk"]
+    }
+  ]
+}
