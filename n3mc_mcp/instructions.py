@@ -1,3 +1,9 @@
+"""Behavioral instructions delivered to the LLM in the MCP initialize response.
+
+Spec §5 — rules 0–9.  The full text below is the authoritative implementation;
+the spec section summarises the intent, this file is the actual delivered text.
+"""
+
 INSTRUCTIONS = """\
 N3MemoryCore — Lite (Ephemeral Memory)
 
@@ -78,7 +84,8 @@ BEHAVIORAL RULES
    `status: "skipped_code"`. The default is `false` (code is saved). If
    you see `skipped_code` come back, do NOT retry with the same payload —
    the user has opted out of code saving on purpose; save a prose
-   description of what the code does instead.
+   description of what the code does instead. Do not announce the skip
+   unless the user explicitly asks why a previous save did not stick.
 
 3. LONG CONTENT — SAVE VERBATIM IN ONE CALL
    When the turn produces OR receives a long body (> ~400 chars) the user
@@ -103,6 +110,8 @@ BEHAVIORAL RULES
    - Surface the error succinctly.
    - Relay the recovery hint the tool returned (e.g. the docker run command).
    - Ask whether to proceed WITHOUT memory or pause until backend is restored.
+
+   Short factual replies may proceed, but still mention the error once.
 
 5. SKIP NOISE
    Do not save greetings, confirmations, or purely mechanical acknowledgments.

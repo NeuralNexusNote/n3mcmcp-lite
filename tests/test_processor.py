@@ -253,3 +253,60 @@ class TestEmbedding:
         b = embed_to_array("hello", is_query=False)
         if a is not None and b is not None:
             assert np.allclose(a, b)
+
+
+# ── TestEncodingSafety (spec §3.13) ──────────────────────────────────────────
+
+class TestEncodingSafety:
+    """Lone-surrogate sanitization contract from spec §3.13."""
+
+    def test_strips_lone_high_surrogate(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        assert sanitize_surrogates("hello\ud800world") == "helloworld"
+
+    def test_strips_lone_low_surrogate(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        assert sanitize_surrogates("foo\udfffbar") == "foobar"
+
+    def test_clean_text_unchanged(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        assert sanitize_surrogates("こんにちは世界") == "こんにちは世界"
+
+    def test_all_surrogate_collapses_to_empty(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        # Build the string from explicit code-point escapes so every
+        # character is unambiguously inside the surrogate range.
+        all_surrogates = chr(0xD800) + chr(0xDC00) + chr(0xDFFF)
+        assert sanitize_surrogates(all_surrogates) == ""
+
+    def test_post_strip_encodes_to_utf8(self):
+        """Pre-sanitize the string blows up at .encode('utf-8'); post-sanitize succeeds."""
+        from n3mc_mcp.processor import sanitize_surrogates
+        poison = "café\ud800naïve"
+        with pytest.raises(UnicodeEncodeError):
+            poison.encode("utf-8")
+        cleaned = sanitize_surrogates(poison)
+        assert cleaned.encode("utf-8") == "cafénaïve".encode("utf-8")
+
+    def test_recursive_dict(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        out = sanitize_surrogates({"a": "x\ud800y", "b": "ok"})
+        assert out == {"a": "xy", "b": "ok"}
+
+    def test_recursive_list(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        assert sanitize_surrogates(["x\ud800", "y"]) == ["x", "y"]
+
+    def test_nested_structures(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        nested = {"items": [{"text": "a\ud800b"}, "ok"]}
+        assert sanitize_surrogates(nested) == {"items": [{"text": "ab"}, "ok"]}
+
+    def test_none_passthrough(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        assert sanitize_surrogates(None) is None
+
+    def test_non_string_scalar_passthrough(self):
+        from n3mc_mcp.processor import sanitize_surrogates
+        assert sanitize_surrogates(42) == 42
+        assert sanitize_surrogates(b"raw bytes") == b"raw bytes"

@@ -1,14 +1,59 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.21.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "n3memorycore-mcp-lite"
 version = "1.5.0"
-description = "N3MemoryCore MCP Lite — ephemeral 7-day hybrid-search memory over Redis Stack"
-readme = "README.md"
+description = "N3MemoryCore MCP Lite - ephemeral 7-day hybrid-search memory over Redis Stack"
+readme = { file = "README.md", content-type = "text/markdown" }
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
+authors = [
+    { name = "NeuralNexusNote" },
+]
+maintainers = [
+    { name = "NeuralNexusNote" },
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "memory",
+    "rag",
+    "redis",
+    "redis-stack",
+    "hybrid-search",
+    "vector-search",
+    "bm25",
+    "embeddings",
+    "claude",
+    "anthropic",
+    "llm",
+    "japanese",
+    "cjk",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Indexing",
+    "Natural Language :: English",
+    "Natural Language :: Japanese",
+    "Natural Language :: Chinese (Simplified)",
+    "Natural Language :: Chinese (Traditional)",
+    "Natural Language :: Korean",
+]
 dependencies = [
     "mcp>=1.0.0",
     "redis>=5.0.0",
@@ -22,11 +67,36 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "build>=1.2.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/NeuralNexusNote/n3mcmcp-lite"
+Repository = "https://github.com/NeuralNexusNote/n3mcmcp-lite"
+Documentation = "https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md"
+Issues = "https://github.com/NeuralNexusNote/n3mcmcp-lite/issues"
+Changelog = "https://github.com/NeuralNexusNote/n3mcmcp-lite/releases"
+
 [project.scripts]
+# Primary entry point; clients should reference this name in their MCP config.
 n3mc-workingmemory = "n3mc_mcp.__main__:run"
+# Deprecated legacy alias kept for backward compatibility (pre-1.5 configs).
 n3mc-mcp-lite = "n3mc_mcp.__main__:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["n3mc_mcp"]
+
+[tool.hatch.build.targets.sdist]
+# Files that ship in the source distribution alongside the package code.
+include = [
+    "/n3mc_mcp",
+    "/tests",
+    "/README.md",
+    "/README_JP.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/PHILOSOPHY.md",
+    "/N3MemoryCore_MCP_Spec_EN.md",
+    "/N3MemoryCore_MCP_Spec_JP.md",
+    "/pyproject.toml",
+]

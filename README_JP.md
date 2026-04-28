@@ -55,9 +55,11 @@ Redis に接続できない場合はサーバーが起動を拒否し、`uv` が
 
 - 💾 **完全ローカル** — 会話データは自分の PC の Redis に保存。クラウドに送りません
 - 🔍 **意味で検索** — キーワードが違っても、関連する過去の会話を引き出します
+- 🌐 **多言語対応・標準装備** — CPU のみ動作、LLM/GPU 不要。NFKC フォールド（`ｱﾙﾌｧ`↔`アルファ`、`１２３`↔`123`、合字）／日本語・中国語・韓国語・タイ語・ラオ語・ミャンマー語・クメール語のバイグラム被覆／Latin 系の発音区別フォールド（`café`↔`cafe`）
+- 🛡️ **エンコーディング安全策** — Windows での stdio UTF-8 再設定（cp932 → UTF-8）、すべての入力に対する孤立サロゲート除去。Free 版と同等の防御
 - 🔄 **会話の文脈を保持** — **7 日間**のワーキングメモリ（Redis TTL により自動失効。長期記憶が必要なら Pro 版）
 - ⚡ **自動で動く** — 保存も検索もすべて自動。MCP の `initialize` 応答で配信される振る舞い指示により、ユーザーの指示は不要です
-- 🤖 **マルチエージェント対応** — 複数の AI エージェントが 1 つの Redis を共有。`b_local` バイアスで自分の記憶を優先しつつ、他のエージェントの知識も検索できます
+- 🤖 **マルチエージェント対応** — 複数の AI エージェントが 1 つの Redis を共有。`b_local` と `b_session` のバイアスでプロジェクトの記憶を優先しつつ、他のエージェントの知識も検索できます
 - 🏢 **チーム・組織にも対応** — Redis を共有サーバーに配置し、`N3MC_REDIS_URL` をチーム全員で同じ URL に向ければ、記憶を共有できます（⚠️ Redis 自体のアクセス制御・認証が必要）
 - 🧹 **揮発性は設計上の特長** — 7 日で自動蒸発するため、失敗した試行や破棄された設計案が次タスクに流出しません。`docker restart redis-stack` で即座に一掃可能
 - 💰 **トークン消費を削減** — 過去の文脈を再説明する必要がなくなります。記憶検索はローカル embedding（`intfloat/e5-base-v2`）で行うため Claude のトークンを消費せず、的確な文脈注入により修正のやり取りも減少します
@@ -137,13 +139,14 @@ MCP の外向き仕様は同じ（6 ツール・同じランキング式。`dele
 
 ## 提供ツール
 
-| ツール           | 用途                                                           |
-| ---------------- | -------------------------------------------------------------- |
-| `search_memory`  | ハイブリッド検索（ベクトル + BM25、時間減衰ランキング）        |
-| `save_memory`    | 短いエントリを保存（7d TTL、完全一致・近似重複は自動拒否）    |
-| `list_memories`  | 直近のエントリを新しい順に一覧                                 |
-| `delete_memory`  | 特定のエントリを id で削除                                     |
-| `repair_memory`  | 欠損時に RediSearch インデックスを作り直す                     |
+| ツール                          | 用途                                                                                |
+| ------------------------------- | ----------------------------------------------------------------------------------- |
+| `search_memory`                 | ハイブリッド検索（ベクトル + BM25、時間減衰ランキング、`session_id` ブースト）       |
+| `save_memory`                   | 短いエントリを保存（7d TTL、完全一致・近似重複は自動拒否）                          |
+| `list_memories`                 | 直近のエントリを新しい順に一覧                                                      |
+| `delete_memory`                 | 特定のエントリを id で削除（id が親ドキュメントの場合は子チャンクごとカスケード削除）|
+| `delete_memories_by_session`    | `session_id` に紐づく記憶を一括削除 — 終了したプロジェクトを TTL 待ちなしで撤収       |
+| `repair_memory`                 | 欠損時に RediSearch インデックスを作り直す                                          |
 
 さらに、MCP の `initialize` 応答で**振る舞いの指示**をクライアントへ
 配信します。これにより「各ターン先頭で `search_memory`、応答後に
@@ -317,37 +320,95 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
 
 ```json
 {
-  "owner_id": "<uuid>",
-  "local_id": "<uuid>",
-  "redis_url": "redis://localhost:6379/0",
-  "ttl_seconds": 604800,
-  "dedup_threshold": 0.95,
-  "half_life_days": 3,
-  "bm25_min_threshold": 0.1,
-  "search_result_limit": 20,
-  "min_score": 0.2,
-  "search_query_max_chars": 2000,
-  "skip_code_blocks": false
+  "owner_id":                 "<uuid>",
+  "local_id":                 "<uuid>",
+  "redis_url":                "redis://localhost:6379/0",
+  "ttl_seconds":              604800,
+  "dedup_threshold":          0.95,
+  "half_life_days":           3,
+  "bm25_min_threshold":       0.1,
+  "search_result_limit":      20,
+  "context_char_limit":       3000,
+  "min_score":                0.2,
+  "search_query_max_chars":   2000,
+  "chunk_threshold":          400,
+  "chunk_overlap":            100,
+  "access_count_enabled":     true,
+  "access_count_weight":      0.02,
+  "access_count_max_boost":   0.5,
+  "ttl_refresh_on_search":    true,
+  "ttl_refresh_top_k":        5,
+  "lexical_rerank_enabled":   true,
+  "rerank_weight":            0.3,
+  "rerank_phrase_weight":     0.2,
+  "b_session_match":          1.0,
+  "b_session_mismatch":       0.6,
+  "skip_code_blocks":         false
 }
 ```
 
-`redis_url` は環境変数 `N3MC_REDIS_URL` でも指定可能（こちらが優先）。
+- `redis_url` — 接続 URL。環境変数 `N3MC_REDIS_URL` が優先される。
+- `ttl_seconds` — 保存ごとに付与される TTL（既定 7 日）。
+- `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズと重複（文字数）。閾値超の本文は親ドキュメント＋チャンク経路に入り、verbatim 復元される。
+- `access_count_*` — アクセス頻度ベース自動 importance。検索の上位 K 件にヒットすると次回以降の検索でブースト（上限あり）。
+- `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索ごとに上位 K 件の TTL をリセット（リセットのみ。新規保存以上には伸びない）。
+- `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — 軽量な後段リランカー（CPU のみ）。
+- `b_session_match` / `b_session_mismatch` — 行の `session_id` が一致したときのスコア倍率（既定 `1.0`）と不一致のときの倍率（`0.6`）。`save_memory` と `search_memory` に同じ `session_id` を渡すことで、同じ Redis 内の他プロジェクトのノイズより現在プロジェクトの記憶を上位に押し上げる。両方を `1.0` にすればこのバイアスを完全に無効化できる。
+- `skip_code_blocks` — `true` にすると、`save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含むペイロードを拒否して `status: "skipped_code"` を返す。既定は `false`。FastAPI 版 N3MemoryCore 時代の「コードはメモリに入れない」運用を再現したい場合に有効化（git / IDE 履歴に任せ、Redis には散文の決定事項や計画だけを置きたい場合に有用）。
 
-`skip_code_blocks` を `true` にすると、`save_memory` はトリプルバック
-クォートフェンス（```` ``` ````）を含むペイロードを拒否して
-`status: "skipped_code"` を返します。既定は `false`。FastAPI 版
-N3MemoryCore 時代の「コードはメモリに入れない」運用を再現したい場合に
-有効化してください（git / IDE 履歴に任せ、Redis には散文の決定事項や
-計画だけを置きたい場合に有用）。全フィールドの詳細は仕様書 §6 を参照。
+全フィールドの詳細は仕様書 §6 を参照。
+
+## 多言語対応
+
+標準装備、CPU のみ動作、LLM/GPU 不要。同じ単語をどう書こうと、検索と
+重複判定の挙動が一致します：
+
+| 層 | 動作 | 実例 |
+|---|---|---|
+| **NFKC 正規化** | SHA / 埋め込み / BM25 の前に互換形を畳み込む | `ｱﾙﾌｧ` ↔ `アルファ`、`１２３` ↔ `123`、`ﬁ` ↔ `fi` |
+| **バイグラム BM25 サイドチャネル** | 区切り文字を持たない文字体系で重複バイグラムを発行 | `記憶装置` → `記憶 憶装 装置`。韓国語 (`안녕하세요`)、タイ語 (`สวัสดี`)、ラオ語、ミャンマー語、クメール語にも適用 |
+| **発音区別フォールド** | Latin/Greek/Cyrillic の語は結合マークなしの形でも索引化 | `café` が `cafe` にヒット、`Ångström` が `Angstrom` にヒット |
+| **e5-base-v2 埋め込み** | 100 言語以上にまたがる多言語意味空間 | 言語横断パラフレーズ検索 |
+
+これらは `save_memory` と `search_memory` の呼び出しごとに自動で走り
+ます。生の `content` フィールドは書き換えません — verbatim 復元
+（仕様書 §3.11）は元のバイトを完全一致で返します。
+
+## エンコーディング安全策
+
+ツール本体が動く前に、エンコーディング安全策が 2 層走ります（仕様書 §3.13）。
+Free 版の防御を一対一で移植：
+
+1. **stdio の UTF-8 再設定** — モジュール import 時点で `sys.stdin` /
+   `sys.stdout` / `sys.stderr` を `encoding="utf-8"` に切り替える。
+   Windows 日本語環境では既定の console code page が cp932 のため、
+   この措置がないと MCP JSON-RPC チャネル上で非 ASCII バイトが軒並み
+   化ける。POSIX 系は既定で UTF-8 のため安全な no-op。
+2. **孤立サロゲートのサニタイズ** — `save_memory.content` および
+   `search_memory.query` は、`.encode("utf-8")` を伴うあらゆる経路の
+   手前で `sanitize_surrogates()` を通過する。孤立 UTF-16 サロゲート
+   ハーフ（`U+D800`–`U+DFFF`）は、Windows サブプロセスのパイプが渡し
+   てくる UTF-8 バイトを Python のデコーダが `errors="surrogateescape"`
+   でマップした場合に発生する。これは `json.loads` を素通りするが、
+   SHA1 計算・Redis HSET・埋め込み生成のいずれかの段階で
+   `UnicodeEncodeError` を投げ、本来書き込めるはずだったレコードが
+   黙って失われる。本関数は `dict` / `list` を再帰処理するため、JSON
+   ペイロードに埋まったサロゲートも 1 回でクリーンアップされる。
+
+保存対象が全てサロゲートだった場合、サニタイズ後は空文字列に縮退し、
+通常の empty-content 拒否経路に合流する —
+`{"status":"error","saved":false,"reason":"empty content"}` を返す。
 
 ## ランキング式
 
 ```
-final_score = (0.7 × cosine_similarity + 0.3 × keyword_relevance) × time_decay × b_local
+final_score = (0.7 × cosine_similarity + 0.3 × keyword_relevance) × time_decay × b_local × b_session
 
 time_decay = 2 ^ (-経過日数 / half_life_days)             (既定の半減期: 3 日)
 b_local   = clamp(0.5, 2.0, stored_importance + access_boost)
 access_boost = min(0.5, access_count × 0.02)
+b_session = b_session_match (既定 1.0)   if 行の session_id == 実効 session
+          = b_session_mismatch (既定 0.6) それ以外
 ```
 
 既定の半減期 3 日は TTL（7 日）より短く設定されており、Lite 版でも
@@ -481,6 +542,72 @@ MCP の建付けの中で、この非決定性を回避する経路は **3 通�
 トレードオフの両端で、片方を取ったらもう片方は捨てる構造です。本サーバは MCP プロトコル
 が許す限りの説得材料を盛り込んでいますが、それ以上の保証はユーザ／クライアント実装者
 の選択になります（Claude Code を使っているなら経路 2 が最小コスト）。
+
+## フォークと寄稿
+
+本リポジトリは **public・Apache-2.0 ライセンス** です — 自由に
+フォーク・改変・実行してください。フォークから動かすまでの最短経路：
+
+```bash
+git clone https://github.com/<YOU>/n3mcmcp-lite
+cd n3mcmcp-lite
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+pytest tests/ -q                                     # 全 105 テスト・温暖時 ~30 秒
+```
+
+CI は push と PR ごとに同じマトリクス（Python 3.10–3.13 × Redis Stack）
+を走らせます — [`.github/workflows/test.yml`](./.github/workflows/test.yml)
+を参照。コーディング規約・仕様書を契約とする運用方針・PR チェックリスト
+の詳細は [`CONTRIBUTING.md`](./CONTRIBUTING.md)（日本語併記）に整理しています。
+
+## トラブルシューティング
+
+### Windows: `pip install --upgrade` が `WinError 32`（ファイル使用中）で失敗する
+
+症状：
+```
+ERROR: Could not install packages due to an OSError: [WinError 32]
+プロセスはファイルにアクセスできません。別のプロセスが使用中です。:
+'...\Scripts\n3mc-workingmemory.exe' -> '...\Scripts\n3mc-workingmemory.exe.deleteme'
+```
+
+原因：MCP クライアント（Claude Code / Claude Desktop）が
+`n3mc-workingmemory.exe` を子プロセスとして握っているため、pip がバイナリ
+を置き換えられない。
+
+対処（いずれか）：
+
+1. **MCP クライアントを完全終了する。** Windows ではウィンドウを閉じる
+   だけでは不十分。タスクマネージャーで `claude` /
+   `n3mc-workingmemory.exe` / コマンドラインに `n3mc-workingmemory` を
+   含む `python.exe` をすべて終了させてから `pip install --upgrade` を
+   再実行する。
+2. **グローバルインストールを使わず `uvx` 経由で動かす** —
+   `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` はセッションごと
+   に隔離された一時環境で実行されるため、システムレベルの `.exe`
+   ロック問題が原理的に発生しない。
+
+これは Windows のファイルロック仕様であり、パッケージング側の不備では
+ない — 別の fresh venv に対するインストール（`python -m venv .venv &&
+.venv/Scripts/pip install n3memorycore-mcp-lite`）はそのまま通る。
+
+### `~3memorycore-mcp-lite` 警告が pip install 時に出る
+
+```
+WARNING: Ignoring invalid distribution ~3memorycore-mcp-lite
+```
+これは過去のインストールが（典型的には上記のファイルロック問題で）
+途中で中断したことを pip が検出している警告。リーディング `~` で残った
+ディレクトリは無害だがノイズなので、手動で削除して構わない：
+
+```bash
+# Windows
+rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycore_mcp_lite-1.5.0.dist-info"
+```
+
+（Python のインストール先に応じてパスを調整）
 
 ## ライセンス
 

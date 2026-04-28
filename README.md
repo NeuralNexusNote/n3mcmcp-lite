@@ -61,9 +61,11 @@ The server refuses to start if Redis is unreachable, and the Claude Code plugin 
 
 - 💾 **Fully local** — Your conversations stay in your own Redis instance. Nothing sent to the cloud.
 - 🔍 **Semantic search** — Finds relevant past conversations even when the exact words differ.
+- 🌐 **Multilingual out of the box** — CPU-only, no LLM/GPU required. NFKC fold (`ｱﾙﾌｧ`↔`アルファ`, `１２３`↔`123`, ligatures), bigram coverage for Japanese / Chinese / Korean / Thai / Lao / Myanmar / Khmer, diacritic cross-match for Latin scripts (`café`↔`cafe`).
+- 🛡️ **Encoding safety** — stdio UTF-8 reconfigure on Windows (cp932 → UTF-8), lone-surrogate sanitization on every input. Same defenses as the Free build.
 - 🔄 **Context across sessions** — Working memory that lasts **7 days** (auto-expires via Redis TTL; use Pro for long-term memory).
 - ⚡ **Works automatically** — Saving and searching happen automatically. The MCP `initialize` response ships behavioral instructions, so no user action is required.
-- 🤖 **Multi-agent ready** — Multiple AI agents share one Redis. The `b_local` bias prioritizes each agent's own memories while still surfacing the team's collective knowledge.
+- 🤖 **Multi-agent ready** — Multiple AI agents share one Redis. The `b_local` and `b_session` biases prioritize each project's own memories while still surfacing the team's collective knowledge.
 - 🏢 **Team & organization support** — Deploy Redis on a shared server and point `N3MC_REDIS_URL` to it for team-wide memory sharing (⚠️ authentication must be handled at the Redis layer).
 - 🧹 **Ephemerality is a design feature** — 7-day auto-expiry means failed attempts and abandoned designs don't bleed into the next task. `docker restart redis-stack` wipes everything instantly.
 - 💰 **Reduces token waste** — No more re-explaining past context. Memory search uses local embeddings (`intfloat/e5-base-v2`) and costs zero Claude tokens, and accurate context injection means fewer corrections and back-and-forth.
@@ -148,13 +150,14 @@ storage.
 
 ## Tools exposed
 
-| Tool             | Purpose                                                       |
-| ---------------- | ------------------------------------------------------------- |
-| `search_memory`  | Hybrid (vector + BM25) search, ranked & time-decayed          |
-| `save_memory`    | Persist a short entry (7d TTL, dedup: exact + near-duplicate) |
-| `list_memories`  | Most-recent entries, newest first                             |
-| `delete_memory`  | Remove a specific entry by id                                 |
-| `repair_memory`  | Re-create the RediSearch index if missing                     |
+| Tool                          | Purpose                                                                          |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| `search_memory`               | Hybrid (vector + BM25) search, ranked & time-decayed, `session_id` boost         |
+| `save_memory`                 | Persist a short entry (7d TTL, dedup: exact + near-duplicate)                    |
+| `list_memories`               | Most-recent entries, newest first                                                |
+| `delete_memory`               | Remove a specific entry by id (cascades to chunks if id is a parent doc)         |
+| `delete_memories_by_session`  | Bulk-delete every memory tied to a `session_id` — wraps up a finished project    |
+| `repair_memory`               | Re-create the RediSearch index if missing                                        |
 
 The server also ships **behavioral instructions** via MCP's `initialize`
 response, asking the client to `search_memory` at the start of each turn
@@ -348,6 +351,8 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
   "rerank_phrase_weight":     0.2,
+  "b_session_match":          1.0,
+  "b_session_mismatch":       0.6,
   "skip_code_blocks":         false
 }
 ```
@@ -358,18 +363,61 @@ On first run, `config.json` is auto-generated with random UUIDs for
 - `access_count_*` — access-frequency auto-importance; top-K search hits receive a capped boost on future queries.
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
 - `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (CPU-only).
+- `b_session_match` / `b_session_mismatch` — multiplicative ranking boost for rows whose stored `session_id` matches (default `1.0`) vs. rows from other projects (`0.6`). Pass the same `session_id` to `save_memory` and `search_memory` to surface a project's memories above unrelated cross-project rows in the same Redis instance. Set both to `1.0` to disable the bias.
 - `skip_code_blocks` — when `true`, `save_memory` rejects any payload containing a triple-backtick fence (```` ``` ````) and returns `status: "skipped_code"`. Default `false`. Set to `true` if you want FastAPI-era N3MemoryCore-style code exclusion (keep code out of the memory index entirely — useful when your workflow already has git/IDE history for code and you only want prose decisions/plans in Redis).
 
 See the spec §6 for the complete field-by-field reference.
 
+## Multilingual support
+
+Built-in, CPU-only, no LLM and no GPU required. Search and dedup behave
+the same regardless of how the user types the same word:
+
+| Layer | What it does | Real-world example |
+|---|---|---|
+| **NFKC normalization** | Folds compatibility forms before SHA / embedding / BM25 | `ｱﾙﾌｧ` ↔ `アルファ`, `１２３` ↔ `123`, `ﬁ` ↔ `fi` |
+| **Bigram BM25 side channel** | Overlapping bigrams emitted for space-less scripts | `記憶装置` → `記憶 憶装 装置`; same for Korean (`안녕하세요`), Thai (`สวัสดี`), Lao, Myanmar, Khmer |
+| **Diacritic fold** | Latin/Greek/Cyrillic words also indexed without combining marks | `café` matches `cafe`, `Ångström` matches `Angstrom` |
+| **e5-base-v2 embedding** | Multilingual semantic space across 100+ languages | Cross-language paraphrase retrieval |
+
+These run automatically on every `save_memory` and `search_memory` call.
+The raw `content` field is never rewritten — verbatim recall (spec §3.11)
+still returns the original bytes byte-for-byte.
+
+## Encoding safety
+
+Two layers of defense run before any tool body executes (spec §3.13).
+Same guards as the Free build, ported one-to-one:
+
+1. **stdio UTF-8 reconfigure** — at module import, `sys.stdin` /
+   `sys.stdout` / `sys.stderr` are switched to `encoding="utf-8"`. On
+   Windows-Japanese hosts the default console code page is cp932, which
+   would otherwise mangle every non-ASCII byte on the MCP JSON-RPC
+   channel. POSIX systems are already UTF-8, so the call is a safe no-op.
+2. **Lone-surrogate sanitization** — every `save_memory.content` and
+   `search_memory.query` is passed through `sanitize_surrogates()` before
+   any `.encode("utf-8")` call. Lone UTF-16 surrogate halves
+   (`U+D800`–`U+DFFF`) appear when Windows subprocess pipes deliver UTF-8
+   bytes that Python's decoder maps with `errors="surrogateescape"` —
+   they round-trip through `json.loads` but raise `UnicodeEncodeError` at
+   SHA1 / Redis HSET / embedding time. Without the guard the entire write
+   is silently lost. The function is recursive so JSON payloads with
+   surrogates buried inside are cleaned in one pass.
+
+If a save payload consists entirely of surrogates, sanitization collapses
+it to the empty string and the regular empty-content rejection path
+applies — `{"status":"error","saved":false,"reason":"empty content"}`.
+
 ## Ranking formula
 
 ```
-final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay * b_local
+final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay * b_local * b_session
 
 time_decay   = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 3 days)
 b_local      = clamp(0.5, 2.0, stored_importance + access_boost)
 access_boost = min(0.5, access_count * 0.02)
+b_session    = b_session_match (default 1.0)   if row.session_id == effective_session
+             = b_session_mismatch (default 0.6) otherwise
 ```
 
 With a default 3-day half-life (shorter than the 7-day TTL), `time_decay`
@@ -520,6 +568,73 @@ The convenience of "MCP + LLM handles it for me" and the guarantee of
 its persuasion levers as hard as the protocol allows; any stronger
 guarantee is your call as the user or client implementer (and if you're
 on Claude Code, Path 2 is by far the lowest-cost option).
+
+## Forking & contributing
+
+This repository is **public and Apache-2.0 licensed** — fork, modify,
+and run it freely. The fork-and-run path is:
+
+```bash
+git clone https://github.com/<YOU>/n3mcmcp-lite
+cd n3mcmcp-lite
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+pytest tests/ -q                                      # 105 tests, ~30s warm
+```
+
+CI runs the same matrix on every push and PR — see
+[`.github/workflows/test.yml`](./.github/workflows/test.yml). Read
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full developer guide
+(EN + JP) including coding conventions, the spec-as-contract policy,
+and PR checklist.
+
+## Troubleshooting
+
+### Windows: `pip install --upgrade` fails with `WinError 32` (file in use)
+
+Symptom:
+```
+ERROR: Could not install packages due to an OSError: [WinError 32]
+The process cannot access the file because it is being used by another process:
+'...\Scripts\n3mc-workingmemory.exe' -> '...\Scripts\n3mc-workingmemory.exe.deleteme'
+```
+
+Cause: an MCP client (Claude Code / Claude Desktop) is currently holding
+`n3mc-workingmemory.exe` open as a child process, so pip cannot replace
+the binary.
+
+Fix — pick one:
+
+1. **Fully quit the MCP client first.** Closing the window is not enough
+   on Windows. Open Task Manager and end every `claude` /
+   `n3mc-workingmemory.exe` / `python.exe` process whose command line
+   includes `n3mc-workingmemory`, then re-run `pip install --upgrade`.
+2. **Use `uvx` instead of a global install** — `uvx --from
+   n3memorycore-mcp-lite n3mc-workingmemory` runs in an isolated
+   ephemeral environment per session, so there is no system-level
+   `.exe` to lock.
+
+This is a Windows file-locking quirk, not a packaging defect — the wheel
+itself installs cleanly into a fresh venv (`python -m venv .venv &&
+.venv/Scripts/pip install n3memorycore-mcp-lite`).
+
+### `~3memorycore-mcp-lite` warnings during pip install
+
+If you see lines like:
+```
+WARNING: Ignoring invalid distribution ~3memorycore-mcp-lite
+```
+that is pip flagging a previous install that was interrupted mid-write
+(typically by the file-lock issue above). The leftover directory is
+named with a leading `~` and is harmless but noisy. Delete it manually:
+
+```bash
+# Windows
+rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycore_mcp_lite-1.5.0.dist-info"
+```
+
+(Adjust the path to match your Python installation.)
 
 ## License
 

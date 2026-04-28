@@ -464,13 +464,79 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
 
 **The TAG index schema is preserved**: The `owner_id` and `parent_id` TAG field declarations in §3.5 remain intact. If a future Redis Stack release resolves the UUID hyphen parse error, the Python-side filtering can be moved back into the FT.SEARCH queries without any schema migration.
 
+### 3.13 Encoding Safety
+
+Two encoding-safety layers run before any tool body executes. They mirror the
+Free build's defenses (`n3mc_hook.py` stream reconfigure + `core/processor.py`
+`sanitize_surrogates`) so a Lite deployment offers the same baseline reliability
+on Windows-Japanese hosts.
+
+**(1) stdio UTF-8 reconfigure** — at module import time of `n3mc_mcp.server`
+(before any other import that might touch stdout/stderr), each of `sys.stdin`,
+`sys.stdout`, `sys.stderr` is switched to `encoding="utf-8"` if the stream
+implements `reconfigure()` (Python 3.7+). On Windows-Japanese hosts the default
+console code page is cp932, which would otherwise mangle every non-ASCII byte
+on the MCP JSON-RPC channel. POSIX systems are already UTF-8 by default, so the
+call is a safe no-op there. The `hasattr(stream, "reconfigure")` guard
+additionally protects against environments that have replaced the streams
+with bare file objects (test harnesses, embedded interpreters).
+
+```python
+for _stream_name in ("stdin", "stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+```
+
+**(2) Lone-surrogate sanitization** — every `save_memory.content` and
+`search_memory.query` is passed through `sanitize_surrogates()` before any
+`.encode("utf-8")` call. Lone UTF-16 surrogate halves (`U+D800`–`U+DFFF`)
+appear when Windows subprocess pipes deliver UTF-8 bytes that Python's decoder
+maps with `errors="surrogateescape"`. They round-trip through `json.loads` but
+raise `UnicodeEncodeError` at SHA1 / Redis HSET / embedding time. Without the
+guard the entire write is silently lost (the dispatcher catches the
+exception, returns a generic `Error: ...` response, and the caller's content
+never reaches Redis).
+
+```python
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+def sanitize_surrogates(text):
+    if isinstance(text, str):
+        return _LONE_SURROGATE_RE.sub("", text)
+    if isinstance(text, list):
+        return [sanitize_surrogates(x) for x in text]
+    if isinstance(text, dict):
+        return {k: sanitize_surrogates(v) for k, v in text.items()}
+    return text
+```
+
+The function is recursive over `dict` / `list` so JSON payloads with surrogates
+buried inside (e.g. multimodal tool-call audit blobs) are cleaned in one pass.
+Non-string scalars (`None`, `int`, `bytes`) pass through unchanged.
+
+**Degenerate input contract**: if `save_memory.content` consists *entirely* of
+surrogates, sanitization collapses it to the empty string and the regular
+empty-content rejection path applies — `{"status":"error","saved":false,
+"reason":"empty content"}`. This is a deterministic failure mode; the caller
+sees an explicit refusal rather than a silent encoding crash.
+
+**Pre-1.2.0 mojibake recovery is intentionally NOT ported** from Free. That
+routine retroactively rewrote rows that earlier Free builds had decoded
+through cp932; Lite has no historical data to retrofit because every entry
+ages out within `ttl_seconds` (default 7 days). Adding a recovery routine
+would only run on data that the user already accepted as ephemeral.
+
 ---
 
 ## 4. MCP Protocol Surface
 
 ### 4.1 Transport
 
-stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `stdout`. Logs go to `stderr`. On Windows, `stdin`/`stdout`/`stderr` are reconfigured to UTF-8 at startup.
+stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `stdout`. Logs go to `stderr`. On Windows, `stdin`/`stdout`/`stderr` are reconfigured to UTF-8 at startup (see [§3.13](#313-encoding-safety) for the full encoding-safety contract, including lone-surrogate sanitization on every tool input).
 
 ### 4.2 `initialize` response
 
@@ -725,7 +791,7 @@ n3mcmcp-lite/
 | `TestSerialization` | Vector binary round-trip, f32 LE packing | Serialization |
 | `TestSha1` | SHA1 hex, empty string, non-ASCII UTF-8, long input | Digest |
 
-### Layer 2: `tests/test_processor.py` (42 tests)
+### Layer 2: `tests/test_processor.py` (52 tests)
 
 | Test class | What it covers | Area |
 |---|---|---|
@@ -738,8 +804,9 @@ n3mcmcp-lite/
 | `TestPurification` | Multi-line code block → `[code omitted]`, inline code preserved, multiple blocks | Purification |
 | `TestChunkText` | Below-threshold→single, long→split+overlap, boundary alignment | Parent-chunk |
 | `TestEmbedding` | `passage:` / `query:` prefixes, vector dimensionality, same-text similarity | Embedding |
+| `TestEncodingSafety` | Lone-surrogate strip on `str` / `list` / `dict` / `None`, all-surrogate input collapses to empty, post-strip `.encode("utf-8")` succeeds | Encoding safety (§3.13) |
 
-### Layer 3: `tests/test_server.py` (15 tests)
+### Layer 3: `tests/test_server.py` (18 tests)
 
 | Test class | What it covers | Area |
 |---|---|---|
@@ -749,6 +816,7 @@ n3mcmcp-lite/
 | `TestRepair` | `repair_memory` on empty DB → ok | Repair |
 | `TestUnknownTool` | Unknown tool name → error string | Dispatch |
 | `TestParentDocRecall` | Verbatim recall of fictional "Shiranui" city doc, chunk→parent collapse, `[doc×N]` rendering, parent→chunk cascade delete | Parent document (§3.11) |
+| `TestEncodingSafetyE2E` | `save_memory` with surrogate-laced content does not raise, surrogate-only payload returns empty-content error, `search_memory` with surrogate-laced query returns cleanly | Encoding safety end-to-end (§3.13) |
 
 ### Example runs
 

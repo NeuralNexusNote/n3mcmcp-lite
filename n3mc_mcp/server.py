@@ -1,7 +1,36 @@
+"""
+MCP stdio server — 6 tools + startup sequence.
+
+Spec §4.1  transport: stdio
+Spec §4.2  initialize: serverInfo, capabilities, instructions
+Spec §4.3  tools: search_memory, save_memory, list_memories,
+                  delete_memory, delete_memories_by_session, repair_memory
+Spec §3.9  startup: load_config → connect → enforce_ephemeral → ensure_index
+                    → preload embedding model (fd-level redirect)
+Spec §11   every tool response ends with a short auto-save reminder
+"""
+import sys
+
+# ── Spec §4.1 stdio UTF-8 reconfigure ────────────────────────────────────────
+# Must run BEFORE any other import that might write to stdout/stderr.
+# On Windows, Python defaults stdin/stdout/stderr to the active code page
+# (cp932 in Japanese locales), which mangles UTF-8 JSON-RPC bytes coming
+# from MCP clients and turns Japanese / emoji / non-ASCII content into
+# mojibake — and worse, save paths can silently drop a record when the
+# decoder produces lone surrogate halves. Reconfiguring all three streams
+# to UTF-8 at module import time is the same belt the Free build wears
+# (n3mc_hook.py / n3memory.py / n3mc_stop_hook.py).
+for _stream_name in ("stdin", "stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 import asyncio
 import json
 import os
-import sys
 import uuid
 from typing import Any
 
@@ -18,12 +47,11 @@ _db: Database = None
 
 app = Server("n3mc-workingmemory")
 
-# Short turn-end reminders appended to tool responses. The MCP server
-# cannot force the LLM to call save_memory; these nudges arrive in the
-# tool-response text mid-turn (when the LLM is most likely to act on
-# them) and try to re-anchor the auto-save discipline that the static
-# `instructions` field is too easily ignored to enforce on its own.
-# See README §"MCP compliance is probabilistic" for the design rationale.
+# ── §11 turn-end nudges ──────────────────────────────────────────────────────
+# MCP has no Stop/UserPromptSubmit hook equivalent, so the only way to
+# re-anchor the auto-save discipline mid-turn is to append a short reminder
+# to each tool response.  Three variants match the semantic context:
+
 _NUDGE_AFTER_SEARCH = (
     "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
     "to persist the user's intent (paraphrased) and any substantive "
@@ -33,17 +61,12 @@ _NUDGE_AFTER_SEARCH = (
     "because no memory hit was returned above._"
 )
 _NUDGE_AFTER_SAVE = (
-    "\n_Reminder: if this turn produced multiple distinct facts or a "
+    "\n\n---\n_Reminder: if this turn produced multiple distinct facts or a "
     "long verbatim artifact, make sure each was saved — one "
     "`save_memory` call per fact, or one full-text call for verbatim "
     "long content (>400 chars). Duplicates are auto-rejected, so err "
     "on the side of saving._"
 )
-# Spec §11 / §4.3: every tool response ends with a short reminder that
-# re-anchors the auto-save discipline mid-turn. list/delete/repair tools
-# don't directly carry retrieval or save semantics, but the spec is
-# explicit ("each tool's response ends with a short reminder"), so we
-# append a generic nudge here too.
 _NUDGE_GENERIC = (
     "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
     "to persist the user's intent (paraphrased) and any substantive "
@@ -51,6 +74,8 @@ _NUDGE_GENERIC = (
     "saving more is safer than saving less._"
 )
 
+
+# ── tool registration (spec §4.3) ────────────────────────────────────────────
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
@@ -71,22 +96,20 @@ async def list_tools() -> list[Tool]:
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max results to return (default: config search_result_limit).",
+                        "description": "Max results (default: config search_result_limit).",
                         "minimum": 1,
                         "maximum": 100,
                     },
                     "session_id": {
                         "type": "string",
                         "description": (
-                            "Optional project/task grouping key. Memories whose "
-                            "stored session_id matches this value receive a ranking "
-                            "boost (b_session_match=1.0); non-matching rows are "
-                            "dampened (b_session_mismatch=0.6). Pass the same "
-                            "session_id used at save time to surface that "
-                            "project's memories above unrelated rows in the same "
-                            "Redis instance. Leave blank to use the server's "
-                            "default (N3MC_SESSION_ID env var, or per-process "
-                            "UUIDv4 — same fallback chain as save_memory)."
+                            "Optional project/task grouping key. Rows whose stored "
+                            "session_id matches this value are boosted in ranking "
+                            "(b_session_match=1.0); non-matching rows are dampened "
+                            "(b_session_mismatch=0.6). Pass the same session_id used "
+                            "at save time to surface that project's memories above "
+                            "unrelated rows. Leave blank to use the server default "
+                            "(N3MC_SESSION_ID env var, or per-process UUIDv4)."
                         ),
                     },
                 },
@@ -96,14 +119,18 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="save_memory",
             description=(
-                "Save a memory entry (Lite: 7-day TTL). Automatically deduplicates exact and "
-                "near-duplicate content. Long content (>chunk_threshold chars) is chunked with "
-                "a parent-document for verbatim recall."
+                "Save a memory entry (Lite: 7-day TTL). "
+                "Auto-deduplicates exact and near-duplicate content. "
+                "Long content (>chunk_threshold chars) is chunked with a "
+                "parent-document for verbatim recall."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "Memory content to save."},
+                    "content": {
+                        "type": "string",
+                        "description": "Memory content to save.",
+                    },
                     "agent_name": {
                         "type": "string",
                         "description": "Agent display name (e.g. 'claude-code').",
@@ -114,18 +141,17 @@ async def list_tools() -> list[Tool]:
                     },
                     "importance": {
                         "type": "number",
-                        "description": "Importance weight 0.5-2.0 (default 1.0).",
+                        "description": "Importance weight 0.5–2.0 (default 1.0).",
                     },
                     "session_id": {
                         "type": "string",
                         "description": (
                             "Optional project/task grouping key. Stored on the row "
-                            "and used both as the filter for "
-                            "delete_memories_by_session and as the ranking key for "
-                            "search_memory's b_session boost (match=1.0, "
-                            "mismatch=0.6). Pass the same value across all calls "
-                            "for one project so they cluster together at recall "
-                            "time. Leave blank to use the server's default "
+                            "and used as: (a) the ranking key for search_memory's "
+                            "b_session boost (match=1.0 / mismatch=0.6), and "
+                            "(b) the filter for delete_memories_by_session. "
+                            "Pass the same value across all calls for one project. "
+                            "Leave blank to use the server default "
                             "(N3MC_SESSION_ID env var, or per-process UUIDv4)."
                         ),
                     },
@@ -135,7 +161,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_memories",
-            description="List stored memories newest first. Parents shown with [doc×N] tag.",
+            description=(
+                "List stored memories newest first. "
+                "Parent documents shown with [doc×N] tag."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -150,7 +179,7 @@ async def list_tools() -> list[Tool]:
             name="delete_memory",
             description=(
                 "Delete a memory by ID. "
-                "If ID is a parent document (doc:<uuid>), cascades to all child chunks."
+                "If the ID is a parent document (doc:<uuid>), cascades to all child chunks."
             ),
             inputSchema={
                 "type": "object",
@@ -166,9 +195,10 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="delete_memories_by_session",
             description=(
-                "Delete every memory (singles, parent docs, child chunks, sha index keys) "
-                "whose session_id matches. Scoped to the configured owner. Use this to "
-                "wrap up a finished project or reset a polluted session before TTL expiry."
+                "Delete every memory (singles, parent docs, child chunks, sha guards) "
+                "whose session_id matches. Scoped to the configured owner. "
+                "Use this to wrap up a finished project or reset a polluted session "
+                "before TTL expiry. IRREVERSIBLE — confirm session_id with the user first."
             ),
             inputSchema={
                 "type": "object",
@@ -183,11 +213,16 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="repair_memory",
-            description="Re-ensure the RediSearch index (idempotent). Returns {status, message}.",
+            description=(
+                "Re-ensure the RediSearch index (idempotent). "
+                "Returns {status, message}."
+            ),
             inputSchema={"type": "object", "properties": {}},
         ),
     ]
 
+
+# ── tool dispatch (spec §4.3 / §4.4) ────────────────────────────────────────
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
@@ -205,11 +240,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             else:
                 lines: list[str] = []
                 for r in results:
-                    tag = r.get("_tag", "")
+                    tag     = r.get("_tag", "")
                     tag_str = f"{tag} " if tag else ""
-                    score = r.get("score", 0.0)
-                    mem_id = r.get("id", "")
-                    ts = r.get("timestamp", "")[:19]
+                    score   = r.get("score", 0.0)
+                    mem_id  = r.get("id", "")
+                    ts      = r.get("timestamp", "")[:19]
                     lines.append(
                         f"### {tag_str}[{mem_id}] score={score:.3f} {ts}\n{r['content']}"
                     )
@@ -224,35 +259,37 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 float(arguments.get("importance", 1.0)),
                 arguments.get("session_id", ""),
             )
-            return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False) + _NUDGE_AFTER_SAVE)]
-
-        elif name == "delete_memories_by_session":
-            result = _db.delete_by_session(arguments.get("session_id", ""))
             return [TextContent(
                 type="text",
-                text=json.dumps(result, ensure_ascii=False) + _NUDGE_GENERIC,
+                text=json.dumps(result, ensure_ascii=False) + _NUDGE_AFTER_SAVE,
             )]
 
         elif name == "list_memories":
             if not _db._ok:
                 raise RuntimeError(f"memory backend unreachable. {_DOCKER_HINT}")
             limit_raw = arguments.get("limit", 20)
-            memories = _db.list_memories(int(limit_raw) if limit_raw else 20)
+            memories  = _db.list_memories(int(limit_raw) if limit_raw else 20)
             if not memories:
                 text = "_No memories stored._"
             else:
                 lines = []
                 for m in memories:
-                    tag = m.get("tag", "")
+                    tag     = m.get("tag", "")
                     tag_str = f"{tag} " if tag else ""
-                    ts = m.get("timestamp", "")[:19]
-                    preview = m.get("content", "")
-                    lines.append(f"**{tag_str}[{m['id']}]** {ts}\n{preview}")
+                    ts      = m.get("timestamp", "")[:19]
+                    lines.append(f"**{tag_str}[{m['id']}]** {ts}\n{m.get('content', '')}")
                 text = "\n\n---\n\n".join(lines)
             return [TextContent(type="text", text=text + _NUDGE_GENERIC)]
 
         elif name == "delete_memory":
             result = _db.delete_memory(arguments.get("id", ""))
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, ensure_ascii=False) + _NUDGE_GENERIC,
+            )]
+
+        elif name == "delete_memories_by_session":
+            result = _db.delete_by_session(arguments.get("session_id", ""))
             return [TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False) + _NUDGE_GENERIC,
@@ -272,19 +309,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
+# ── startup (spec §3.9) ──────────────────────────────────────────────────────
+
 async def _main() -> None:
     global _db
     cfg = load_config()
-    # Resolve the auto-fallback session_id used when a tool call does
-    # not pass `session_id` explicitly. Pro spec §3.1 / §3.6 fallback
-    # order, mirrored here for surface compatibility:
-    #   1. `N3MC_SESSION_ID` env var
-    #   2. Per-process UUID (fresh each startup)
+
+    # session_id fallback resolution (spec §3.1 / §3.6):
+    #   1. N3MC_SESSION_ID env var
+    #   2. Per-process UUIDv4 (fresh each startup)
     #
-    # Lite has no `b_session` ranking factor (see config.py), so the
-    # value is only used as a default tag for save_memory and as the
-    # default scope for delete_memories_by_session. A per-process UUID
-    # is therefore safe — it does not affect cross-restart retrieval.
+    # Lite 1.5.0 applies the same b_session ranking as Pro (match=1.0,
+    # mismatch=0.6). Rows from a previous restart's UUID receive
+    # b_session_mismatch dampening unless pinned via env var or per-call arg.
     cfg["_session_id"] = (
         os.environ.get("N3MC_SESSION_ID", "").strip() or str(uuid.uuid4())
     )
@@ -300,45 +337,29 @@ async def _main() -> None:
     except AttributeError:
         pass
 
-    # Synchronously preload the embedding model BEFORE entering the
-    # stdio_server context. sentence_transformers / transformers /
-    # huggingface_hub print progress bars, "BertModel LOAD REPORT",
-    # HTTP request logs, and HF auth warnings to **stdout** during
-    # load. Once stdio_server is active, fd 1 is the JSON-RPC
-    # channel and any stray bytes destroy protocol framing — the
-    # observed symptom is the client hanging forever ("Processing
-    # request of type CallToolRequest" logged to stderr but no
-    # response ever reaches the client over fd 1).
+    # Spec §3.9 step 4: preload embedding model BEFORE entering the stdio_server
+    # context.  sentence_transformers / HuggingFace write progress bars and HTTP
+    # logs to stdout.  Once stdio_server is active fd 1 is the JSON-RPC channel —
+    # any stray bytes destroy protocol framing (observed symptom: client hangs
+    # forever waiting for the first response).
     #
-    # `contextlib.redirect_stdout(sys.stderr)` only diverts Python's
-    # `sys.stdout` wrapper; C extensions, inherited file descriptors
-    # and subprocess writes still go to fd 1. We therefore redirect
-    # at the OS level via `os.dup2(2, 1)` for the duration of the
-    # preload, then restore fd 1 before mcp.run() takes over.
+    # `contextlib.redirect_stdout(sys.stderr)` only diverts Python's sys.stdout
+    # wrapper; C extensions, inherited FDs, and subprocess writes still go to
+    # fd 1.  We therefore redirect at the OS level via os.dup2(2, 1) for the
+    # duration of the preload, then restore fd 1 before mcp.run() takes over.
     #
-    # **Synchronous + fd-level is the only safe combination.** A
-    # background-thread preload (e.g. via run_in_executor) is
-    # actively wrong: while the worker thread is mid-load and fd 1
-    # has been redirected, the asyncio main thread can begin writing
-    # JSON-RPC responses and they land on stderr, disconnecting the
-    # client. See N3MC Pro spec §3.9 step 4 for the full design
-    # rationale; this is the same recipe Pro uses, ported to Lite.
-    #
-    # Cost: `initialize` response is delayed by ~17 s on a cached HF
-    # cache (longer on first download). This is well within Claude
-    # Code's MCP startup timeout in practice. If the load fails
-    # (offline / no HF cache), tool handlers fall back to the lazy
-    # path in `processor.get_model()` which uses a Python-level
-    # redirect (race-free because handlers are serialised by the
-    # asyncio main thread).
+    # A background-thread preload is unsafe: while the worker is mid-load with
+    # fd 1 redirected, the asyncio main thread can begin writing JSON-RPC responses
+    # that land on stderr — disconnecting the client.  Synchronous + fd-level is
+    # the only safe combination.
     try:
-        saved_stdout_fd = os.dup(1)
+        saved_fd = os.dup(1)
         try:
             os.dup2(2, 1)
             get_model()
         finally:
-            os.dup2(saved_stdout_fd, 1)
-            os.close(saved_stdout_fd)
+            os.dup2(saved_fd, 1)
+            os.close(saved_fd)
     except Exception as e:
         print(f"[n3mc] model preload failed (will lazy-retry): {e}", file=sys.stderr)
 

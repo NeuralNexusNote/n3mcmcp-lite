@@ -460,13 +460,80 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 
 **TAG フィールドは引き続きインデックス定義に残す**：将来の RediSearch バージョンで UUID TAG クエリの構文エラーが解消された場合、上記フィルタリングを FT.SEARCH クエリ側に戻せるようにするため、`owner_id`・`parent_id` の TAG インデックス定義（§3.5）はそのまま維持する。
 
+### 3.13 エンコーディング安全策
+
+ツール本体が動く前に、エンコーディング安全策が 2 層走る。Free 版が持つ防御
+（`n3mc_hook.py` のストリーム再設定 + `core/processor.py` の
+`sanitize_surrogates`）と同じレイヤ構成を Lite にも揃え、Windows 日本語環境で
+のベースライン信頼性を担保する。
+
+**(1) stdio の UTF-8 再設定** — `n3mc_mcp.server` モジュールの import 時点
+（stdout/stderr を触りうる他の import より前）で、`sys.stdin` / `sys.stdout`
+/ `sys.stderr` の各ストリームに対し、`reconfigure()` を持っていれば
+`encoding="utf-8"` に切り替える（Python 3.7+）。Windows 日本語環境では既定の
+コンソールコードページが cp932 のため、これを行わないと MCP JSON-RPC
+チャネル上で非 ASCII バイトが軒並み化ける。POSIX 系は既定で UTF-8 のため、
+この呼び出しは安全な no-op となる。`hasattr(stream, "reconfigure")` ガード
+は、ストリームを生のファイルオブジェクトに差し替えた環境（テストハーネス、
+組み込みインタプリタ等）も保護する。
+
+```python
+for _stream_name in ("stdin", "stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+```
+
+**(2) 孤立サロゲートのサニタイズ** — `save_memory.content` および
+`search_memory.query` は、`.encode("utf-8")` を伴うあらゆる経路の手前で
+`sanitize_surrogates()` を通過する。孤立 UTF-16 サロゲートハーフ
+（`U+D800`–`U+DFFF`）は、Windows サブプロセスのパイプが渡してくる UTF-8
+バイトを Python のデコーダが `errors="surrogateescape"` でマップした場合に
+発生する。これは `json.loads` を素通りするが、SHA1 計算・Redis HSET・
+埋め込み生成のいずれかの段階で `UnicodeEncodeError` を投げる。このガードが
+無いと書き込みごと黙って失われる（dispatcher が例外を捕捉して汎用の
+`Error: ...` 応答を返すが、呼び出し側のコンテンツは Redis に到達しない）。
+
+```python
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+def sanitize_surrogates(text):
+    if isinstance(text, str):
+        return _LONE_SURROGATE_RE.sub("", text)
+    if isinstance(text, list):
+        return [sanitize_surrogates(x) for x in text]
+    if isinstance(text, dict):
+        return {k: sanitize_surrogates(v) for k, v in text.items()}
+    return text
+```
+
+本関数は `dict` / `list` を再帰的に処理するため、ネストした JSON ペイロード
+内部に埋まったサロゲート（マルチモーダル tool-call の監査 blob 等）も 1 回で
+クリーンアップされる。文字列以外のスカラ（`None`、`int`、`bytes`）はそのまま
+通過する。
+
+**退化入力の契約**：`save_memory.content` が *全てサロゲートで構成されていた*
+場合、サニタイズ後は空文字列に縮退し、通常の empty-content 拒否経路に合流する
+— `{"status":"error","saved":false,"reason":"empty content"}` を返す。これは
+決定論的な失敗モードであり、呼び出し側はエンコード起因のサイレントクラッシュ
+ではなく明示的な拒否応答を受け取る。
+
+**pre-1.2.0 のモジバケ復旧ルーチンは意図的に Lite には移植しない**。
+あのルーチンは初期 Free 版が cp932 でデコードしてしまった行をレトロアクティブ
+に書き直すためのもの。Lite は全エントリが `ttl_seconds`（既定 7 日）で消滅
+するため、復旧対象となる過去データが存在しない。復旧ルーチンを足したところで
+ユーザーが既に ephemeral と受け入れたデータの上でしか動かない。
+
 ---
 
 ## 4. MCP プロトコル表面
 
 ### 4.1 通信
 
-stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応答を書く。ログは `stderr`。Windows では起動時に `stdin`/`stdout`/`stderr` を UTF-8 に再設定する。
+stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応答を書く。ログは `stderr`。Windows では起動時に `stdin`/`stdout`/`stderr` を UTF-8 に再設定する（エンコーディング安全策の全契約 — 各ツール入力に対する孤立サロゲート除去を含む — は [§3.13](#313-エンコーディング安全策) を参照）。
 
 ### 4.2 `initialize` 応答
 
@@ -722,7 +789,7 @@ n3mcmcp-lite/
 | `TestSerialization` | ベクトルのバイナリ往復、f32 LE パック | シリアライズ |
 | `TestSha1` | SHA1 ヘキサ、空文字、非 ASCII UTF-8、長文 | ダイジェスト |
 
-### Layer 2: `tests/test_processor.py`（42 テスト）
+### Layer 2: `tests/test_processor.py`（52 テスト）
 
 | テストクラス | テスト内容 | カバレッジ |
 |---|---|---|
@@ -735,8 +802,9 @@ n3mcmcp-lite/
 | `TestPurification` | 複数行コードブロック→`[code omitted]`、インラインコード保持、複数ブロック | 整形 |
 | `TestChunkText` | 閾値以下→単一、長文→分割＋オーバーラップ、境界一致 | 親-チャンク |
 | `TestEmbedding` | `passage:`/`query:` プレフィクス、ベクトル次元、同一テキスト類似度 | 埋め込み |
+| `TestEncodingSafety` | 孤立サロゲート除去（`str` / `list` / `dict` / `None`）、全サロゲート入力は空文字列に縮退、除去後の `.encode("utf-8")` が成功 | エンコーディング安全策（§3.13） |
 
-### Layer 3: `tests/test_server.py`（15 テスト）
+### Layer 3: `tests/test_server.py`（18 テスト）
 
 | テストクラス | テスト内容 | カバレッジ |
 |---|---|---|
@@ -746,6 +814,7 @@ n3mcmcp-lite/
 | `TestRepair` | 空 DB に対する `repair_memory`→ok | 修復 |
 | `TestUnknownTool` | 未登録ツール名→エラー文字列 | ディスパッチ |
 | `TestParentDocRecall` | 架空都市「不知火」設定の一字一句復元、チャンク→親集約、`[doc×N]` 表示、親→チャンク削除カスケード | 親ドキュメント（§3.11） |
+| `TestEncodingSafetyE2E` | 孤立サロゲート混じりの content で `save_memory` が例外を投げない、全サロゲート入力は空内容エラー、孤立サロゲート混じりのクエリで `search_memory` が正常応答 | エンコーディング安全策 E2E（§3.13） |
 
 ### 実行例
 

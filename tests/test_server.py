@@ -228,3 +228,64 @@ class TestParentDocRecall:
         del_data = _parse_json_response(del_result[0].text)
         assert del_data["status"] == "deleted"
         assert del_data.get("chunks_deleted", 0) > 0
+
+
+# ── TestEncodingSafetyE2E (spec §3.13) ────────────────────────────────────────
+
+@requires_redis
+class TestEncodingSafetyE2E:
+    """End-to-end: save_memory / search_memory survive lone-surrogate input.
+
+    Regression guard for the spec §3.13 contract: without sanitization, a
+    surrogate-laced payload would raise UnicodeEncodeError at SHA1 / Redis
+    HSET / embed time and silently drop the entire write.
+    """
+
+    def _setup_db(self, db):
+        import n3mc_mcp.server as srv
+        srv._db = db
+
+    def test_save_with_surrogate_does_not_raise(self, db):
+        import asyncio
+        from n3mc_mcp.server import call_tool
+        self._setup_db(db)
+        poison = "encoding-safety-test こんにちは" + chr(0xD800) + "ワールド"
+        result = asyncio.get_event_loop().run_until_complete(
+            call_tool("save_memory", {"content": poison})
+        )
+        text = result[0].text
+        # Must be a valid JSON status response, not an "Error: ..." string.
+        assert not text.startswith("Error:"), text
+        data = _parse_json_response(text)
+        # Either saved (sanitized to clean form) or duplicate of an earlier
+        # cleaned save — both prove the encode path did not raise.
+        assert data.get("saved") is True or data.get("status") in (
+            "duplicate", "near_duplicate"
+        )
+
+    def test_save_all_surrogates_returns_empty_content_error(self, db):
+        import asyncio
+        from n3mc_mcp.server import call_tool
+        self._setup_db(db)
+        all_surrogates = chr(0xD800) + chr(0xDC00) + chr(0xDFFF)
+        result = asyncio.get_event_loop().run_until_complete(
+            call_tool("save_memory", {"content": all_surrogates})
+        )
+        text = result[0].text
+        assert not text.startswith("Error:"), text
+        data = _parse_json_response(text)
+        assert data["saved"] is False
+        assert data["reason"] == "empty content"
+
+    def test_search_with_surrogate_query_does_not_raise(self, db):
+        import asyncio
+        from n3mc_mcp.server import call_tool
+        self._setup_db(db)
+        poison_query = "test" + chr(0xD800) + "query"
+        result = asyncio.get_event_loop().run_until_complete(
+            call_tool("search_memory", {"query": poison_query})
+        )
+        text = result[0].text
+        # Either zero results or actual hits — neither path may bubble an
+        # encode error up to the dispatch handler.
+        assert not text.startswith("Error:"), text
