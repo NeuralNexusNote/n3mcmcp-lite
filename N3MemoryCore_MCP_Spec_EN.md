@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.5.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.6.0 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
@@ -542,7 +542,7 @@ stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `std
 
 The server advertises:
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3mc-workingmemory", version: "1.5.0" }`
+- `serverInfo: { name: "n3mc-workingmemory", version: "1.6.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
 

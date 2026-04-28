@@ -9,6 +9,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.6.0] — 2026-04-28
+
+> First public release-tagged minor bump on top of `V1.1.0` (the only
+> previously published GitHub Release). Internal commits had been using
+> `1.5.0` / `1.5.1` markers, but no tag was ever pushed; the cumulative
+> changes since `V1.1.0` are large enough to justify a single `1.6.0`
+> release rather than one tag per internal milestone.
+
 ### Added
 - **Multilingual RAG primitives (CPU-only, no LLM/GPU)**:
   - Unicode NFKC normalization on `content_ngram`, query, dedup SHA, and
@@ -58,9 +68,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
-## [1.5.0] — 2026-04-26
+## Internal milestones between V1.1.0 and 1.6.0 (no GitHub Release)
 
-### Added
+> The following work was committed during the `V1.1.0` → `1.6.0` window
+> but was never tagged on its own. Folded into `1.6.0` for the release.
+> Listed here for traceability against the git log.
+
+### `1.5.0` (commit `ab1e958`, 2026-04-26)
 - `delete_memories_by_session` tool — bulk-delete every memory tied to
   a `session_id` (singles, parent docs, child chunks, sha guards).
   Lite-only; Pro will keep only per-record `delete_memory` for safety.
@@ -69,8 +83,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - `b_session_match` / `b_session_mismatch` config fields.
 - §10 Test 6 (bulk delete by session) in the Evidence Report.
 - Hook-based full-transcript saving recipe in README.
-
-### Changed
 - §11 explicitly documents the limit of MCP persuasion — what an MCP
   server can and cannot enforce on the LLM's behavior.
 - Tool response text now ends with a short auto-save reminder
@@ -78,6 +90,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
-## [1.4.0] and earlier
+## [V1.1.0] and earlier
 
-See git history. Earlier versions did not maintain a changelog file.
+The only previously published GitHub Release. See the GitHub Releases
+page and git history for details. Earlier versions did not maintain a
+changelog file.

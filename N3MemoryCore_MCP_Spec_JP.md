@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.5.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.6.0 [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版（公開予定）** との差別化を明確化しています。
@@ -539,7 +539,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 サーバーが広告する内容：
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3mc-workingmemory", version: "1.5.0" }`
+- `serverInfo: { name: "n3mc-workingmemory", version: "1.6.0" }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 7 日で失効する」旨を明示する。**
 

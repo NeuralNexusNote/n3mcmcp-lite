@@ -319,7 +319,7 @@ async def _main() -> None:
     #   1. N3MC_SESSION_ID env var
     #   2. Per-process UUIDv4 (fresh each startup)
     #
-    # Lite 1.5.0 applies the same b_session ranking as Pro (match=1.0,
+    # Lite 1.5.0+ applies the same b_session ranking as Pro (match=1.0,
     # mismatch=0.6). Rows from a previous restart's UUID receive
     # b_session_mismatch dampening unless pinned via env var or per-call arg.
     cfg["_session_id"] = (
