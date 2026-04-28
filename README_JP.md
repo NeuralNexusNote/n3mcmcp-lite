@@ -21,6 +21,66 @@
 
 ---
 
+## 🚀 クイックスタート — Claude Code に 3 ステップで接続
+
+> 「何もインストールしていない」状態から「Claude Code が N3MC メモリを
+> 使っている」までの最短経路。インストール手段（PyPI / フォーク / uvx）
+> を選んで、クライアント設定に登録するだけ。Claude Code CLI と
+> Claude Desktop の両方を扱います。
+
+### Step 1 — Redis Stack を起動
+
+```bash
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+# 2 回目以降は: `docker start redis-stack`
+```
+
+### Step 2 — パッケージをインストール（いずれか）
+
+**(a) PyPI から** — 大半の利用者：
+
+```bash
+pip install n3memorycore-mcp-lite
+```
+
+**(b) フォークから**（リポジトリをクローン済み）— 寄稿者・改造目的：
+
+```bash
+git clone https://github.com/<YOU>/n3mcmcp-lite
+cd n3mcmcp-lite
+pip install -e ".[dev]"
+```
+
+**(c) uvx でゼロインストール** — グローバル install を使わず隔離環境：
+
+```bash
+# 動作確認のみ。実際の起動は MCP クライアント設定が担う：
+uvx --from n3memorycore-mcp-lite n3mc-workingmemory --help
+```
+
+Step 2 終了時点で `n3mc-workingmemory` コマンドが `PATH` に通ります。
+`where n3mc-workingmemory`（Windows）または `which n3mc-workingmemory`
+（macOS/Linux）で確認できます。
+
+### Step 3 — MCP クライアントに登録
+
+| クライアント | やること |
+|---|---|
+| **Claude Code（CLI）・本リポジトリの作業ツリー** | `.mcp.json` がコミット済み。`cd` して `claude` を起動するだけで次のプロンプトから自動接続 |
+| **Claude Code（CLI）・別プロジェクトのディレクトリ** | そのプロジェクトの `.mcp.json` に同じ `n3mc-workingmemory` ブロックを追加。詳細は [Claude Code（スタンドアロン CLI）](#claude-codeスタンドアロン-cli) |
+| **Claude Desktop**（内蔵の「Code」タブ含む） | OS ごとの `claude_desktop_config.json` を編集。詳細は [Claude Desktop](#claude-desktopおよび-claude-desktop-内の「code」タブ) |
+| **Claude Code でツール自動許可** | `~/.claude/settings.json` に許可ブロックを 1 つ足すだけ。AI が承認待ちで停止しなくなる。詳細は [ツール自動許可](#ツール自動許可claude-code-固有) |
+| **uvx 経由で起動**（グローバル install 不要） | クライアント設定の `command`/`args` を uvx 形式にする。詳細は [Claude Code（スタンドアロン CLI）](#claude-codeスタンドアロン-cli) |
+
+これだけ。接続すると、サーバの振る舞い指示が引き継ぎ、`search_memory`
+が各ターン先頭で、`save_memory` が応答後に自動で呼ばれます。
+
+> 初回呼び出しのみ 30〜60 秒かかります — `intfloat/e5-base-v2`
+> （~400 MB）が `~/.cache/huggingface/` にダウンロードされるため。
+> 2 回目以降は数秒で起動。
+
+---
+
 ## ⚠️ 事前準備（インストール前に必須）
 
 このサーバーは **そのままでは起動しません**。以下 2 点を事前に用意してください：
@@ -561,6 +621,21 @@ CI は push と PR ごとに同じマトリクス（Python 3.10–3.13 × Redis 
 を走らせます — [`.github/workflows/test.yml`](./.github/workflows/test.yml)
 を参照。コーディング規約・仕様書を契約とする運用方針・PR チェックリスト
 の詳細は [`CONTRIBUTING.md`](./CONTRIBUTING.md)（日本語併記）に整理しています。
+
+**フォークを Claude Code から実際に使うには**、上記の
+`pip install -e ".[dev]"` 以外に追加設定は不要です：
+
+1. `n3mc-workingmemory` コマンドが `PATH` に通っている
+   （`which n3mc-workingmemory` で確認）
+2. リポジトリの [`.mcp.json`](./.mcp.json) が既にサーバを宣言している
+   ため、`cd n3mcmcp-lite && claude` で次のプロンプトから自動接続
+3. 他のクライアント（Claude Desktop、別プロジェクトの `.mcp.json`、
+   ツール自動許可）に登録する手順は [クイックスタート Step 3 表](#-クイックスタート--claude-code-に-3-ステップで接続)
+   に整理してあります
+
+フォークを別パッケージ名で PyPI に再公開する場合は、
+[`pyproject.toml`](./pyproject.toml) の `name`、`[project.urls]`、
+console-script 名も忘れずに編集してください。
 
 ## トラブルシューティング
 

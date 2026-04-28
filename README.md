@@ -27,6 +27,68 @@
 
 ---
 
+## 🚀 Quickstart — connect to Claude Code in 3 steps
+
+> The fastest path from "nothing installed" to "Claude Code is using
+> N3MC memory". Pick the install path that matches you (PyPI / fork /
+> uvx), then add the server to your client config. Both Claude Code
+> CLI and Claude Desktop are covered.
+
+### Step 1 — Start Redis Stack
+
+```bash
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+# (Subsequent sessions: `docker start redis-stack`)
+```
+
+### Step 2 — Install the package (choose one)
+
+**(a) From PyPI** — most users:
+
+```bash
+pip install n3memorycore-mcp-lite
+```
+
+**(b) From a fork (you cloned this repo)** — contributors / customizers:
+
+```bash
+git clone https://github.com/<YOU>/n3mcmcp-lite
+cd n3mcmcp-lite
+pip install -e ".[dev]"
+```
+
+**(c) Zero-install via uvx** — no global install, isolated env:
+
+```bash
+# Just verify it runs; the actual launch is handled by your MCP client config:
+uvx --from n3memorycore-mcp-lite n3mc-workingmemory --help
+```
+
+After step 2, the `n3mc-workingmemory` command is on your `PATH`. Run
+`where n3mc-workingmemory` (Windows) or `which n3mc-workingmemory`
+(macOS/Linux) to confirm.
+
+### Step 3 — Wire it into your MCP client
+
+| Client | What to do |
+|---|---|
+| **Claude Code (CLI), this repo's working tree** | `.mcp.json` is already committed — just `cd` into the repo and run `claude`. The CLI auto-connects on next prompt. |
+| **Claude Code (CLI), a different project directory** | Copy [.mcp.json](./.mcp.json) into that project, or add the same `n3mc-workingmemory` block to its `.mcp.json`. See [Claude Code (standalone CLI)](#claude-code-standalone-cli). |
+| **Claude Desktop** (incl. its built-in "Code" tab) | Edit `claude_desktop_config.json` (path differs per OS). See [Claude Desktop](#claude-desktop-and-the-code-tab-inside-claude-desktop). |
+| **Claude Code with auto-tool-approval** | One extra block in `~/.claude/settings.json` so the AI never blocks on "Allow?" prompts. See [Auto-approve tool calls](#auto-approve-tool-calls-claude-code-only). |
+| **uvx-launched** (no global install needed) | Use the uvx-form `command`/`args` in your client config. See [Claude Code (standalone CLI)](#claude-code-standalone-cli). |
+
+That's it. Once Claude Code is connected, the server's behavioral
+instructions take over — `search_memory` runs at the start of every
+turn and `save_memory` runs after each meaningful exchange, all
+automatically.
+
+> First call may take 30–60 seconds the **first** time only — the
+> ~400 MB `intfloat/e5-base-v2` embedding model downloads to
+> `~/.cache/huggingface/`. Subsequent starts complete in seconds.
+
+---
+
 ## ⚠️ Prerequisites (required before install)
 
 This server does **not** run out of the box — you must prepare two things first:
@@ -588,6 +650,23 @@ CI runs the same matrix on every push and PR — see
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full developer guide
 (EN + JP) including coding conventions, the spec-as-contract policy,
 and PR checklist.
+
+**To actually use the fork from Claude Code**, you do NOT need any
+additional setup beyond the `pip install -e ".[dev]"` above:
+
+1. The `n3mc-workingmemory` command is now on your `PATH` (run
+   `which n3mc-workingmemory` to confirm).
+2. The repository's [`.mcp.json`](./.mcp.json) already declares the
+   server, so the moment you `cd n3mcmcp-lite && claude`, the CLI
+   auto-connects.
+3. For other client surfaces (Claude Desktop, a different project's
+   `.mcp.json`, auto-tool-approval), the [Quickstart Step 3
+   table](#-quickstart--connect-to-claude-code-in-3-steps) lists the
+   exact action.
+
+If you intend to publish your fork under a new package name, also
+edit the `name`, `[project.urls]`, and console-script names in
+[`pyproject.toml`](./pyproject.toml) before re-uploading to PyPI.
 
 ## Troubleshooting
 
