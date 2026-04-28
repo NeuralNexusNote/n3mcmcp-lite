@@ -213,6 +213,42 @@ MCP の外向き仕様は同じ（6 ツール・同じランキング式。`dele
 `save_memory`」という自動保存運用が、Claude Code のフック無しでも
 成立します。
 
+## ID 階層構造
+
+N3MemoryCore は 5 つの ID フィールドで各レコードの出所と文脈を識別
+します。実利用者が触るのは `session_id`（と稀に `agent_name`）だけで、
+他は自動で埋まります。
+
+| ID | 保存場所 | 生成タイミング | 粒度 | 用途 |
+|---|---|---|---|---|
+| `id` (PK) | Redis ハッシュ | レコード作成時 (UUIDv7、時系列順) | **1 レコード** | 各記憶の一意識別子 — `delete_memory` と重複検出に使用 |
+| `owner_id` | `config.json` | 初回起動時 (UUIDv4) | **所有者 / インストール** | データの所有者識別。`save_memory` 呼び出しごとに検証され、不一致のペイロードは `owner_id mismatch` で拒否される。TAG フィールドとして保存され、フィルタリングは Python 側で行う（仕様書 §3.12） |
+| `local_id` (agent_id) | `config.json` | 初回起動時 (UUIDv4) | **エージェント / インストール** | このインストールの UUIDv4 識別子。Pro 版との前方互換のため全レコードに保存されるが、**Lite の `b_local` ランキングには使われない** — `b_local` は `stored_importance + access_count` のみから算出される（後述のランキング式参照） |
+| `session_id` | メモリ内またはクライアントから供給 | タスク／プロジェクト／会話ごと（任意文字列） | **タスク／プロジェクト／会話** | 同じタスク・プロジェクト・会話に属する記憶をまとめて浮上させる。**`b_session` ランキングバイアス**（`b_session_match=1.0`、`b_session_mismatch=0.6`）を駆動し、進行中の会話の記憶を、同じ Redis 内の無関係なクロスプロジェクト行より優先する。`delete_memories_by_session` のフィルタキーでもある。解決順序：呼び出し引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時の UUIDv4 フォールバック |
+| `agent_name` | Redis ハッシュ | `save_memory` 呼び出し時（任意文字列） | **エージェント表示名** | エージェントの人間可読なラベル（例：`"claude-code"`、`"claude-desktop"`）。ランキングには使用されず、表示・監査用 |
+
+```
+owner_id  (1 つの N3MC サーバ／データ所有者)
+  └── session_id  (1 つのタスク／プロジェクト／会話)
+        └── local_id  (そのセッション内で発話するエージェント)
+              ├── agent_name  (その表示名: "claude-code" 等)
+              └── id  (1 件の記憶レコード)
+```
+
+**実用上のガイダンス：**
+
+- **名前のあるプロジェクトやタスクに従事中は `session_id` をピン留め
+  すること**。`save_memory` と `search_memory` の両方に同じ文字列
+  （例：`"proj-alpha"`、`"task-refactor-auth"`）を渡す。これにより
+  プロジェクト固有の記憶がランキング上位に押し上げられ、終了時には
+  `delete_memories_by_session` で一括撤収できる。
+- **単一エージェント運用では `agent_name` は空でよい**。複数エージェントが
+  同じ Redis を共有する場合のみ設定（`"claude-code"`、`"cursor"` 等）
+  すれば、`list_memories` の出力が読みやすくなる。
+- **`owner_id` は通常渡さない**。サーバが `config.json` の値と照合し、
+  不一致なら拒否する仕組みなので、空のままにすれば「自分の所有」として
+  扱われる。所有権を明示的に主張する必要がある特殊ケースのみ指定。
+
 ## 前提条件
 
 ### 1. Redis Stack の起動

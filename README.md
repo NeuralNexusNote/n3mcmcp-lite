@@ -226,6 +226,42 @@ response, asking the client to `search_memory` at the start of each turn
 and `save_memory` after each meaningful exchange — so "auto-save" is
 preserved without any Claude Code hooks.
 
+## ID hierarchy
+
+N3MemoryCore identifies the origin and context of every record with
+five ID fields. Most users only ever touch `session_id` (and rarely
+`agent_name`); the rest are filled in automatically.
+
+| ID                    | Stored in                       | Generated                                  | Granularity                            | Purpose |
+|-----------------------|---------------------------------|--------------------------------------------|----------------------------------------|---------|
+| `id` (PK)             | Redis hash                      | Per record (UUIDv7, time-ordered)          | **One record**                         | Unique identifier for each memory — used for `delete_memory` and dedup. |
+| `owner_id`            | `config.json`                   | First startup (UUIDv4)                     | **Owner / installation**               | Identifies whose data this is. Validated on every `save_memory`; mismatched payloads are rejected with `owner_id mismatch`. Stored as a TAG field; filtering happens in Python (see spec §3.12). |
+| `local_id` (agent_id) | `config.json`                   | First startup (UUIDv4)                     | **Agent / install**                    | UUIDv4 identifier for this install. Stored on every row for forward-compatibility with the Pro build, but **does NOT feed Lite's `b_local` ranking** — `b_local` is computed from `stored_importance + access_count` only (see Ranking formula). |
+| `session_id`          | In-memory or supplied by client | Per task / project / conversation (string) | **Task / project / conversation**      | Surfaces memories from the same task / project together. Drives the **`b_session` ranking bias** (`b_session_match=1.0`, `b_session_mismatch=0.6`) so the current chat's memories outrank unrelated cross-project rows in the same Redis instance. Also the filter key for `delete_memories_by_session`. Resolution order: per-call argument → `N3MC_SESSION_ID` env var → per-process UUIDv4 fallback. |
+| `agent_name`          | Redis hash                      | Per `save_memory` call (free-form string)  | **Agent display label**                | Human-readable label (e.g. `"claude-code"`, `"claude-desktop"`). Not used in ranking — display/audit only. |
+
+```
+owner_id  (one N3MC server / data owner)
+  └── session_id  (one task / project / conversation)
+        └── local_id  (the agent speaking inside that session)
+              ├── agent_name  (its display name: "claude-code" etc.)
+              └── id  (one memory record)
+```
+
+**Practical guidance:**
+
+- **You should pin `session_id`** when working on a named project or
+  task. Pass the same string (e.g. `"proj-alpha"`, `"task-refactor-auth"`)
+  to both `save_memory` and `search_memory`. This both ranks-up the
+  project's own memories and gives you a one-shot
+  `delete_memories_by_session` for project teardown.
+- **You can leave `agent_name` empty** for single-agent use. Set it
+  (`"claude-code"`, `"cursor"`, …) when multiple agents share the same
+  Redis so audit/list output stays readable.
+- **You should not pass `owner_id`** unless you specifically need to
+  prove ownership (the server validates it against `config.json` and
+  rejects mismatches; an empty value means "use my own").
+
 ## Prerequisites
 
 ### 1. Start Redis Stack
