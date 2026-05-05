@@ -524,6 +524,34 @@ empty-content rejection path applies — `{"status":"error","saved":false,
 "reason":"empty content"}`. This is a deterministic failure mode; the caller
 sees an explicit refusal rather than a silent encoding crash.
 
+**What is NOT sanitized (intentionally)** — the following code points
+**round-trip verbatim** through save and recall (consistent with the §3.11
+parent-document verbatim contract). They are preserved for display fidelity,
+graphical reversibility, variation-selector information, and backward
+compatibility:
+
+- **C0 control characters including `U+0000` (NUL)** — Redis HSET / RediSearch
+  HASH are binary-safe, so strings containing NUL round-trip unchanged. Input
+  like `A\x00B` is stored as 3 characters (it does not collapse into the
+  empty-content rejection path).
+- **Zero-width joiners and spacers** (`U+200B`, `U+200C`, `U+200D`, `U+FEFF`,
+  …) — they may affect search-time tokenization (RediSearch behavior) but
+  are kept in the stored body.
+- **Variation selectors** (`U+E0100`–`U+E01EF`, `U+FE00`–`U+FE0F`) — glyph
+  hints like `神󠄀` survive **verbatim** (including combinations with CJK
+  Extension code points).
+- **Combining diacritics** (`U+0300`–`U+036F`, `U+3099`–`U+309A`, …) — when
+  input arrives in decomposed form, the stored body stays decomposed. NFKC
+  normalization is applied **only** to the embedding input and the dedup
+  hash key (§3.7 / §3.8), so search and dedup treat decomposed and
+  precomposed forms as equivalent, while `list_memories` / `search_memory`
+  responses respect the caller's input form.
+
+In short: "the bytes you pass to `save_memory` come back exactly as written,
+with only lone surrogates removed." This minimal-sanitization contract is a
+deliberate design choice that prevents silent transformations from breaking
+the verbatim guarantee.
+
 **Pre-1.2.0 mojibake recovery is intentionally NOT ported** from Free. That
 routine retroactively rewrote rows that earlier Free builds had decoded
 through cp932; Lite has no historical data to retrofit because every entry
