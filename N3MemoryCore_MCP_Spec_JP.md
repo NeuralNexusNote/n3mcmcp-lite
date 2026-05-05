@@ -720,6 +720,8 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 
 **プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 6 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`hooks.json` は `python` → `py`（Windows Python Launcher） → `python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか 1 つが `PATH` 上にあれば動作する。3 つすべて不在の場合のみ exit 非ゼロで失敗し、Claude Code の `/plugins` Errors タブに表示される（silent fail を回避）。
 
+同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が `PATH` 上に無いと MCP launcher 側では不透明な `ENOENT` で失敗する。フックが事前に `shutil.which("uvx")` を確認し、見つからない場合は **stderr に日英両言語のインストール手順**（`pipx install uv` ／ `curl -LsSf https://astral.sh/uv/install.sh | sh` 等）を出力して `/plugins` Errors タブに actionable なメッセージを残す。フックの exit code は常に 0（パーミッション追加自体は成功しているため）。
+
 **プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 完全不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
 
 ```json

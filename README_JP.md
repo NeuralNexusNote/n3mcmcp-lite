@@ -294,6 +294,20 @@ pip install -e .
 初回起動時に ~400MB の埋め込みモデルが Hugging Face から
 `~/.cache/huggingface/` にダウンロードされます。
 
+> **初回インストール時には 3 つのネットワーク資源が必要です:**
+> 1. **github.com** — `/plugin marketplace add NeuralNexusNote/n3mcmcp-lite`
+>    でプラグインを登録するとき（`uvx` またはソース経由でインストールする
+>    場合は不要）。
+> 2. **pypi.org** — `uvx --from n3memorycore-mcp-lite`（または
+>    `pip install`）がパッケージを解決するとき。
+> 3. **huggingface.co** — サーバの初回起動時に
+>    `intfloat/e5-base-v2`（~400 MB）が `~/.cache/huggingface/` に
+>    ダウンロードされるとき。
+>
+> 3 つとも、オフライン状態では明示的かつ時間制限のあるエラーで失敗
+> します（ハングしません）。2 回目以降の起動はローカルキャッシュのみ
+> を使用するため、インターネット接続は不要です。
+
 ## クライアント設定
 
 ### Claude Desktop（および Claude Desktop 内の「Code」タブ）
@@ -374,6 +388,15 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 1 つが `PATH` 上にあれば動作します。3 つすべて不在の場合のみ exit 非ゼロ
 で失敗し、Claude Code の `/plugins` Errors タブに表示されます（silent fail
 を回避）。
+
+同フックは **`uvx` 事前チェック** も併せて行います — プラグイン manifest が
+MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動
+するため、`uvx` が `PATH` に無いと MCP launcher 側では不透明な `ENOENT`
+で失敗します。フックが `shutil.which("uvx")` を確認し、見つからない場合
+は **stderr に日英両言語のインストール手順**（`pipx install uv` ／
+`curl -LsSf https://astral.sh/uv/install.sh \| sh` 等）を出力するので、
+`/plugins` Errors タブに actionable なメッセージが残ります（フックの
+exit code は常に 0 — パーミッション追加自体は成功しているため）。
 
 **プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` /
 Python 完全不在）の場合は、下記ブロックを `~/.claude/settings.json`（ユーザー
