@@ -5,7 +5,7 @@
 >
 > **Who is this for?** Users of any MCP-compatible LLM client (Claude Desktop, Claude Code, and others) who want searchable, short-lived memory shared across sessions within a 7-day window.
 >
-> **Transport**: Model Context Protocol over stdio (JSON-RPC). Tested on Windows 11 with Python 3.12 and Redis Stack 7.x.
+> **Transport**: Model Context Protocol over stdio (JSON-RPC). Tested on Windows 11 and Ubuntu with Python 3.12 and Redis Stack 7.x.
 
 ## ⚠️ Disclaimer & Distribution Terms
 

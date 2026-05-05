@@ -5,7 +5,7 @@
 >
 > **想定ユーザー**：Claude Desktop / Claude Code などあらゆる MCP 対応クライアントのユーザーで、7 日の窓内で会話をまたいで検索可能な短期メモリを欲しい人。
 >
-> **通信**：Model Context Protocol over stdio (JSON-RPC)。Windows 11 + Python 3.12 + Redis Stack 7.x で検証。
+> **通信**：Model Context Protocol over stdio (JSON-RPC)。Windows 11・Ubuntu + Python 3.12 + Redis Stack 7.x で検証。
 
 ## ⚠️ 免責・配布条件
 
