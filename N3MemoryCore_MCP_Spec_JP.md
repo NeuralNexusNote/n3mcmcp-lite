@@ -718,9 +718,9 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
 
-**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 6 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`python` が `PATH` 上にあれば動作する。
+**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 6 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`hooks.json` は `python` → `py`（Windows Python Launcher） → `python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか 1 つが `PATH` 上にあれば動作する。3 つすべて不在の場合のみ exit 非ゼロで失敗し、Claude Code の `/plugins` Errors タブに表示される（silent fail を回避）。
 
-**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
+**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 完全不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
 
 ```json
 {

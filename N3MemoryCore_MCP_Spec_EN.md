@@ -720,9 +720,9 @@ Restart the client after editing the config. Ensure Redis Stack is running *befo
 
 By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3mc-workingmemory` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
 
-**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds the six `mcp__n3mc-workingmemory__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing, leaves unrelated fields untouched, and requires `python` on `PATH`.
+**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds the six `mcp__n3mc-workingmemory__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing and leaves unrelated fields untouched. The `hooks.json` command tries `python` → `py` (Windows Python Launcher) → `python3` in a `||` fallback chain, so the hook works as long as any one of these is on `PATH`. It only exits non-zero — surfacing in Claude Code's `/plugins` Errors tab — when **all three** are missing, avoiding silent failure.
 
-**If you installed without the plugin** (`claude mcp add`, manual `.mcp.json`, or Python is not available), add the block below manually to `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
+**If you installed without the plugin** (`claude mcp add`, manual `.mcp.json`, or no Python interpreter is available at all), add the block below manually to `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
 
 ```json
 {

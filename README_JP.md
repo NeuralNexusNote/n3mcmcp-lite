@@ -369,10 +369,14 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 が `~/.claude/settings.json` の `permissions.allow` に 6 つの
 `mcp__n3mc-workingmemory__*` ツールを冪等追加します。手動編集不要。
 1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは
-温存します。`python` が `PATH` 上にあることが前提。
+温存します。`hooks.json` は `python` → `py`（Windows Python Launcher） →
+`python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか
+1 つが `PATH` 上にあれば動作します。3 つすべて不在の場合のみ exit 非ゼロ
+で失敗し、Claude Code の `/plugins` Errors タブに表示されます（silent fail
+を回避）。
 
 **プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` /
-Python 不在）の場合は、下記ブロックを `~/.claude/settings.json`（ユーザー
+Python 完全不在）の場合は、下記ブロックを `~/.claude/settings.json`（ユーザー
 グローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）
 に手動追記してください：
 

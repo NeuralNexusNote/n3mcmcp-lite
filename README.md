@@ -381,12 +381,16 @@ hook runs [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/inst
 which idempotently adds the six `mcp__n3mc-workingmemory__*` tools to
 `~/.claude/settings.json`. No manual editing needed. The hook only
 writes if at least one entry is missing and never touches unrelated
-fields. Requires `python` on `PATH`.
+fields. The `hooks.json` command tries `python` → `py` (Windows Python
+Launcher) → `python3` in a `||` fallback chain, so the hook works as
+long as any one of these is on `PATH`. It only exits non-zero —
+surfacing in Claude Code's `/plugins` Errors tab — when **all three**
+are missing, avoiding silent failure.
 
 **If you installed without the plugin** (e.g. `claude mcp add` or a
-manual `.mcp.json`), or the hook could not find Python, add the block
-below manually to `~/.claude/settings.json` (user-global, recommended)
-or `.claude/settings.json` (per-project):
+manual `.mcp.json`), or no Python interpreter is available at all, add
+the block below manually to `~/.claude/settings.json` (user-global,
+recommended) or `.claude/settings.json` (per-project):
 
 ```json
 {
