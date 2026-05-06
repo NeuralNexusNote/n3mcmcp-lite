@@ -43,6 +43,20 @@ docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 
 ### Step 2 — Install the package (choose one)
 
+**Quickest path — Claude Code marketplace.** Bundles install + MCP wiring in two
+commands. Run inside Claude Code:
+
+```
+/plugin marketplace add NeuralNexusNote/n3mcmcp-lite
+/plugin install n3mc-workingmemory@neuralnexusnote
+```
+
+Then `/reload-plugins` and skip Step 3 — the plugin manifest handles MCP wiring.
+The manual options below remain available for forks, custom configs, and
+Claude Desktop.
+
+---
+
 **(a) From PyPI** — most users:
 
 ```bash
@@ -103,9 +117,9 @@ This server does **not** run out of the box — you must prepare two things firs
    ```
    Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start` from the second session onward.
 
-   > **Why no persistence flags on the docker line**: the Lite build is
-   > *deliberately volatile*. Ephemerality is the product boundary that
-   > separates Lite from the paid, persistent N3MemoryCore build. Rather
+   > **Why no persistence flags on the docker line**: this build is
+   > *deliberately volatile*. Ephemerality is a design feature, not a
+   > missing capability — see the "Use cases" section below. Rather
    > than rely on fragile shell-quoting for `--save ""` (which breaks on
    > Windows PowerShell and cmd.exe), the MCP server **enforces** the
    > ephemeral state at startup by issuing `CONFIG SET appendonly no` and
@@ -125,7 +139,7 @@ The server refuses to start if Redis is unreachable, and the Claude Code plugin 
 - 🔍 **Semantic search** — Finds relevant past conversations even when the exact words differ.
 - 🌐 **Multilingual out of the box** — CPU-only, no LLM/GPU required. NFKC fold (`ｱﾙﾌｧ`↔`アルファ`, `１２３`↔`123`, ligatures), bigram coverage for Japanese / Chinese / Korean / Thai / Lao / Myanmar / Khmer, diacritic cross-match for Latin scripts (`café`↔`cafe`).
 - 🛡️ **Encoding safety** — stdio UTF-8 reconfigure on Windows (cp932 → UTF-8), lone-surrogate sanitization on every input. Same defenses as the Free build.
-- 🔄 **Context across sessions** — Working memory that lasts **7 days** (auto-expires via Redis TTL; use Pro for long-term memory).
+- 🔄 **Context across sessions** — Working memory that lasts **7 days** (auto-expires via Redis TTL; pair with any persistent memory backend if you need longer retention).
 - ⚡ **Works automatically** — Saving and searching happen automatically. The MCP `initialize` response ships behavioral instructions, so no user action is required.
 - 🤖 **Multi-agent ready** — Multiple AI agents share one Redis. The `b_local` and `b_session` biases prioritize each project's own memories while still surfacing the team's collective knowledge.
 - 🏢 **Team & organization support** — Deploy Redis on a shared server and point `N3MC_REDIS_URL` to it for team-wide memory sharing (⚠️ authentication must be handled at the Redis layer).
@@ -170,20 +184,14 @@ than competing with it**.
 **Recommended usage:**
 
 - **Fixed information needed every session** (folder paths, user preferences) → save to auto-memory
-- **Conversation context and history** (discussion threads, past decisions) → N3MemoryCore accumulates automatically (7 days in Lite, permanent in Pro)
+- **Conversation context and history** (discussion threads, past decisions) → N3MemoryCore accumulates automatically (7-day window; pair with a persistent memory backend if you need longer retention)
 
 ---
 
-## Lite vs. Pro (coming soon)
+## Use cases — when working memory is the right tool
 
-| Build                      | Storage                           | Durability        | Where                 |
-| -------------------------- | --------------------------------- | ----------------- | --------------------- |
-| **Lite (this repo)**       | Redis Stack (RediSearch)          | 7d TTL, volatile  | Claude Marketplace    |
-| **Pro (coming soon)**      | SQLite + sqlite-vec (local file)  | Permanent         | Separate distribution |
-
-Same MCP surface (six tools, same ranking formula; `delete_memories_by_session` is Lite-only). The 7-day TTL and
-volatile Redis storage are **design features, not limitations** —
-they make the Lite build the better fit for:
+The 7-day TTL and volatile Redis storage are **design features, not
+limitations**. They make this server the right fit for:
 
 - **Agentic code-generation loops** — failed attempts and abandoned
   designs don't bleed into the next task; `docker restart redis-stack`
@@ -192,11 +200,14 @@ they make the Lite build the better fit for:
   contaminate unrelated follow-ups.
 - **Experimental / throwaway prototyping** — leave it alone and memory
   evaporates in 7 days, no pruning needed.
+- **Project-scoped working memory** — pin a `session_id` per task /
+  project to keep contexts cleanly separated.
 
-The **Pro build (coming soon)** will target the opposite use case:
-long-term knowledge accumulation where persistence is the feature.
-Pick Lite for **project-scoped working memory**; the Pro build will
-offer **continuous memory** when released.
+If you need **long-term, persistent knowledge accumulation across
+months or years**, working memory is not the right layer. Pair this
+server with any persistent memory MCP — the official knowledge-graph
+server, your own SQLite-backed implementation, or an external
+service — to cover the long-term side.
 
 ## What is this?
 
@@ -236,7 +247,7 @@ five ID fields. Most users only ever touch `session_id` (and rarely
 |-----------------------|---------------------------------|--------------------------------------------|----------------------------------------|---------|
 | `id` (PK)             | Redis hash                      | Per record (UUIDv7, time-ordered)          | **One record**                         | Unique identifier for each memory — used for `delete_memory` and dedup. |
 | `owner_id`            | `config.json`                   | First startup (UUIDv4)                     | **Owner / installation**               | Identifies whose data this is. Validated on every `save_memory`; mismatched payloads are rejected with `owner_id mismatch`. Stored as a TAG field; filtering happens in Python (see spec §3.12). |
-| `local_id` (agent_id) | `config.json`                   | First startup (UUIDv4)                     | **Agent / install**                    | UUIDv4 identifier for this install. Stored on every row for forward-compatibility with the Pro build, but **does NOT feed Lite's `b_local` ranking** — `b_local` is computed from `stored_importance + access_count` only (see Ranking formula). |
+| `local_id` (agent_id) | `config.json`                   | First startup (UUIDv4)                     | **Agent / install**                    | UUIDv4 identifier for this install. Stored on every row for forward-compatibility with future persistent variants, but **does NOT feed Lite's `b_local` ranking** — `b_local` is computed from `stored_importance + access_count` only (see Ranking formula). |
 | `session_id`          | In-memory or supplied by client | Per task / project / conversation (string) | **Task / project / conversation**      | Surfaces memories from the same task / project together. Drives the **`b_session` ranking bias** (`b_session_match=1.0`, `b_session_mismatch=0.6`) so the current chat's memories outrank unrelated cross-project rows in the same Redis instance. Also the filter key for `delete_memories_by_session`. Resolution order: per-call argument → `N3MC_SESSION_ID` env var → per-process UUIDv4 fallback. |
 | `agent_name`          | Redis hash                      | Per `save_memory` call (free-form string)  | **Agent display label**                | Human-readable label (e.g. `"claude-code"`, `"claude-desktop"`). Not used in ranking — display/audit only. |
 
@@ -597,7 +608,7 @@ sits elsewhere:
 | **Verbatim recall** | Opaque (may be summarized) | **Parent-document contract — byte-exact full text returned** |
 | **Search internals** | Black box | **Hybrid BM25 + e5 vectors + CJK bigram + time decay + lightweight reranker, all parameters visible and tunable** |
 | **Inspect / control** | UI only | **`list_memories` / `delete_memory` / `delete_memories_by_session` operate on raw records** |
-| **Persistence** | Tied to the vendor's service lifetime | **In-memory Redis with 7-day TTL** — short-lived by design, but you own the container and can swap it for the Pro build (SQLite, persistent) for long-term storage |
+| **Persistence** | Tied to the vendor's service lifetime | **In-memory Redis with 7-day TTL** — short-lived by design, but you own the container; pair with any persistent memory backend for long-term storage |
 | **Tunability** | Fixed | `half_life_days`, `chunk_threshold`, `dedup_threshold`, rerank weights — all editable |
 
 So the value of running N3MemoryCore Lite is **not** "more reliable
@@ -605,7 +616,7 @@ auto-save" — it is **owning a transparent, multi-client working-memory
 layer** that several AIs can collaborate on under a shared `session_id`,
 where search behaviour is editable and verbatim recall is contractually
 guaranteed. (For long-term, persistent storage of user-invested artifacts,
-pair it with the Pro build.)
+pair it with any persistent memory backend.)
 
 If those properties matter to your workflow, Lite earns its keep. If you
 only need "the LLM remembers something across sessions" inside one
@@ -678,8 +689,8 @@ Behavioral notes:
   the hook process loads the embedding model each turn (async, so no UI
   block, but there is CPU/IO cost) /
   **Lite's 7-day TTL still applies**, so transcripts saved this way still
-  expire within a week — point the same hook at the forthcoming Pro build
-  (SQLite-backed, persistent) when long-term retention matters.
+  expire within a week — point the same hook at any persistent memory
+  backend when long-term retention matters.
 
 **Path 3 — bypass MCP and call the first-party Anthropic Messages API
 yourself** (architecture change). Step outside MCP clients (Claude Code,

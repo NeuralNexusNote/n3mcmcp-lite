@@ -11,6 +11,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.6.1] — 2026-05-06
+
+### Documentation
+- README (EN/JP): Quickstart Step 2 に Claude Code marketplace 経由の install
+  手順（`/plugin marketplace add` + `/plugin install`）を最短経路として追記。
+  既存の PyPI / フォーク / uvx 手順は手動オプションとして据え置き。
+- README (EN/JP): Pro 関連の言及を中立化。`## Lite vs. Pro (coming soon)` を
+  `## Use cases — when working memory is the right tool` /
+  `## ユースケース — ワーキングメモリが適している場面` に書き換え、長期保存の
+  案内を「any persistent memory backend / 任意の永続メモリバックエンド」へ統一。
+  Lite が単体で完結したワーキングメモリレイヤであることを明確化する目的。
+
 ## [1.6.0] — 2026-04-28
 
 > First public release-tagged minor bump on top of `V1.1.0` (the only
