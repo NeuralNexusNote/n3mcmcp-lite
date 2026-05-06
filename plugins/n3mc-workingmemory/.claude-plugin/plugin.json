@@ -1,7 +1,7 @@
 {
   "name": "n3mc-workingmemory",
   "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory server for Claude Code, backed by Redis Stack. Multilingual out of the box (NFKC + CJK / Hangul / Thai / Lao / Myanmar / Khmer bigram + diacritic fold). Prerequisites: (1) Redis Stack running on localhost:6379 (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) and (2) uv installed on PATH (https://docs.astral.sh/uv/).",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "author": {
     "name": "NeuralNexusNote",
     "email": "arnolfjp019@gmail.com"

@@ -2,18 +2,18 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.NeuralNexusNote/n3mc-workingmemory",
   "title": "N3MemoryCore Lite (Working Memory)",
-  "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory MCP server backed by Redis Stack. Multilingual out of the box (NFKC + CJK / Hangul / Thai / Lao / Myanmar / Khmer bigram + diacritic fold). Designed as a working-memory layer to complement persistent memory MCPs.",
+  "description": "Ephemeral 7-day hybrid vector+BM25 working memory, multilingual, backed by Redis Stack.",
   "repository": {
     "url": "https://github.com/NeuralNexusNote/n3mcmcp-lite",
     "source": "github"
   },
-  "version": "1.6.1",
+  "version": "1.6.2",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "n3memorycore-mcp-lite",
-      "version": "1.6.1",
+      "version": "1.6.2",
       "transport": {
         "type": "stdio"
       }

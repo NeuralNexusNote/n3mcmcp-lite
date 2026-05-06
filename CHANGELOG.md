@@ -11,6 +11,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.6.2] — 2026-05-06
+
+### Documentation
+- README.md: footer に `mcp-name: io.github.NeuralNexusNote/n3mc-workingmemory`
+  行を追加。MCP Registry (`registry.modelcontextprotocol.io`) の PyPI
+  パッケージオーナーシップ検証で要求される識別行。視覚的な邪魔を最小化
+  するため `<sub>` タグで footer に格納。
+
 ## [1.6.1] — 2026-05-06
 
 ### Documentation

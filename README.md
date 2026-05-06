@@ -793,3 +793,7 @@ rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycor
 ## License
 
 Apache License 2.0 — see [LICENSE](./LICENSE).
+
+---
+
+<sub>MCP Registry: `mcp-name: io.github.NeuralNexusNote/n3mc-workingmemory`</sub>
