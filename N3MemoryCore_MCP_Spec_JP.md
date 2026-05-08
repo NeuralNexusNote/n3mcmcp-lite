@@ -579,6 +579,27 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 全ツールの応答は単一の `TextContent`。`save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` は JSON 文字列、`search_memory` / `list_memories` は人間可読 markdown。**いずれの応答も末尾に短い auto-save リマインダ（[§11](#11-保存の確実性と-mcp-プロトコルの限界) で利用するナッジチャネル）を `\n---\n` 区切りで付加する。** 機械的に応答 JSON をパースする呼び出し側は、先頭から JSON ドキュメント 1 つを取り出すストリーミングデコード（例：`json.JSONDecoder().raw_decode()`）を使うこと。
 
+### 4.3.1 取り出し拡張ツール（Retrieval Extensions）
+
+> 既存ツールの挙動は不変。以下は**追加ツール・追加引数**である。Pro 版では更にエンティティ索引・遅延要約のツールが追加される（本 Lite 版には含めない）。
+
+#### `search_memory` の追加引数
+
+| 引数 | 型 | 振る舞い |
+| --- | --- | --- |
+| `since`  | `string` (ISO 8601 日付 or 日時) | このタイムスタンプ以降に保存されたエントリのみに絞る。日付のみ指定時は `00:00:00` として解釈。 |
+| `until`  | `string` (ISO 8601 日付 or 日時) | このタイムスタンプ以前に保存されたエントリのみに絞る。日付のみ指定時は `23:59:59` として解釈。 |
+
+`since` / `until` は片方のみ指定可。既存のランキングロジックには影響せず、最終的な候補集合に対する後段フィルタとして適用する。
+
+#### 新ツール `recall_thread`
+
+| 名前 | 入力 | 振る舞い |
+| --- | --- | --- |
+| `recall_thread` | `turn_id: string, before?: int (既定 2), after?: int (既定 2)` | 指定 `turn_id` のエントリと、それ以前 `before` 件・それ以後 `after` 件を時系列で並べた markdown を返す。並び替えは保存時刻の昇順。Lite では Redis に保存された全エントリの中で「同一 turn_id を持つ親ドキュメント／単独メモリ／チャンク」をスキャンして返す。ヒットゼロの場合 `{"status":"not_found","turn_id":...}` を JSON 文字列で返す。 |
+
+**運用**: 接続中の LLM は `search_memory` のスニペットで文脈不足と判断したとき、ヒットの `turn_id` を `recall_thread` に渡して周辺会話を取得すること。ユーザーがこのツールを直接指定する必要はない。
+
 ### 4.4 エラー処理
 
 ツール例外はディスパッチ層で捕捉し、先頭 `"Error: "` を付けた `TextContent` で返す。ツールレベル例外で stdio ループがクラッシュすることはない。ツール呼び出し時に Redis 到達不可な場合、ディスパッチャはツール実行を行わず「Redis Stack を起動してください」のヒントを返す。

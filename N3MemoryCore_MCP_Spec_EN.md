@@ -589,6 +589,27 @@ Six tools are exposed via `tools/list` (same names as the forthcoming Pro build,
 
 All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
 
+### 4.3.1 Retrieval Extension Tools
+
+> Behavior of existing tools is unchanged. The following are **additive tools and additive arguments**. The Pro build adds further tools for entity indexing and lazy summarization (NOT shipped in this Lite build).
+
+#### Additional arguments on `search_memory`
+
+| Argument | Type | Behavior |
+| --- | --- | --- |
+| `since` | `string` (ISO 8601 date or datetime) | Restrict to entries saved at or after this timestamp. Date-only inputs are interpreted as `00:00:00`. |
+| `until` | `string` (ISO 8601 date or datetime) | Restrict to entries saved at or before this timestamp. Date-only inputs are interpreted as `23:59:59`. |
+
+Either bound may be specified alone. These do not alter the existing ranking logic; they apply as a post-filter on the final candidate set.
+
+#### New tool `recall_thread`
+
+| Name | Inputs | Behavior |
+| --- | --- | --- |
+| `recall_thread` | `turn_id: string, before?: int (default 2), after?: int (default 2)` | Returns markdown that interleaves the entry with the given `turn_id` plus the `before` preceding and `after` following entries, sorted ascending by save timestamp. The Lite implementation scans all stored entries (parent documents, standalone memories, and chunks) sharing the same `turn_id` and returns them in chronological order. When nothing matches, returns the JSON string `{"status":"not_found","turn_id":...}`. |
+
+**Operational rule**: The connected LLM SHOULD pass a hit's `turn_id` to `recall_thread` when the snippet returned by `search_memory` is insufficient to answer. End users do not need to invoke this tool directly.
+
 ### 4.4 Error Handling
 
 Tool exceptions are caught in the dispatch layer and returned as `TextContent` with a leading `"Error: "` prefix. The server never crashes the stdio loop due to a tool-level exception. If Redis is unreachable when a tool is called, the dispatcher returns a "start Redis Stack" hint instead of invoking the tool.
