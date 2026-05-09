@@ -142,7 +142,7 @@ n3memorycore-mcp-lite/
 ├── n3mc_mcp/                       # Python パッケージ
 │   ├── __init__.py                 # バージョンマーカー
 │   ├── __main__.py                 # エントリポイント: python -m n3mc_mcp
-│   ├── server.py                   # MCP サーバー定義 + 6 ツール
+│   ├── server.py                   # MCP サーバー定義 + 7 ツール（6 基本 + recall_thread §4.3.1）
 │   ├── instructions.py             # initialize 時の振る舞い指示
 │   ├── database.py                 # Redis 層：インデックス・CRUD・TTL・重複判定
 │   ├── processor.py                # 埋め込み・ランキング・CJK トークナイズ・リランカー
@@ -566,12 +566,12 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 ### 4.3 ツール
 
-`tools/list` で公開する 6 ツール（名前は Pro 版（公開予定）と揃える。`delete_memories_by_session` のみ Lite 専用 — Pro 版は永続化を重視するため誤削除リスクを避け個別 `delete_memory` のみを公開する予定）：
+`tools/list` で公開する 7 ツール（6 基本ツール + `recall_thread`（§4.3.1）。名前は Pro 版（公開予定）と揃える。`delete_memories_by_session` のみ Lite 専用 — Pro 版は永続化を重視するため誤削除リスクを避け個別 `delete_memory` のみを公開する予定）：
 
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
-| `search_memory` | `query: string, limit?: int, session_id?: string` | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `ttl_seconds` を含む JSON を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー、および後続 `search_memory` の `b_session` マッチ対象）。 |
+| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}` を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー、および後続 `search_memory` の `b_session` マッチ対象）。 |
 | `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。親は `[doc×N]` タグ付き。チャンクは隠蔽（FT.SEARCH `*` クエリ後に Python 側で `parent_id` 空文字列フィルタ、§3.12 参照）。 |
 | `delete_memory` | `id: string`                              | ID が親（`doc:<uuid>`）なら親＋`docsha:`＋該当 `parent_id` を持つ全チャンクを連鎖削除。それ以外は `mem:<uuid>` とその sha ガードをアトミック削除。 |
 | `delete_memories_by_session` | `session_id: string`         | 指定 `session_id` に紐づく独立メモリ・親ドキュメント・子チャンク・sha ガードを、設定 `owner_id` のレコードに限定して一括削除。応答は `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`。ヒットゼロのときは `{"status":"not_found", "session_id": ..., "deleted": 0}`（再呼び出しは安全な no-op）。**不可逆操作のため呼び出し前に `session_id` をユーザーに確認すること。** Lite 専用（[§10 Test 6](#10-自律評価evidence-report) 参照）。 |
@@ -612,6 +612,8 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 指示は LLM に以下を要求する：
 
+0. **Pro が同時接続中の場合の役割分担（共存ポリシー）** — `n3mc-longtermmemory`（N3MemoryCore Pro、永続 SQLite+sqlite-vec バックエンド）が同一セッションに登録されている場合、Lite はワーキングメモリ（セッション内進捗メモ・一時デバッグ状態・使い捨て中間結果）として、Pro は正規長期ストア（ユーザープロフィール・プロジェクト仕様・設計決定・世界観設定・API 契約・調査サマリ等、セッション跨ぎで残す価値のあるもの）として機能する。疑わしい場合は Pro 側に倒す。Pro 接続時は TTL 警告（ルール 7）は基本不要 — 長期コンテンツを Pro にルーティングするだけでよい。Pro が未接続の場合は本サーバーが唯一のメモリストアとなり全コンテンツを受け入れ、ルール 7 を有効化する。同一事実を両サーバーに二重保存しない。
+
 1. **先に検索し、想起したら明示する** — 各ユーザーターンの先頭で、意図を反映した簡潔なクエリで `search_memory` を呼ぶ。検索結果を実際に応答に活用した（以前の記憶を想起して答えた）場合は、返答冒頭にユーザーの言語で一言そえる。例:「前回の回答がメモリに保存されています。」「以前の会話から該当情報を取り出しました。」／英語なら "Pulling this from earlier memory in this session."。**関連メモリが無かった / 想起内容を使わなかった場合は告知しない。** 単に「検索した」ことを述べるのは禁止 — 「想起した」ことだけを述べる。
 2. **毎ターン自動保存（許可を求めない）** — 保存は静かに自動で行う。ユーザーが「保存して」「覚えておいて」と言う必要は一切なく、**既定で保存する**。保存してよいか確認する質問もしない。各意味のあるターン後に `save_memory` を呼び、(a) ユーザーの意図・質問の言い換え、(b) **自分が生成した実質的な出力** — 特にユーザーが後で参照しそうな創作・生成コンテンツ（世界観設定、キャラクター設定、設計スケッチ、コードアーキテクチャ、リサーチ要約、アウトライン等。1〜2 文を超えて作ったものは保存）、(c) 確立した事実・嗜好・未解決の問いを保存。1 事実 = 1 `save_memory` 呼び出し、各 50–200 字（長文は 3 番ルール）。重複はサーバー側で自動却下されるため「多めに保存」が安全。**Lite は 7 日で消えるローリングスクラッチパッド**である旨を LLM に明示。
 3. **長文は全文 1 回で保存（verbatim 復元）** — ターンで発生した長文 — ユーザー貼り付け（仕様・記事・ログ・コード）**または自分が生成した長文（創作設定・世界観・キャラシ・設計ドキュメント）** — でユーザーが後で原文を取り出しそうなものは、**全文を単一の `save_memory` 呼び出しに渡す**。サーバーが自動的に親ドキュメント＋チャンク化を行い、検索はチャンクで、復元は親本文で verbatim 返却する（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。目安：**~400 字超 → 全文 1 回保存**。それ未満の要約可能な内容は 2 番ルールで短文複数保存。長文 verbatim 候補を多数の短い要約に分割してはならない（復元忠実度が崩れる）。
@@ -621,6 +623,10 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 7. **ユーザーが長期保存を期待したとき 7日 TTL を伝える** — 7日 TTL は LLM からは見える（この INSTRUCTIONS ブロック／`search_memory` のツール説明／`save_memory` 応答の `ttl_seconds` フィールド）が、**人間のユーザーには見えない**。既定は 2 番ルールの通り沈黙自動保存で、毎回 TTL に言及する必要はない。ただしユーザーの発言に「長期保存を期待するシグナル」が現れた場合 — 明示的な永続化語句（"remember this forever" / "don't forget" / "save permanently" /「ずっと覚えておいて」「永続的に保存して」「絶対忘れないで」「次回も覚えていて」）、ユーザーが明らかに時間投資した長文（世界観・キャラ設定・仕様書・コード・設計ドキュメント等）、~5 日以上前に保存したコンテンツへの言及（失効が迫っている）— に限り、ユーザーの言語で**一文だけ**「Lite 版のメモリは保存から7日で自動削除される旨／永続保存が必要なら **Pro 版（sqlite-vec バックエンド、公開予定）** を、当面は別途バックアップを推奨」を添える。保存は通常通り実行し、許可は求めない。通知は**長期シグナル 1 回につき 1 度だけ**（毎ターン・毎保存では出さない）。既に同一会話内で通知済みなら繰り返さない。根拠：この規則がないと、LLM はユーザーが「永続的に保存した」と思い込んでいる内容を沈黙のうちに揮発させ、ユーザーは想起失敗で初めて損失に気付く。
 
 8. **`skip_code_blocks` サーバーポリシーを尊重** — `save_memory` が `{"status": "skipped_code", "saved": false}` を返した場合、サーバーはトリプルバッククォートフェンスを含むペイロードを拒否する設定になっている（[§6](#6-設定)参照）。これは FastAPI 時代の N3MemoryCore のコード除外挙動をオプトインで再現するもので、ユーザーが意図的にコードをメモリ外に置いている状態。**同一ペイロードの再送は禁止** — 代わりにそのコードが何をしているかの散文要約を保存するか、当該ターンの保存をスキップすること。ユーザーが「さっきの保存はどうなった？」と明示的に聞かない限り、スキップを自発的に告知する必要はない。
+
+9. **`session_id` 単位での一括掃除** — `delete_memories_by_session` は完了したプロジェクトのメモリを TTL 前に除去し、検索結果のノイズを低減するために使う。操作は**不可逆**なので、呼び出す前に対象 `session_id` をユーザーに確認すること。
+
+10. **スレッドコンテキスト取り出し — `recall_thread`（§4.3.1）** — `search_memory` のスニペットで文脈が不足していると判断した場合、ヒットの `turn_id` を `recall_thread` に渡して前後の会話スレッドを時系列で取得する。`save_memory` に `turn_id` 引数を渡して同一ターン内の保存をグルーピングしておくと後の取り出しが容易になる（推奨形式：短い UUID・タイムスタンプ・`"turn-N"` 等）。ユーザーがこのツールを直接指定する必要はない — LLM が想起品質を高めるために主体的に使うツールである。
 
 完全文面は [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py)。
 
@@ -760,7 +766,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
 
-**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 6 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`hooks.json` は `python` → `py`（Windows Python Launcher） → `python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか 1 つが `PATH` 上にあれば動作する。3 つすべて不在の場合のみ exit 非ゼロで失敗し、Claude Code の `/plugins` Errors タブに表示される（silent fail を回避）。
+**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 7 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`hooks.json` は `python` → `py`（Windows Python Launcher） → `python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか 1 つが `PATH` 上にあれば動作する。3 つすべて不在の場合のみ exit 非ゼロで失敗し、Claude Code の `/plugins` Errors タブに表示される（silent fail を回避）。
 
 同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が `PATH` 上に無いと MCP launcher 側では不透明な `ENOENT` で失敗する。フックが事前に `shutil.which("uvx")` を確認し、見つからない場合は **stderr に日英両言語のインストール手順**（`pipx install uv` ／ `curl -LsSf https://astral.sh/uv/install.sh | sh` 等）を出力して `/plugins` Errors タブに actionable なメッセージを残す。フックの exit code は常に 0（パーミッション追加自体は成功しているため）。
 
@@ -775,7 +781,8 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
       "mcp__n3mc-workingmemory__list_memories",
       "mcp__n3mc-workingmemory__delete_memory",
       "mcp__n3mc-workingmemory__delete_memories_by_session",
-      "mcp__n3mc-workingmemory__repair_memory"
+      "mcp__n3mc-workingmemory__repair_memory",
+      "mcp__n3mc-workingmemory__recall_thread"
     ]
   }
 }
@@ -848,12 +855,12 @@ n3mcmcp-lite/
 | `TestEmbedding` | `passage:`/`query:` プレフィクス、ベクトル次元、同一テキスト類似度 | 埋め込み |
 | `TestEncodingSafety` | 孤立サロゲート除去（`str` / `list` / `dict` / `None`）、全サロゲート入力は空文字列に縮退、除去後の `.encode("utf-8")` が成功 | エンコーディング安全策（§3.13） |
 
-### Layer 3: `tests/test_server.py`（18 テスト）
+### Layer 3: `tests/test_server.py`（19 テスト）
 
 | テストクラス | テスト内容 | カバレッジ |
 |---|---|---|
-| `TestToolRegistration` | 6 ツール登録、スキーマ型、description 非空 | MCP 登録 |
-| `TestSaveAndSearch` | 保存→検索往復、完全重複拒否、空内容拒否 | 単一チャンク |
+| `TestToolRegistration` | 7 ツール登録（`recall_thread` 含む）、スキーマ型、description 非空 | MCP 登録 |
+| `TestSaveAndSearch` | 保存→検索往復、完全重複拒否、空内容拒否、コードブロック purify（§10.3）| 単一チャンク |
 | `TestListAndDelete` | 新着 3 件の列挙、存在しない ID の削除 | 一覧・削除 |
 | `TestRepair` | 空 DB に対する `repair_memory`→ok | 修復 |
 | `TestUnknownTool` | 未登録ツール名→エラー文字列 | ディスパッチ |

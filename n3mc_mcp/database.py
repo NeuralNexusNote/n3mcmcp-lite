@@ -107,6 +107,29 @@ def _contains_code_block(text: str) -> bool:
     return bool(_CODE_FENCE_RE.search(text))
 
 
+def _epoch_from_iso(ts: str, is_until: bool = False) -> float:
+    """Parse ISO 8601 date or datetime string to Unix epoch (UTC).
+
+    Date-only inputs:  since → 00:00:00 UTC,  until → 23:59:59 UTC.
+    Returns 0.0 on parse failure so callers can treat it as "no filter".
+    """
+    if not ts:
+        return 0.0
+    ts = ts.strip()
+    try:
+        if "T" in ts or len(ts) > 10:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = datetime.strptime(ts[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if is_until:
+                dt = dt.replace(hour=23, minute=59, second=59)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
 # ── main class ───────────────────────────────────────────────────────────────
 
 class Database:
@@ -166,6 +189,7 @@ class Database:
                 "local_id",        "TAG",
                 "agent_name",      "TAG",
                 "session_id",      "TAG",
+                "turn_id",         "TAG",
                 "importance",      "NUMERIC",
                 "access_count",    "NUMERIC",
                 "parent_id",       "TAG",
@@ -181,13 +205,113 @@ class Database:
     # ── §3.10 repair ────────────────────────────────────────────────────────
 
     def repair_memory(self) -> dict:
+        """Repair index and remove orphaned keys (spec §3.10).
+
+        Three cleanup passes beyond the basic ensure_index():
+
+        (A) Orphaned mem:sha: guards — mem:sha:<h> whose target mem:<id> no
+            longer exists (e.g. TTL expired the mem: key but not the sha: key
+            due to a timing race, or a delete that missed the guard).
+
+        (B) Orphaned chunk keys — mem:<id> entries whose parent_id field
+            points to a doc:<parent_id> that no longer exists.
+
+        (C) Orphaned docsha: guards — docsha:<h> whose target doc:<id> no
+            longer exists.
+
+        Returns counts so callers can verify the repair was meaningful.
+        """
         if not self._ok:
             return {"status": "error", "message": _DOCKER_HINT}
         try:
             self.ensure_index()
-            return {"status": "ok", "message": "index ensured"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+        orphaned_sha_guards  = 0
+        orphaned_chunks      = 0
+        orphaned_docsha      = 0
+        to_delete: list[str] = []
+
+        # Pass A: orphaned mem:sha: guards
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = self._client.scan(cursor, match="mem:sha:*", count=200)
+                for key in keys:
+                    raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                    target_id_b = self._client.get(raw_key)
+                    if not target_id_b:
+                        to_delete.append(raw_key)
+                        orphaned_sha_guards += 1
+                        continue
+                    target_id = target_id_b.decode() if isinstance(target_id_b, bytes) else str(target_id_b)
+                    if not self._client.exists(f"mem:{target_id}"):
+                        to_delete.append(raw_key)
+                        orphaned_sha_guards += 1
+                if cursor == 0:
+                    break
+        except Exception as e:
+            print(f"[n3mc] repair pass A: {e}", file=sys.stderr)
+
+        # Pass B: orphaned chunk keys (parent doc gone)
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = self._client.scan(cursor, match="mem:*", count=200)
+                for key in keys:
+                    raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                    if raw_key.startswith("mem:sha:"):
+                        continue
+                    try:
+                        pid_b = self._client.hget(raw_key, b"parent_id")
+                        if not pid_b:
+                            continue
+                        pid = pid_b.decode() if isinstance(pid_b, bytes) else str(pid_b)
+                        if pid and not self._client.exists(f"doc:{pid}"):
+                            to_delete.append(raw_key)
+                            orphaned_chunks += 1
+                    except Exception:
+                        pass
+                if cursor == 0:
+                    break
+        except Exception as e:
+            print(f"[n3mc] repair pass B: {e}", file=sys.stderr)
+
+        # Pass C: orphaned docsha: guards (parent doc gone)
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = self._client.scan(cursor, match="docsha:*", count=200)
+                for key in keys:
+                    raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                    parent_id_b = self._client.get(raw_key)
+                    if not parent_id_b:
+                        to_delete.append(raw_key)
+                        orphaned_docsha += 1
+                        continue
+                    parent_id = parent_id_b.decode() if isinstance(parent_id_b, bytes) else str(parent_id_b)
+                    if not self._client.exists(f"doc:{parent_id}"):
+                        to_delete.append(raw_key)
+                        orphaned_docsha += 1
+                if cursor == 0:
+                    break
+        except Exception as e:
+            print(f"[n3mc] repair pass C: {e}", file=sys.stderr)
+
+        if to_delete:
+            pipe = self._client.pipeline()
+            for k in to_delete:
+                pipe.delete(k)
+            pipe.execute()
+
+        return {
+            "status":                    "ok",
+            "message":                   "index ensured",
+            "orphaned_sha_guards_removed": orphaned_sha_guards,
+            "orphaned_chunks_removed":   orphaned_chunks,
+            "orphaned_docsha_removed":   orphaned_docsha,
+        }
 
     # ── §3.8 duplicate detection ─────────────────────────────────────────────
 
@@ -229,6 +353,7 @@ class Database:
         owner_id: str = "",
         importance: float = 1.0,
         session_id: str = "",
+        turn_id: str = "",
     ) -> dict:
         if not self._ok:
             return {"status": "error", "saved": False, "reason": _DOCKER_HINT}
@@ -260,8 +385,8 @@ class Database:
 
         threshold = self.cfg.get("chunk_threshold", 400)
         if len(content) <= threshold:
-            return self._save_single(content, agent_name, owner_id, importance, effective_session)
-        return self._save_parent_chunks(content, agent_name, owner_id, importance, effective_session)
+            return self._save_single(content, agent_name, owner_id, importance, effective_session, turn_id)
+        return self._save_parent_chunks(content, agent_name, owner_id, importance, effective_session, turn_id)
 
     def _save_single(
         self,
@@ -270,6 +395,7 @@ class Database:
         owner_id: str,
         importance: float,
         session_id: str,
+        turn_id: str = "",
     ) -> dict:
         """§3.8 (A): exact SHA dedup → near-dedup → HSET+EXPIRE+sha-guard pipeline."""
         sha = _sha1(content)
@@ -303,6 +429,7 @@ class Database:
             b"local_id":        self.cfg.get("local_id", "").encode(),
             b"agent_name":      (agent_name or "").encode(),
             b"session_id":      session_id.encode(),
+            b"turn_id":         turn_id.encode(),
             b"importance":      str(importance).encode(),
             b"access_count":    b"0",
             b"parent_id":       b"",
@@ -317,7 +444,12 @@ class Database:
         pipe.set(sha_key, mem_id.encode(), ex=ttl)
         pipe.execute()
 
-        return {"status": "saved", "saved": True, "id": mem_id, "ttl_seconds": ttl}
+        result: dict = {"status": "saved", "saved": True, "id": mem_id, "ttl_seconds": ttl}
+        if not vec_bytes:
+            # Embedding model was unavailable at save time.  The record is stored
+            # and BM25-searchable but will NOT appear in vector (KNN) search results.
+            result["warning"] = "embedding_unavailable"
+        return result
 
     def _save_parent_chunks(
         self,
@@ -326,6 +458,7 @@ class Database:
         owner_id: str,
         importance: float,
         session_id: str,
+        turn_id: str = "",
     ) -> dict:
         """§3.8 (B) + §3.11: parent-level dedup → doc: parent → chunk pipeline."""
         sha = _sha1(content)
@@ -368,6 +501,7 @@ class Database:
                 b"local_id":        local_id.encode(),
                 b"agent_name":      (agent_name or "").encode(),
                 b"session_id":      session_id.encode(),
+                b"turn_id":         turn_id.encode(),
                 b"chunk_count":     str(len(chunks)).encode(),
             },
         )
@@ -376,10 +510,19 @@ class Database:
         pipe.execute()
 
         # Write all chunks in a single pipeline (spec §3.11).
-        # No per-chunk sha guards; per-chunk near-dedup is also skipped.
+        # Per-chunk SHA guards prevent re-indexing identical chunk content when
+        # overlapping large documents are saved again (e.g. after minor edits).
+        # Near-dedup per chunk is skipped for speed; the parent-level KNN check
+        # above already handles near-duplicate full documents.
+        chunk_sha_keys = [f"mem:sha:{_sha1(c)}" for c in chunks]
+        existing_flags = self._client.mget(chunk_sha_keys)  # None = new, bytes = already indexed
+
         chunk_ids: list[str] = []
         chunk_pipe = self._client.pipeline()
-        for chunk in chunks:
+        for chunk, sha_key, already_exists in zip(chunks, chunk_sha_keys, existing_flags):
+            if already_exists is not None:
+                # Identical chunk already indexed (e.g. overlapping re-save). Skip.
+                continue
             chunk_id  = _new_id()
             ngram     = cjk_bigram_expand(chunk)
             vec_bytes = embed(normalize_text(chunk), is_query=False)
@@ -393,6 +536,7 @@ class Database:
                 b"local_id":        local_id.encode(),
                 b"agent_name":      (agent_name or "").encode(),
                 b"session_id":      session_id.encode(),
+                b"turn_id":         turn_id.encode(),
                 b"importance":      str(importance).encode(),
                 b"access_count":    b"0",
                 b"parent_id":       parent_id.encode(),
@@ -401,6 +545,7 @@ class Database:
                 fields[b"embedding"] = vec_bytes
             chunk_pipe.hset(f"mem:{chunk_id}", mapping=fields)
             chunk_pipe.expire(f"mem:{chunk_id}", ttl)
+            chunk_pipe.set(sha_key, chunk_id.encode(), ex=ttl)
             chunk_ids.append(chunk_id)
         chunk_pipe.execute()
 
@@ -421,6 +566,8 @@ class Database:
         query: str,
         limit: Optional[int] = None,
         session_id: str = "",
+        since: str = "",
+        until: str = "",
     ) -> list[dict]:
         if not self._ok:
             return []
@@ -450,18 +597,23 @@ class Database:
             (v["bm25_score"] for v in bm25_results.values()), default=1.0
         )
 
+        since_epoch = _epoch_from_iso(since, is_until=False) if since else 0.0
+        until_epoch = _epoch_from_iso(until, is_until=True) if until else 0.0
+
         candidates: list[dict] = []
         for key in all_keys:
             vr = vec_results.get(key, {})
             br = bm25_results.get(key, {})
 
-            content   = vr.get("content") or br.get("content", "")
-            timestamp = vr.get("timestamp") or br.get("timestamp", "")
-            imp       = _to_float(vr.get("importance") or br.get("importance", 1.0))
-            acc       = _to_int(vr.get("access_count") or br.get("access_count", 0))
-            parent_id = vr.get("parent_id") or br.get("parent_id", "")
-            mem_id    = vr.get("id") or br.get("id", "")
-            row_sess  = vr.get("session_id") or br.get("session_id", "")
+            content         = vr.get("content") or br.get("content", "")
+            timestamp       = vr.get("timestamp") or br.get("timestamp", "")
+            timestamp_epoch = vr.get("timestamp_epoch") or br.get("timestamp_epoch", 0.0)
+            imp             = _to_float(vr.get("importance") or br.get("importance", 1.0))
+            acc             = _to_int(vr.get("access_count") or br.get("access_count", 0))
+            parent_id       = vr.get("parent_id") or br.get("parent_id", "")
+            mem_id          = vr.get("id") or br.get("id", "")
+            row_sess        = vr.get("session_id") or br.get("session_id", "")
+            turn_id         = vr.get("turn_id") or br.get("turn_id", "")
 
             cos  = vr.get("cos_sim", 0.0)
             bm25 = br.get("bm25_score", 0.0)
@@ -481,14 +633,17 @@ class Database:
 
             if score >= min_score_val:
                 candidates.append({
-                    "key":          key,
-                    "id":           mem_id,
-                    "content":      content,
-                    "timestamp":    timestamp,
-                    "score":        score,
-                    "parent_id":    parent_id,
-                    "importance":   imp,
-                    "access_count": acc,
+                    "key":             key,
+                    "id":              mem_id,
+                    "content":         content,
+                    "timestamp":       timestamp,
+                    "timestamp_epoch": timestamp_epoch,
+                    "score":           score,
+                    "parent_id":       parent_id,
+                    "session_id":      row_sess,
+                    "turn_id":         turn_id,
+                    "importance":      imp,
+                    "access_count":    acc,
                 })
 
         # Sort descending so the highest-scoring chunk wins when multiple
@@ -533,6 +688,19 @@ class Database:
         else:
             candidates.sort(key=lambda x: x["score"], reverse=True)
 
+        # §4.3.1 since/until time filter — applied post-rerank so ranking is
+        # unaffected; only results outside the window are dropped.
+        if since_epoch or until_epoch:
+            filtered: list[dict] = []
+            for c in candidates:
+                ts_ep = c.get("timestamp_epoch") or _epoch_from_iso(c.get("timestamp", ""))
+                if since_epoch and ts_ep < since_epoch:
+                    continue
+                if until_epoch and ts_ep > until_epoch:
+                    continue
+                filtered.append(c)
+            candidates = filtered
+
         # TTL refresh on top-K hits (spec §3.11, §3.4 design exception).
         if self.cfg.get("ttl_refresh_on_search", True):
             ttl   = self.cfg["ttl_seconds"]
@@ -565,9 +733,9 @@ class Database:
                 "FT.SEARCH", INDEX_NAME,
                 f"*=>[KNN {knn_limit} @embedding $vec AS __dist]",
                 "PARAMS", "2", "vec", vec_bytes,
-                "RETURN", "9",
-                "__dist", "owner_id", "content", "timestamp",
-                "importance", "access_count", "parent_id", "id", "session_id",
+                "RETURN", "11",
+                "__dist", "owner_id", "content", "timestamp", "timestamp_epoch",
+                "importance", "access_count", "parent_id", "id", "session_id", "turn_id",
                 "SORTBY", "__dist",
                 "LIMIT", "0", str(knn_limit),
                 "DIALECT", "2",
@@ -589,14 +757,16 @@ class Database:
                 continue
             dist = _to_float(fdict.get("__dist", "1.0"))
             out[key] = {
-                "cos_sim":      cosine_sim_from_distance(dist),
-                "content":      fdict.get("content", ""),
-                "timestamp":    fdict.get("timestamp", ""),
-                "importance":   _to_float(fdict.get("importance", "1.0")),
-                "access_count": _to_int(fdict.get("access_count", "0")),
-                "parent_id":    fdict.get("parent_id", ""),
-                "id":           fdict.get("id", ""),
-                "session_id":   fdict.get("session_id", ""),
+                "cos_sim":         cosine_sim_from_distance(dist),
+                "content":         fdict.get("content", ""),
+                "timestamp":       fdict.get("timestamp", ""),
+                "timestamp_epoch": _to_float(fdict.get("timestamp_epoch", "0"), 0.0),
+                "importance":      _to_float(fdict.get("importance", "1.0")),
+                "access_count":    _to_int(fdict.get("access_count", "0")),
+                "parent_id":       fdict.get("parent_id", ""),
+                "id":              fdict.get("id", ""),
+                "session_id":      fdict.get("session_id", ""),
+                "turn_id":         fdict.get("turn_id", ""),
             }
             i += 2
         return out
@@ -614,9 +784,9 @@ class Database:
                 fts_query,
                 "SCORER", "BM25",
                 "WITHSCORES",
-                "RETURN", "8",
-                "owner_id", "content", "timestamp",
-                "importance", "access_count", "parent_id", "id", "session_id",
+                "RETURN", "10",
+                "owner_id", "content", "timestamp", "timestamp_epoch",
+                "importance", "access_count", "parent_id", "id", "session_id", "turn_id",
                 "LIMIT", "0", str(bm25_limit),
                 "DIALECT", "2",
             )
@@ -640,14 +810,16 @@ class Database:
                 i += 3
                 continue
             out[key] = {
-                "bm25_score":   score,
-                "content":      fdict.get("content", ""),
-                "timestamp":    fdict.get("timestamp", ""),
-                "importance":   _to_float(fdict.get("importance", "1.0")),
-                "access_count": _to_int(fdict.get("access_count", "0")),
-                "parent_id":    fdict.get("parent_id", ""),
-                "id":           fdict.get("id", ""),
-                "session_id":   fdict.get("session_id", ""),
+                "bm25_score":      score,
+                "content":         fdict.get("content", ""),
+                "timestamp":       fdict.get("timestamp", ""),
+                "timestamp_epoch": _to_float(fdict.get("timestamp_epoch", "0"), 0.0),
+                "importance":      _to_float(fdict.get("importance", "1.0")),
+                "access_count":    _to_int(fdict.get("access_count", "0")),
+                "parent_id":       fdict.get("parent_id", ""),
+                "id":              fdict.get("id", ""),
+                "session_id":      fdict.get("session_id", ""),
+                "turn_id":         fdict.get("turn_id", ""),
             }
             i += 3
         return out
@@ -786,12 +958,30 @@ class Database:
                     if cursor == 0:
                         break
 
+            # Collect per-chunk SHA guards so they're cleaned up atomically.
+            chunk_sha_keys: list[str] = []
+            if chunk_keys:
+                get_pipe = self._client.pipeline()
+                for ck in chunk_keys:
+                    get_pipe.hget(ck, b"content")
+                chunk_contents = get_pipe.execute()
+                for raw in chunk_contents:
+                    if raw:
+                        try:
+                            chunk_sha_keys.append(
+                                f"mem:sha:{_sha1(raw.decode('utf-8'))}"
+                            )
+                        except Exception:
+                            pass
+
             pipe = self._client.pipeline()
             pipe.delete(doc_key)
             if sha_key:
                 pipe.delete(sha_key)
             for ck in chunk_keys:
                 pipe.delete(ck)
+            for csk in chunk_sha_keys:
+                pipe.delete(csk)
             pipe.execute()
             return {
                 "status":         "deleted",
@@ -866,17 +1056,19 @@ class Database:
                 if sid != session_id or oid != owner_id:
                     continue
                 keys_to_delete.append(raw_key)
+                # Collect mem:sha: guard for both singles and chunks so they're
+                # cleaned up together (chunks now carry SHA guards too).
+                if content_b:
+                    try:
+                        sha_keys.append(
+                            f"mem:sha:{_sha1(content_b.decode('utf-8'))}"
+                        )
+                    except Exception:
+                        pass
                 if pid:
                     deleted_chunks += 1
                 else:
                     deleted_singles += 1
-                    if content_b:
-                        try:
-                            sha_keys.append(
-                                f"mem:sha:{_sha1(content_b.decode('utf-8'))}"
-                            )
-                        except Exception:
-                            pass
             if cursor == 0:
                 break
 
@@ -933,3 +1125,111 @@ class Database:
             "singles_deleted":   deleted_singles,
             "deleted":           total,
         }
+
+    # ── §4.3.1 thread retrieval ──────────────────────────────────────────────
+
+    def recall_thread(
+        self,
+        turn_id: str,
+        before: int = 2,
+        after: int = 2,
+    ) -> list[dict]:
+        """Return entries sharing turn_id plus `before` earlier and `after` later entries.
+
+        SCAN mem:* (standalones + chunks) + SCAN doc:*, sort by timestamp_epoch,
+        locate target indices, slice neighbourhood.
+        Spec §4.3.1: "同一 turn_id を持つ親ドキュメント／単独メモリ／チャンク".
+        Returns [] when turn_id is not found.
+        """
+        if not self._ok:
+            return []
+
+        owner_id = self.cfg["owner_id"]
+        all_entries: list[dict] = []
+
+        # mem: entries — standalone memories only (parent_id == "").
+        # Chunks (parent_id != "") are skipped: their parent doc is already
+        # collected in the doc:* scan below, which returns the full verbatim body.
+        # This mirrors search_memory's chunk→parent resolution so recall_thread
+        # never surfaces fragmented chunk text.
+        cursor = 0
+        while True:
+            cursor, keys = self._client.scan(cursor, match="mem:*", count=200)
+            for key in keys:
+                raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                if raw_key.startswith("mem:sha:"):
+                    continue
+                try:
+                    d = self._client.hmget(
+                        raw_key,
+                        b"owner_id", b"parent_id", b"id",
+                        b"content", b"timestamp", b"timestamp_epoch", b"turn_id",
+                    )
+                    oid = d[0].decode() if d[0] else ""
+                    pid = d[1].decode() if d[1] else ""
+                except Exception:
+                    continue
+                if oid != owner_id:
+                    continue
+                if pid:
+                    # Skip chunks — parent doc carries the full body.
+                    continue
+                all_entries.append({
+                    "id":              (d[2].decode() if d[2] else ""),
+                    "content":         (d[3].decode("utf-8") if d[3] else ""),
+                    "timestamp":       (d[4].decode() if d[4] else ""),
+                    "timestamp_epoch": _to_float(d[5].decode() if d[5] else "0", 0.0),
+                    "turn_id":         (d[6].decode() if d[6] else ""),
+                    "tag":             "",
+                })
+            if cursor == 0:
+                break
+
+        # Parent doc: entries
+        cursor = 0
+        while True:
+            cursor, keys = self._client.scan(cursor, match="doc:*", count=100)
+            for key in keys:
+                raw_key = key.decode() if isinstance(key, bytes) else str(key)
+                try:
+                    d = self._client.hmget(
+                        raw_key,
+                        b"owner_id", b"id",
+                        b"content", b"timestamp", b"timestamp_epoch",
+                        b"turn_id", b"chunk_count",
+                    )
+                    oid = d[0].decode() if d[0] else ""
+                except Exception:
+                    continue
+                if oid != owner_id:
+                    continue
+                chunk_count = d[6].decode() if d[6] else "?"
+                raw_content = d[2] or b""
+                all_entries.append({
+                    "id":              (d[1].decode() if d[1] else ""),
+                    "content":         raw_content.decode("utf-8") if raw_content else "",
+                    "timestamp":       (d[3].decode() if d[3] else ""),
+                    "timestamp_epoch": _to_float(d[4].decode() if d[4] else "0", 0.0),
+                    "turn_id":         (d[5].decode() if d[5] else ""),
+                    "tag":             f"[doc×{chunk_count}]",
+                })
+            if cursor == 0:
+                break
+
+        if not all_entries:
+            return []
+
+        # Sort chronologically
+        all_entries.sort(key=lambda e: e.get("timestamp_epoch") or _epoch_from_iso(e.get("timestamp", "")))
+
+        # Find indices of target turn entries
+        target_indices = [i for i, e in enumerate(all_entries) if e.get("turn_id") == turn_id]
+        if not target_indices:
+            return []
+
+        first = target_indices[0]
+        last  = target_indices[-1]
+        start = max(0, first - before)
+        end   = min(len(all_entries), last + 1 + after)
+
+        return all_entries[start:end]

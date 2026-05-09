@@ -1,10 +1,14 @@
 """
-MCP stdio server — 6 tools + startup sequence.
+MCP stdio server — 7 tools + startup sequence.
 
 Spec §4.1  transport: stdio
 Spec §4.2  initialize: serverInfo, capabilities, instructions
 Spec §4.3  tools: search_memory, save_memory, list_memories,
                   delete_memory, delete_memories_by_session, repair_memory
+Spec §4.3.1 Retrieval Extensions:
+            search_memory += since / until
+            save_memory   += turn_id
+            recall_thread (new 7th tool)
 Spec §3.9  startup: load_config → connect → enforce_ephemeral → ensure_index
                     → preload embedding model (fd-level redirect)
 Spec §11   every tool response ends with a short auto-save reminder
@@ -13,13 +17,6 @@ import sys
 
 # ── Spec §4.1 stdio UTF-8 reconfigure ────────────────────────────────────────
 # Must run BEFORE any other import that might write to stdout/stderr.
-# On Windows, Python defaults stdin/stdout/stderr to the active code page
-# (cp932 in Japanese locales), which mangles UTF-8 JSON-RPC bytes coming
-# from MCP clients and turns Japanese / emoji / non-ASCII content into
-# mojibake — and worse, save paths can silently drop a record when the
-# decoder produces lone surrogate halves. Reconfiguring all three streams
-# to UTF-8 at module import time is the same belt the Free build wears
-# (n3mc_hook.py / n3memory.py / n3mc_stop_hook.py).
 for _stream_name in ("stdin", "stdout", "stderr"):
     _stream = getattr(sys, _stream_name, None)
     if _stream is not None and hasattr(_stream, "reconfigure"):
@@ -41,16 +38,13 @@ from mcp.types import TextContent, Tool
 from .config import load_config
 from .database import Database, _DOCKER_HINT
 from .instructions import INSTRUCTIONS
-from .processor import get_model
+from .processor import get_model, purify
 
 _db: Database = None
 
 app = Server("n3mc-workingmemory")
 
 # ── §11 turn-end nudges ──────────────────────────────────────────────────────
-# MCP has no Stop/UserPromptSubmit hook equivalent, so the only way to
-# re-anchor the auto-save discipline mid-turn is to append a short reminder
-# to each tool response.  Three variants match the semantic context:
 
 _NUDGE_AFTER_SEARCH = (
     "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
@@ -75,7 +69,7 @@ _NUDGE_GENERIC = (
 )
 
 
-# ── tool registration (spec §4.3) ────────────────────────────────────────────
+# ── tool registration (spec §4.3 / §4.3.1) ───────────────────────────────────
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
@@ -110,6 +104,23 @@ async def list_tools() -> list[Tool]:
                             "at save time to surface that project's memories above "
                             "unrelated rows. Leave blank to use the server default "
                             "(N3MC_SESSION_ID env var, or per-process UUIDv4)."
+                        ),
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": (
+                            "§4.3.1 — ISO 8601 date or datetime (e.g. '2026-05-01' or "
+                            "'2026-05-01T09:00:00Z'). Only entries saved ON OR AFTER "
+                            "this timestamp are returned. Date-only values are treated "
+                            "as 00:00:00 UTC."
+                        ),
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": (
+                            "§4.3.1 — ISO 8601 date or datetime. Only entries saved "
+                            "ON OR BEFORE this timestamp are returned. Date-only values "
+                            "are treated as 23:59:59 UTC."
                         ),
                     },
                 },
@@ -153,6 +164,16 @@ async def list_tools() -> list[Tool]:
                             "Pass the same value across all calls for one project. "
                             "Leave blank to use the server default "
                             "(N3MC_SESSION_ID env var, or per-process UUIDv4)."
+                        ),
+                    },
+                    "turn_id": {
+                        "type": "string",
+                        "description": (
+                            "§4.3.1 — Optional turn grouping label. "
+                            "Tag all memories saved within one conversation turn with "
+                            "the same turn_id. Enables recall_thread to surface the "
+                            "surrounding context later. Any non-empty string works; "
+                            "a short UUID, timestamp, or 'turn-N' format is recommended."
                         ),
                     },
                 },
@@ -219,6 +240,38 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
+        Tool(
+            name="recall_thread",
+            description=(
+                "§4.3.1 — Retrieve the memories sharing a turn_id plus N entries "
+                "before and after in chronological order. "
+                "Use this when a search_memory hit lacks enough context: pass the "
+                "hit's turn_id here to surface the surrounding conversation thread. "
+                "Returns {status:'not_found'} if turn_id is unknown."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "turn_id": {
+                        "type": "string",
+                        "description": "The turn_id from a search_memory result.",
+                    },
+                    "before": {
+                        "type": "integer",
+                        "description": "Number of earlier entries to include (default 2).",
+                        "minimum": 0,
+                        "maximum": 20,
+                    },
+                    "after": {
+                        "type": "integer",
+                        "description": "Number of later entries to include (default 2).",
+                        "minimum": 0,
+                        "maximum": 20,
+                    },
+                },
+                "required": ["turn_id"],
+            },
+        ),
     ]
 
 
@@ -234,6 +287,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 arguments.get("query", ""),
                 arguments.get("limit"),
                 arguments.get("session_id", ""),
+                arguments.get("since", ""),
+                arguments.get("until", ""),
             )
             if not results:
                 text = "_No memories found._"
@@ -245,19 +300,34 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     score   = r.get("score", 0.0)
                     mem_id  = r.get("id", "")
                     ts      = r.get("timestamp", "")[:19]
+                    tid     = r.get("turn_id", "")
+                    tid_str = f" turn={tid}" if tid else ""
                     lines.append(
-                        f"### {tag_str}[{mem_id}] score={score:.3f} {ts}\n{r['content']}"
+                        f"### {tag_str}[{mem_id}]{tid_str} score={score:.3f} {ts}\n{purify(r['content'])}"
                     )
                 text = "\n\n---\n\n".join(lines)
             return [TextContent(type="text", text=text + _NUDGE_AFTER_SEARCH)]
 
         elif name == "save_memory":
+            raw_imp = arguments.get("importance", 1.0)
+            try:
+                importance_val = float(raw_imp)
+            except (ValueError, TypeError):
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "saved":  False,
+                        "status": "error",
+                        "reason": f"importance must be numeric (got {raw_imp!r})",
+                    }, ensure_ascii=False),
+                )]
             result = _db.save_memory(
                 arguments.get("content", ""),
                 arguments.get("agent_name", ""),
                 arguments.get("owner_id", ""),
-                float(arguments.get("importance", 1.0)),
+                importance_val,
                 arguments.get("session_id", ""),
+                arguments.get("turn_id", ""),
             )
             return [TextContent(
                 type="text",
@@ -277,7 +347,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                     tag     = m.get("tag", "")
                     tag_str = f"{tag} " if tag else ""
                     ts      = m.get("timestamp", "")[:19]
-                    lines.append(f"**{tag_str}[{m['id']}]** {ts}\n{m.get('content', '')}")
+                    lines.append(f"**{tag_str}[{m['id']}]** {ts}\n{purify(m.get('content', ''))}")
                 text = "\n\n---\n\n".join(lines)
             return [TextContent(type="text", text=text + _NUDGE_GENERIC)]
 
@@ -302,6 +372,35 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 text=json.dumps(result, ensure_ascii=False) + _NUDGE_GENERIC,
             )]
 
+        elif name == "recall_thread":
+            if not _db._ok:
+                raise RuntimeError(f"memory backend unreachable. {_DOCKER_HINT}")
+            turn_id = arguments.get("turn_id", "").strip()
+            if not turn_id:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"status": "error", "reason": "turn_id required"})
+                    + _NUDGE_GENERIC,
+                )]
+            before = int(arguments.get("before", 2))
+            after  = int(arguments.get("after", 2))
+            entries = _db.recall_thread(turn_id, before, after)
+            if not entries:
+                text = json.dumps({"status": "not_found", "turn_id": turn_id})
+            else:
+                lines = []
+                for e in entries:
+                    tag     = e.get("tag", "")
+                    tag_str = f"{tag} " if tag else ""
+                    ts      = e.get("timestamp", "")[:19]
+                    tid     = e.get("turn_id", "")
+                    marker  = "▶ " if tid == turn_id else "  "
+                    lines.append(
+                        f"{marker}**{tag_str}[{e['id']}]** {ts}\n{purify(e.get('content', ''))}"
+                    )
+                text = "\n\n---\n\n".join(lines)
+            return [TextContent(type="text", text=text + _NUDGE_GENERIC)]
+
         else:
             return [TextContent(type="text", text=f"Error: unknown tool '{name}'")]
 
@@ -315,13 +414,6 @@ async def _main() -> None:
     global _db
     cfg = load_config()
 
-    # session_id fallback resolution (spec §3.1 / §3.6):
-    #   1. N3MC_SESSION_ID env var
-    #   2. Per-process UUIDv4 (fresh each startup)
-    #
-    # Lite 1.5.0+ applies the same b_session ranking as Pro (match=1.0,
-    # mismatch=0.6). Rows from a previous restart's UUID receive
-    # b_session_mismatch dampening unless pinned via env var or per-call arg.
     cfg["_session_id"] = (
         os.environ.get("N3MC_SESSION_ID", "").strip() or str(uuid.uuid4())
     )
@@ -338,20 +430,7 @@ async def _main() -> None:
         pass
 
     # Spec §3.9 step 4: preload embedding model BEFORE entering the stdio_server
-    # context.  sentence_transformers / HuggingFace write progress bars and HTTP
-    # logs to stdout.  Once stdio_server is active fd 1 is the JSON-RPC channel —
-    # any stray bytes destroy protocol framing (observed symptom: client hangs
-    # forever waiting for the first response).
-    #
-    # `contextlib.redirect_stdout(sys.stderr)` only diverts Python's sys.stdout
-    # wrapper; C extensions, inherited FDs, and subprocess writes still go to
-    # fd 1.  We therefore redirect at the OS level via os.dup2(2, 1) for the
-    # duration of the preload, then restore fd 1 before mcp.run() takes over.
-    #
-    # A background-thread preload is unsafe: while the worker is mid-load with
-    # fd 1 redirected, the asyncio main thread can begin writing JSON-RPC responses
-    # that land on stderr — disconnecting the client.  Synchronous + fd-level is
-    # the only safe combination.
+    # context to prevent stray stdout bytes from corrupting the JSON-RPC channel.
     try:
         saved_fd = os.dup(1)
         try:

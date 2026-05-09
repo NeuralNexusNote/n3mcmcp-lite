@@ -206,4 +206,31 @@ BEHAVIORAL RULES
 
    Confirm the session_id with the user before calling — this delete
    is irreversible.
+
+10. THREAD CONTEXT RETRIEVAL — `recall_thread` (§4.3.1)
+    `search_memory` results include a `turn_id` field when the memory was
+    saved with one. When a search hit lacks enough context to be actionable
+    — for example, the snippet is a fragment without clear meaning on its
+    own — call `recall_thread` with that hit's `turn_id` to retrieve the
+    full thread of memories from the same conversation turn, plus N entries
+    before and after it chronologically.
+
+    Usage pattern:
+      1. `search_memory` returns a hit with `turn=<some-id>` in the header.
+      2. You judge the snippet insufficient for answering the user.
+      3. Call `recall_thread(turn_id="<some-id>", before=2, after=2)`.
+      4. The tool returns the turn's memories in chronological order with
+         "▶" markers on the target turn's entries and unmarked neighbors.
+
+    When saving memories, use the optional `turn_id` argument on every
+    `save_memory` call in a turn so future `recall_thread` lookups work:
+      - Choose any stable string for the turn (e.g. a short UUID, or
+        "turn-1", "turn-2", …). Use the SAME value for all saves within
+        one turn.
+      - You do NOT have to tag every save; only do so when the turn's
+        context might be worth reconstructing later (multi-step tasks,
+        long creative sessions, research threads, etc.).
+
+    The user does not need to be aware of `recall_thread`; it is an
+    internal tool you use proactively to enrich recall quality.
 """

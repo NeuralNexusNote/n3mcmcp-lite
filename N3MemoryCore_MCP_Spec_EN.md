@@ -143,7 +143,7 @@ n3memorycore-mcp-lite/
 ├── n3mc_mcp/                       # Python package
 │   ├── __init__.py                 # Version marker
 │   ├── __main__.py                 # Entry point: python -m n3mc_mcp
-│   ├── server.py                   # MCP server definition + 6 tools
+│   ├── server.py                   # MCP server definition + 7 tools (6 base + recall_thread §4.3.1)
 │   ├── instructions.py             # Behavioral instructions delivered at initialize
 │   ├── database.py                 # Redis layer: index, CRUD, TTL, dedup
 │   ├── processor.py                # Embedding, ranking, CJK tokenization, reranker
@@ -576,12 +576,12 @@ The server advertises:
 
 ### 4.3 Tools
 
-Six tools are exposed via `tools/list` (same names as the forthcoming Pro build, except `delete_memories_by_session` which is Lite-only — Pro will keep only the per-record `delete_memory` to minimize accidental-deletion risk on a persistent store):
+Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §4.3.1; same names as the forthcoming Pro build, except `delete_memories_by_session` which is Lite-only — Pro will keep only the per-record `delete_memory` to minimize accidental-deletion risk on a persistent store):
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| `search_memory` | `query: string, limit?: int, session_id?: string` | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string` | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns JSON status including `ttl_seconds`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
+| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | Body ≤ `chunk_threshold`: exact + near-duplicate dedup, then HSET + EXPIRE. Returns `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
 | `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). |
 | `delete_memory` | `id: string`                              | If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk with matching `parent_id`. Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
 | `delete_memories_by_session` | `session_id: string`         | Bulk-delete every standalone memory, parent document, child chunk, and sha guard tied to the given `session_id`, scoped to the configured `owner_id`. Response: `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. When nothing matches: `{"status":"not_found", "session_id": ..., "deleted": 0}` (a re-call is a safe no-op). **Irreversible — confirm `session_id` with the user before calling.** Lite-only (see [§10 Test 6](#10-self-evaluation-evidence-report)). |
@@ -622,6 +622,8 @@ Because MCP has no equivalent of Claude Code's `UserPromptSubmit` / `Stop` hooks
 
 The instructions require the LLM to:
 
+0. **Pro coexistence policy** — When `n3mc-longtermmemory` (N3MemoryCore Pro, persistent SQLite+sqlite-vec) is also registered in the same session, treat Lite as working memory (in-session progress notes, temporary debug state, disposable intermediate results) and Pro as the canonical long-term store (user profile / preferences, project specs, architecture decisions, world-building, API contracts, research summaries — anything worth keeping across sessions). When in doubt, prefer Pro. With Pro connected, the TTL warning (rule 7) is generally unnecessary — simply route long-lived content to Pro instead. Without Pro, this server is the sole store: accept all content and activate rule 7 when the user signals permanence. Do NOT double-save the same fact to both servers.
+
 1. **Search first, then acknowledge when you recall** — call `search_memory` at the start of every user turn with a concise query reflecting the user's intent. When the retrieved snippets actually shape the reply (i.e. you are recalling information saved in an earlier turn), open the reply with a short acknowledgment **in the user's language**, e.g. Japanese 「前回の回答がメモリに保存されています。」 or English "Pulling this from earlier memory in this session." **If no relevant memory was found, or if retrieval did not influence the answer, do not announce anything.** Never announce the mere act of searching — only the act of recalling.
 2. **Save every substantive exchange — automatic, no permission asked** — saving is silent and automatic. The user should NEVER have to say "save this" or "remember that"; the LLM saves by default and does NOT ask for confirmation. After each meaningful turn, call `save_memory` to persist (a) the user's paraphrased intent, (b) **the LLM's own substantive output** — decisions, plans, and especially any creative or generated content the user may refer back to later: world-building, character settings, design sketches, code architecture, research summaries, outlines (if more than a sentence or two of work went into producing it, save it), and (c) key facts, preferences, and unresolved questions. One `save_memory` call per distinct fact, 50–200 chars each (long content → rule 3). Duplicates are auto-rejected server-side, so err on the side of saving more. **Note**: the Lite text explicitly reminds the LLM that entries vanish after 7 d — it is a rolling scratchpad, not a permanent archive.
 3. **Long content — save the full body in one call (verbatim recall)** — when the turn produces OR receives a long body the user may want back verbatim — a user-pasted spec / article / log / code dump, **OR a long creative setting / world / character sheet / design doc the LLM just generated** — pass the FULL text to a single `save_memory` call. The server automatically creates a parent document + chunks, indexes chunks for search, and returns the full parent body on recall (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Rough threshold: **> ~400 chars → save as one full-body call**. Shorter summarizable content → rule 2 (multiple short facts). Do NOT split a long verbatim-worthy body into many short summaries — that destroys recall fidelity.
@@ -630,6 +632,10 @@ The instructions require the LLM to:
 6. **Respect explicit requests** — honor "don't save this" and "forget that" (use `delete_memory`).
 7. **Inform the user about the 7-day TTL when they expect permanence** — the TTL is visible to the LLM (this INSTRUCTIONS block, the `search_memory` tool description, and the `ttl_seconds` field on every `save_memory` response) but is **invisible to the human user**. Default behavior remains silent auto-save (rule 2) — do NOT mention TTL on every save. However, when the user's message signals an expectation of long-term retention — explicit permanence phrases ("remember this forever", "don't forget", "save permanently", 「ずっと覚えておいて」「永続的に保存して」), a long setting / spec / code dump / world-building / character sheet the user obviously invested in, or a reference back to content saved more than ~5 days ago — add ONE short sentence in the user's language reminding them that Lite memories auto-expire 7 days after save, noting that the **Pro build (sqlite-vec backed, coming soon)** will offer persistence, and suggesting external backup in the meantime. Save anyway; do not ask permission. Emit the reminder ONCE per distinct long-term signal, not once per turn and not once per save. Rationale: without this rule, the LLM silently persists content that the user believes is permanent, and the user only discovers the loss when recall fails mid-project.
 8. **Respect the `skip_code_blocks` server policy** — when `save_memory` returns `{"status": "skipped_code", "saved": false}`, the server is configured to reject any payload containing a triple-backtick fence (see [§6](#6-configuration)). This mirrors the FastAPI-era N3MemoryCore's code-exclusion behavior for users who intentionally keep code out of memory. Do NOT retry the same payload; either save a prose description of what the code does, or skip saving for that turn. Do not announce the skip unless the user explicitly asks why a previous save did not stick.
+
+9. **Bulk cleanup via `delete_memories_by_session`** — Use this to wind down a finished project or remove test-run noise before TTL expiry, keeping search results clean. The operation is **irreversible** — confirm the `session_id` with the user before calling.
+
+10. **Thread context retrieval — `recall_thread` (§4.3.1)** — When a `search_memory` hit snippet lacks enough context to be actionable, pass the hit's `turn_id` to `recall_thread` to retrieve the surrounding conversation thread in chronological order. When saving memories, tag all `save_memory` calls within a turn with the same `turn_id` argument to enable future thread recall (any stable string works: short UUID, timestamp, `"turn-N"`, etc.). End users do not need to invoke this tool directly — it is an internal enrichment tool the LLM uses proactively.
 
 The full text is in [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py).
 
@@ -769,7 +775,7 @@ Restart the client after editing the config. Ensure Redis Stack is running *befo
 
 By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3mc-workingmemory` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
 
-**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds the six `mcp__n3mc-workingmemory__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing and leaves unrelated fields untouched. The `hooks.json` command tries `python` → `py` (Windows Python Launcher) → `python3` in a `||` fallback chain, so the hook works as long as any one of these is on `PATH`. It only exits non-zero — surfacing in Claude Code's `/plugins` Errors tab — when **all three** are missing, avoiding silent failure.
+**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds the seven `mcp__n3mc-workingmemory__*` tools to `~/.claude/settings.json`. It only writes when at least one entry is missing and leaves unrelated fields untouched. The `hooks.json` command tries `python` → `py` (Windows Python Launcher) → `python3` in a `||` fallback chain, so the hook works as long as any one of these is on `PATH`. It only exits non-zero — surfacing in Claude Code's `/plugins` Errors tab — when **all three** are missing, avoiding silent failure.
 
 The same hook also performs a **`uvx` pre-flight check**: the plugin manifest ([`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)) launches the MCP server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so a missing `uvx` would otherwise surface only as an opaque `ENOENT` in the MCP launcher. The hook calls `shutil.which("uvx")` and, if not found, writes a **bilingual install hint** to stderr (`pipx install uv`, `curl -LsSf https://astral.sh/uv/install.sh | sh`, plus the docs URL) so the user sees an actionable message in the `/plugins` Errors tab. The hook still exits 0 because the permission install itself succeeded.
 
@@ -784,7 +790,8 @@ The same hook also performs a **`uvx` pre-flight check**: the plugin manifest ([
       "mcp__n3mc-workingmemory__list_memories",
       "mcp__n3mc-workingmemory__delete_memory",
       "mcp__n3mc-workingmemory__delete_memories_by_session",
-      "mcp__n3mc-workingmemory__repair_memory"
+      "mcp__n3mc-workingmemory__repair_memory",
+      "mcp__n3mc-workingmemory__recall_thread"
     ]
   }
 }
@@ -857,12 +864,12 @@ n3mcmcp-lite/
 | `TestEmbedding` | `passage:` / `query:` prefixes, vector dimensionality, same-text similarity | Embedding |
 | `TestEncodingSafety` | Lone-surrogate strip on `str` / `list` / `dict` / `None`, all-surrogate input collapses to empty, post-strip `.encode("utf-8")` succeeds | Encoding safety (§3.13) |
 
-### Layer 3: `tests/test_server.py` (18 tests)
+### Layer 3: `tests/test_server.py` (19 tests)
 
 | Test class | What it covers | Area |
 |---|---|---|
-| `TestToolRegistration` | Six tools registered, schema types, description non-empty | MCP registration |
-| `TestSaveAndSearch` | Save→search round-trip, exact-duplicate rejection, empty-content rejection | Single chunk |
+| `TestToolRegistration` | Seven tools registered (incl. `recall_thread`), schema types, description non-empty | MCP registration |
+| `TestSaveAndSearch` | Save→search round-trip, exact-duplicate rejection, empty-content rejection, code-block purification (§10.3) | Single chunk |
 | `TestListAndDelete` | Three recent entries listed, delete non-existent id | List / delete |
 | `TestRepair` | `repair_memory` on empty DB → ok | Repair |
 | `TestUnknownTool` | Unknown tool name → error string | Dispatch |
@@ -1004,8 +1011,8 @@ Set the model to **Sonnet** and paste:
 ```
 Please build n3mcmcp-lite from this spec (N3MemoryCore_MCP_Spec_EN.md).
 Redis Stack is already running in Docker. Run it as an MCP stdio server
-and register the six tools (save_memory / search_memory / list_memories
-/ delete_memory / delete_memories_by_session / repair_memory).
+and register the seven tools (save_memory / search_memory / list_memories
+/ delete_memory / delete_memories_by_session / repair_memory / recall_thread).
 ```
 
 Sonnet handles package scaffolding, RediSearch index creation, MCP tool registration, and stdio launch automatically. When it finishes, move on to phase 2 ("it runs" ≠ "it matches the spec" — do not stop here).

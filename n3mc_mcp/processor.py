@@ -42,7 +42,9 @@ _CJK_RANGES = [
 ]
 
 # Spec §3.7 regex constants.
-_CODE_BLOCK_RE  = re.compile(r"```[\s\S]*?```")
+# Match a closed fence (``` ... ```) OR an unclosed fence that reaches the
+# end of the string (e.g. content truncated at a chunk boundary).
+_CODE_BLOCK_RE  = re.compile(r"```[\s\S]*?(?:```|\Z)")
 _PUNCT_STRIP_RE = re.compile(r'[,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?`]')
 _FTS_SPECIAL_RE = re.compile(r'([,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?])')
 
@@ -257,23 +259,66 @@ def purify(text: str) -> str:
 
 # ── chunking ─────────────────────────────────────────────────────────────────
 
+_MIN_CHUNK_CHARS = 20  # tail chunks smaller than this are dropped (parent stores verbatim)
+
+# Ordered by priority: prefer splitting at the earliest (highest-priority)
+# natural boundary found within the lookback window. Language-agnostic:
+# paragraph / line breaks cover all scripts; CJK sentence terminators
+# (。！？…) avoid mid-sentence cuts in space-less languages.
+_SOFT_BREAKS = (
+    "\n\n",                      # paragraph break  (highest priority)
+    "\n",                        # line break
+    ". ", "! ", "? ",            # ASCII sentence ends
+    "。", "！", "？", "…",      # CJK / universal sentence ends
+    " ", "\t",                   # word boundary    (lowest priority)
+)
+
+
 def chunk_text(text: str, threshold: int, overlap: int) -> list[str]:
-    """Sliding-window chunker (spec §3.11).
+    """Sliding-window chunker with soft-boundary awareness (spec §3.11).
 
     Bodies at or below *threshold* chars are returned as a single-element list.
-    Longer bodies are split into windows of *threshold* chars with *overlap*
-    chars of backward step so adjacent chunks share context.
+    Longer bodies are split at the best natural boundary found within the last
+    *overlap* chars of each window (paragraph > line > sentence > word).
+    When no soft break exists in that lookback zone a hard cut is made and the
+    next window begins *overlap* chars before the cut (shared-context overlap).
+
+    After a soft break the next window starts immediately after the break
+    character(s) — no artificial overlap is added because the break is already
+    a clean semantic boundary.
+
+    Tail chunks shorter than _MIN_CHUNK_CHARS are discarded: the parent document
+    stores the full body verbatim, so a tiny tail chunk adds near-zero search
+    value while producing a low-quality embedding.
     """
     if len(text) <= threshold:
         return [text]
     chunks: list[str] = []
     start = 0
     while start < len(text):
-        end = start + threshold
-        chunks.append(text[start:end])
-        if end >= len(text):
+        end = min(start + threshold, len(text))
+        if end == len(text):
+            # Last (tail) chunk: only add if large enough or it's the only chunk.
+            chunk = text[start:end]
+            if len(chunk) >= _MIN_CHUNK_CHARS or not chunks:
+                chunks.append(chunk)
             break
-        start = end - overlap
+        # Search for the best natural break within the lookback window.
+        lookback_start = max(start + 1, end - overlap)
+        cut = -1
+        for sep in _SOFT_BREAKS:
+            pos = text.rfind(sep, lookback_start, end)
+            if pos != -1:
+                cut = pos + len(sep)
+                break
+        if cut != -1:
+            # Soft cut: clean semantic boundary — start fresh after it.
+            chunks.append(text[start:cut])
+            start = cut
+        else:
+            # Hard cut: no break found — overlap next window for context.
+            chunks.append(text[start:end])
+            start = end - overlap
     return chunks
 
 
@@ -303,11 +348,15 @@ def keyword_relevance(bm25_score: float, max_bm25: float, threshold: float) -> f
 
     Scores below *threshold* are treated as zero; abs() mirrors Pro's FTS5
     which can return negative values.
+
+    Denominator is max(max_bm25, 1e-9) so that when all BM25 scores are < 1.0
+    the keyword channel contributes its full 0.3 weight rather than being
+    artificially dampened by the old max(1.0, …) floor.
     """
     score = abs(bm25_score)
     if score < threshold:
         return 0.0
-    return score / max(1.0, max_bm25)
+    return score / max(max_bm25, 1e-9)
 
 
 def b_local(stored_importance: float, access_count: int, cfg: dict) -> float:
@@ -373,6 +422,10 @@ def lexical_rerank(
         content_tokens |= set(cjk_bigram_expand(content_lower).split())
         coverage = len(query_tokens & content_tokens) / max(1, len(query_tokens))
         phrase_bonus = phrase_weight if query_lower in content_lower else 0.0
-        r["score"] = r.get("score", 0.0) + coverage * weight + phrase_bonus
+        # Short-document dampening: docs shorter than 50 chars receive a
+        # proportional fraction of the lexical boost to reduce false-positive
+        # promotion of tiny snippets that happen to contain all query tokens.
+        length_factor = min(1.0, len(content_lower) / 50) if len(content_lower) < 50 else 1.0
+        r["score"] = r.get("score", 0.0) + (coverage * weight + phrase_bonus) * length_factor
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
