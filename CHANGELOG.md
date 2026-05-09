@@ -11,6 +11,41 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.7.0] — 2026-05-10
+
+Score-improvement release: soft chunking, BM25 fix, per-chunk SHA dedup
+guards, and a three-pass `repair_memory`. No MCP API surface changes.
+
+### Added
+- **Soft chunking** (`processor.py`): `chunk_text()` now prefers
+  paragraph / line / sentence / word break boundaries over hard character
+  cuts; no overlap is emitted after a soft break (clean semantic start).
+  `_SOFT_BREAKS` covers ASCII and CJK terminators.
+- **Per-chunk SHA guards** (`database.py`): `_save_parent_chunks()` runs
+  MGET before each write and skips already-indexed chunks; the guard key
+  is written atomically in the same pipeline. `delete_memory()` and
+  `delete_by_session()` now cascade-delete `mem:sha:` guards alongside
+  chunk keys.
+- **`repair_memory()` three new scan passes**:
+  - (A) orphaned `mem:sha:` guards (target `mem:` key gone)
+  - (B) orphaned chunk keys (`doc:` parent gone)
+  - (C) orphaned `docsha:` guards (`doc:` key gone)
+  Returns counts per pass; index rebuild retained.
+- New test suite `tests/test_cross_session.py` (cross-session isolation,
+  112 tests total).
+
+### Fixed
+- **BM25 channel weight suppression**: denominator was `max(1.0, max_bm25)`,
+  which clipped the BM25 contribution to zero when all raw scores were < 1.0.
+  Changed to `max(max_bm25, 1e-9)` so the full 0.3 weight is applied.
+- **`save_memory` unhandled exception on invalid `importance`**: bare
+  `float()` replaced with `try/except`; invalid values now return
+  `{"saved": false, "status": "error", "reason": "…"}` instead of a 500.
+
+### Docs
+- MCP-Lite spec synced with Retrieval Extensions v1 addendum
+  (`recall_thread`, §4.3.1, `status:saved`, §5 rules 0/9/10).
+
 ## [1.6.2] — 2026-05-06
 
 ### Documentation

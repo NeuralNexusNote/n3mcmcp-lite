@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "n3memorycore-mcp-lite"
-version = "1.6.2"
+version = "1.7.0"
 description = "N3MemoryCore MCP Lite - ephemeral 7-day hybrid-search memory over Redis Stack"
 readme = { file = "README.md", content-type = "text/markdown" }
 license = { file = "LICENSE" }
