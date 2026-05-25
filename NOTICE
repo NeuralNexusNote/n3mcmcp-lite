@@ -19,7 +19,7 @@ each under their own license terms:
   - Redis Stack / RediSearch (runtime only)   — Redis Source Available License
                                                 (user-provided, not bundled)
   - sentence-transformers                     — Apache-2.0
-  - intfloat/e5-base-v2 embedding model       — MIT (Hugging Face download)
+  - intfloat/multilingual-e5-base model       — MIT (Hugging Face download)
   - uuid-utils                                — MIT
   - platformdirs                              — MIT
   - numpy                                     — BSD-3-Clause

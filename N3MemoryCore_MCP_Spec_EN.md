@@ -123,7 +123,7 @@ The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Market
 
 > **⚠️ Python check**: Before installing, run `python --version` to verify Python 3.10+ is available.
 
-> **⚠️ First-run download**: `sentence-transformers` downloads the `e5-base-v2` model (~440 MB) on first tool use. The server will appear unresponsive during this time — this is expected. Subsequent starts complete in seconds once cached.
+> **⚠️ First-run download**: `sentence-transformers` downloads the `multilingual-e5-base` model (~440 MB) on first tool use. The server will appear unresponsive during this time — this is expected. Subsequent starts complete in seconds once cached.
 
 > **Important: Character Limits (Design Constraints)**
 > - Auto-save per entry: **50–200 characters recommended** (one fact per entry).
@@ -181,7 +181,7 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 
 ### 3.2 Embeddings
 
-- Model: `intfloat/e5-base-v2` / Vector: `float[768]`
+- Model: `intfloat/multilingual-e5-base` / Vector: `float[768]`
 - Always specify `normalize_embeddings=True` at encoding time to guarantee L2-normalized vectors (norm=1). This matters even with cosine distance: an unnormalized input breaks the `(1 − cosine_distance)` ↔ similarity identity.
 - **Input Prefixes (Required)**: Without prefixes, this model's accuracy degrades significantly:
 
@@ -368,7 +368,7 @@ Only if both checks pass, proceed with the HSET + EXPIRE + sha1-guard pipeline.
 **(B) Multi-chunk path** (body > `chunk_threshold`): dedup runs at the **parent-document level** against the full body.
 
 1. **Parent-level exact dedup (O(1))** — `EXISTS docsha:<sha1(full_text)>`. If the key exists, return `{"status": "duplicate", "saved": false, "parent_id": "<existing>"}`.
-2. **Parent-level near-duplicate (semantic) dedup** — embed the full body (e5-base-v2 truncates to ~512 tokens, which is enough to fingerprint the document's opening), run the same KNN=5 near-dedup used by (A) against the indexed chunk space. If a prior chunk's `cos_sim >= dedup_threshold` (default `0.95`) for the same `owner_id`, return `{"status": "near_duplicate", "saved": false, "similarity": <value>}`. This makes long-content dedup semantics symmetric with short-content (A).
+2. **Parent-level near-duplicate (semantic) dedup** — embed the full body (multilingual-e5-base truncates to ~512 tokens, which is enough to fingerprint the document's opening), run the same KNN=5 near-dedup used by (A) against the indexed chunk space. If a prior chunk's `cos_sim >= dedup_threshold` (default `0.95`) for the same `owner_id`, return `{"status": "near_duplicate", "saved": false, "similarity": <value>}`. This makes long-content dedup semantics symmetric with short-content (A).
 3. Chunks themselves are **not** given per-chunk sha guards and bypass per-chunk near-duplicate checks. Reason: sliding-window chunks are overlapping by design and would otherwise reject each other.
 
 If both parent-level checks pass, a single `save_memory` call writes, in order:
@@ -395,7 +395,7 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
    - Idempotent: safe to call on every boot.
 
 4. **Preload embedding model** (`get_model()`):
-   - Load `intfloat/e5-base-v2` into memory so the first tool call is not slowed by the one-time model load.
+   - Load `intfloat/multilingual-e5-base` into memory so the first tool call is not slowed by the one-time model load.
    - **Non-fatal**: if the model fails to load (e.g. offline, HF cache absent), log a warning and continue. The model will be retried lazily on first `save_memory` / `search_memory`.
 
 Steps 1 and 3 must complete before the server accepts tool calls. Steps 2 and 4 are best-effort — an unreachable Redis does not stop the process but disables the tools until Redis becomes reachable again.
@@ -1000,7 +1000,7 @@ All three extensions are additive — none of them require changes to the Redis 
 > 3. Confirm `~/.claude/settings.json` already has the `mcp__n3mc-workingmemory__*` allow block (see [§8 tool auto-allow](#tool-auto-allow-claude-code-specific)).
 > 4. Confirm Redis Stack is up (`docker ps`; if not, `docker start redis-stack` or `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`).
 > 5. **Fully exit and relaunch Claude Code.** On **Windows**: closing the window with × or running `/exit` can leave background processes alive — open **Task Manager** and end every `Claude` / `claude` process (including the child `python.exe` whose command line is `n3mc-workingmemory.exe`).
-> 6. The first tool call after relaunch takes 2–10 minutes if the e5-base-v2 (~440 MB) HF cache is missing. With the cache warm, `initialize` finishes in ~17 s (see [§3.9 step 4](#39-startup-sequence-and-self-recovery)).
+> 6. The first tool call after relaunch takes 2–10 minutes if the multilingual-e5-base (~440 MB) HF cache is missing. With the cache warm, `initialize` finishes in ~17 s (see [§3.9 step 4](#39-startup-sequence-and-self-recovery)).
 
 ---
 

@@ -28,7 +28,7 @@ pip install -e ".[dev]"
 ```
 
 The first run of any test that touches the embedding model will download
-~440 MB of `intfloat/e5-base-v2` weights into `~/.cache/huggingface/`.
+~1.1 GB of `intfloat/multilingual-e5-base` weights into `~/.cache/huggingface/`.
 This is a one-time cost.
 
 ---
@@ -79,7 +79,7 @@ Output goes to `dist/`. The wheel is `py3-none-any` (pure Python).
 - **Spec is the contract**: `N3MemoryCore_MCP_Spec_EN.md` (and JP) define
   the wire-level behavior. If you change observable behavior, update
   the spec in the same PR.
-- **No silent embedding-model swaps**: `intfloat/e5-base-v2` and the
+- **No silent embedding-model swaps**: `intfloat/multilingual-e5-base` and the
   768-dim FLAT vector index are pinned. Changing them requires a major
   version bump and a migration story.
 - **Pipeline atomicity is non-negotiable**: every `save_memory` writes
@@ -144,7 +144,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-初回の埋め込みモデル絡みのテストで `intfloat/e5-base-v2` の重み (~440 MB)
+初回の埋め込みモデル絡みのテストで `intfloat/multilingual-e5-base` の重み (~1.1 GB)
 が `~/.cache/huggingface/` にダウンロードされます。
 
 ### 2. テスト実行
@@ -179,7 +179,7 @@ python -m twine check dist/*
 
 - **仕様書が契約**：`N3MemoryCore_MCP_Spec_JP.md`（および EN）が外向き
   挙動を定義する。観測可能な挙動を変えたら同じ PR で仕様書も更新。
-- **埋め込みモデルの暗黙差し替え禁止**：`intfloat/e5-base-v2` と
+- **埋め込みモデルの暗黙差し替え禁止**：`intfloat/multilingual-e5-base` と
   768 次元 FLAT ベクトルインデックスは pin。変更にはメジャー版バンプと
   マイグレーション計画が必要。
 - **パイプラインのアトミック性は絶対**：`save_memory` の HSET + EXPIRE

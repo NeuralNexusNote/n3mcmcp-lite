@@ -122,7 +122,7 @@ Lite は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリ�
 
 > **⚠️ Python 確認**：インストール前に `python --version` で 3.10+ を確認すること。
 
-> **⚠️ 初回ダウンロード**：`sentence-transformers` が初回ツール使用時に `e5-base-v2` モデル（~440 MB）をダウンロードします。その間サーバーは無応答に見えますが、これは想定動作です。キャッシュ後は数秒で起動します。
+> **⚠️ 初回ダウンロード**：`sentence-transformers` が初回ツール使用時に `multilingual-e5-base` モデル（~440 MB）をダウンロードします。その間サーバーは無応答に見えますが、これは想定動作です。キャッシュ後は数秒で起動します。
 
 > **重要：文字数上限（設計制約）**
 > - 1 エントリの自動保存：**50–200 文字推奨**（1 エントリ 1 事実）。
@@ -180,7 +180,7 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 
 ### 3.2 埋め込み
 
-- モデル：`intfloat/e5-base-v2` / ベクトル：`float[768]`
+- モデル：`intfloat/multilingual-e5-base` / ベクトル：`float[768]`
 - エンコード時は必ず `normalize_embeddings=True` を指定し、L2 正規化ベクトル（ノルム=1）を保証する。コサイン距離を使う場合でも重要：正規化されていない入力は `(1 − cosine_distance)` ↔ 類似度 の等価を崩す。
 - **入力プレフィックス（必須）**：プレフィックスなしでは本モデルの精度は著しく低下します：
 
@@ -364,7 +364,7 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 **(B) マルチチャンクパス**（本文が `chunk_threshold` 超）：重複判定は**親ドキュメント全文**のレベルで行う。
 
 1. **親レベル完全一致（O(1)）** — `EXISTS docsha:<sha1(full_text)>`。キーが存在すれば `{"status": "duplicate", "saved": false, "parent_id": "<既存>"}` を返す。
-2. **親レベル近似（意味的）重複** — 本文全体を埋め込み（e5-base-v2 は約 512 トークンで切り詰めるが、文書冒頭のフィンガープリントとしては十分）、(A) と同じ KNN=5 近似 dedup をインデックス済みチャンク空間に対して実行する。同一 `owner_id` の既存チャンクで `cos_sim >= dedup_threshold`（既定 `0.95`）となるものがあれば `{"status": "near_duplicate", "saved": false, "similarity": <値>}` を返す。これにより長文 dedup 意味論は短文 (A) と対称になる。
+2. **親レベル近似（意味的）重複** — 本文全体を埋め込み（multilingual-e5-base は約 512 トークンで切り詰めるが、文書冒頭のフィンガープリントとしては十分）、(A) と同じ KNN=5 近似 dedup をインデックス済みチャンク空間に対して実行する。同一 `owner_id` の既存チャンクで `cos_sim >= dedup_threshold`（既定 `0.95`）となるものがあれば `{"status": "near_duplicate", "saved": false, "similarity": <値>}` を返す。これにより長文 dedup 意味論は短文 (A) と対称になる。
 3. チャンク側は個別の sha ガードを付けず、個別近似 dedup もバイパスする。理由：スライディングウィンドウで生成される隣接チャンクは設計上ほぼ重複しており、個別に dedup すると自分自身を却下してしまう。
 
 親レベル両チェックを通過した場合、単一 `save_memory` 応答内で：
@@ -391,7 +391,7 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
    - 冪等：毎起動ごと呼んでも安全。
 
 4. **埋め込みモデル事前ロード**（`get_model()`）：
-   - `intfloat/e5-base-v2` をメモリにロードし、初回ツール呼び出しが一度だけのモデルロードで遅くならないようにする。
+   - `intfloat/multilingual-e5-base` をメモリにロードし、初回ツール呼び出しが一度だけのモデルロードで遅くならないようにする。
    - **非致命的**：ロード失敗（オフライン・HF キャッシュ未生成等）時は警告を出して続行。初回 `save_memory` / `search_memory` で遅延リトライする。
 
 手順 1 と 3 は完了してからでないとツール呼び出しを受け付けない。手順 2 と 4 はベストエフォート — Redis 到達不可はプロセスを止めないが、Redis が戻るまでツールは無効。
@@ -991,7 +991,7 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 > 3. `~/.claude/settings.json` に `mcp__n3mc-workingmemory__*` の allow ブロックを追加済みか確認（[§8 ツール自動許可](#ツール自動許可claude-code-固有)）
 > 4. Redis Stack が起動していること（`docker ps` で確認、無ければ `docker start redis-stack` または `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`）
 > 5. Claude Code を**完全に終了 → 再起動**（**Windows**：右上 × ボタンや `/exit` だけでは残ることがあるため、**タスクマネージャ**で `Claude` / `claude` 関連プロセスおよび子の `python.exe`（`n3mc-workingmemory.exe` 系）をすべて終了させる）
-> 6. 再起動後の初回ツール呼び出しは e5-base-v2（~440 MB）の HF キャッシュ未生成なら 2〜10 分。キャッシュ済みなら `initialize` は ~17 秒（[§3.9 step 4](#39-起動シーケンスと自己回復)）で完了する
+> 6. 再起動後の初回ツール呼び出しは multilingual-e5-base（~440 MB）の HF キャッシュ未生成なら 2〜10 分。キャッシュ済みなら `initialize` は ~17 秒（[§3.9 step 4](#39-起動シーケンスと自己回復)）で完了する
 
 ---
 

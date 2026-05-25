@@ -89,7 +89,7 @@ Step 2 終了時点で `n3mc-workingmemory` コマンドが `PATH` に通りま�
 これだけ。接続すると、サーバの振る舞い指示が引き継ぎ、`search_memory`
 が各ターン先頭で、`save_memory` が応答後に自動で呼ばれます。
 
-> 初回呼び出しのみ 30〜60 秒かかります — `intfloat/e5-base-v2`
+> 初回呼び出しのみ 30〜60 秒かかります — `intfloat/multilingual-e5-base`
 > （~400 MB）が `~/.cache/huggingface/` にダウンロードされるため。
 > 2 回目以降は数秒で起動。
 
@@ -136,7 +136,7 @@ Redis に接続できない場合はサーバーが起動を拒否し、`uv` が
 - 🤖 **マルチエージェント対応** — 複数の AI エージェントが 1 つの Redis を共有。`b_local` と `b_session` のバイアスでプロジェクトの記憶を優先しつつ、他のエージェントの知識も検索できます
 - 🏢 **チーム・組織にも対応** — Redis を共有サーバーに配置し、`N3MC_REDIS_URL` をチーム全員で同じ URL に向ければ、記憶を共有できます（⚠️ Redis 自体のアクセス制御・認証が必要）
 - 🧹 **揮発性は設計上の特長** — 7 日で自動蒸発するため、失敗した試行や破棄された設計案が次タスクに流出しません。`docker restart redis-stack` で即座に一掃可能
-- 💰 **トークン消費を削減** — 過去の文脈を再説明する必要がなくなります。記憶検索はローカル embedding（`intfloat/e5-base-v2`）で行うため Claude のトークンを消費せず、的確な文脈注入により修正のやり取りも減少します
+- 💰 **トークン消費を削減** — 過去の文脈を再説明する必要がなくなります。記憶検索はローカル embedding（`intfloat/multilingual-e5-base`）で行うため Claude のトークンを消費せず、的確な文脈注入により修正のやり取りも減少します
 
 ## 仕組み
 
@@ -201,7 +201,7 @@ Claude Code には標準の auto-memory 機能（`~/.claude/projects/.../memory/
 `n3memorycore-mcp-lite` は、Claude をはじめとする任意の MCP 対応
 クライアントに **短時間の** 会話メモリを与えるローカル専用 MCP サーバー
 です。Redis Stack 上に BM25 全文検索インデックスと 768 次元ベクトル
-インデックス（[`intfloat/e5-base-v2`](https://huggingface.co/intfloat/e5-base-v2)）
+インデックス（[`intfloat/multilingual-e5-base`](https://huggingface.co/intfloat/multilingual-e5-base)）
 の両方を持ち、ハイブリッドランキングで結果を返します。
 
 全ての処理はユーザー端末上で完結します。API コールもクラウド保存も
@@ -311,7 +311,7 @@ pip install -e .
 > 2. **pypi.org** — `uvx --from n3memorycore-mcp-lite`（または
 >    `pip install`）がパッケージを解決するとき。
 > 3. **huggingface.co** — サーバの初回起動時に
->    `intfloat/e5-base-v2`（~400 MB）が `~/.cache/huggingface/` に
+>    `intfloat/multilingual-e5-base`（~400 MB）が `~/.cache/huggingface/` に
 >    ダウンロードされるとき。
 >
 > 3 つとも、オフライン状態では明示的かつ時間制限のあるエラーで失敗
@@ -501,7 +501,7 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
 | **NFKC 正規化** | SHA / 埋め込み / BM25 の前に互換形を畳み込む | `ｱﾙﾌｧ` ↔ `アルファ`、`１２３` ↔ `123`、`ﬁ` ↔ `fi` |
 | **バイグラム BM25 サイドチャネル** | 区切り文字を持たない文字体系で重複バイグラムを発行 | `記憶装置` → `記憶 憶装 装置`。韓国語 (`안녕하세요`)、タイ語 (`สวัสดี`)、ラオ語、ミャンマー語、クメール語にも適用 |
 | **発音区別フォールド** | Latin/Greek/Cyrillic の語は結合マークなしの形でも索引化 | `café` が `cafe` にヒット、`Ångström` が `Angstrom` にヒット |
-| **e5-base-v2 埋め込み** | 100 言語以上にまたがる多言語意味空間 | 言語横断パラフレーズ検索 |
+| **multilingual-e5-base 埋め込み** | 100 言語以上にまたがる多言語意味空間 | 言語横断パラフレーズ検索 |
 
 これらは `save_memory` と `search_memory` の呼び出しごとに自動で走り
 ます。生の `content` フィールドは書き換えません — verbatim 復元

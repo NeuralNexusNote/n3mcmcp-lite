@@ -1,7 +1,7 @@
 """
 Embedding, scoring, text-processing utilities.
 
-Spec §3.2  — intfloat/e5-base-v2, normalize_embeddings=True, passage:/query: prefixes
+Spec §3.2  — intfloat/multilingual-e5-base, normalize_embeddings=True, passage:/query: prefixes
 Spec §3.6  — ranking formula: (cos·0.7 + kw·0.3) × time_decay × b_local × b_session
 Spec §3.7  — CJK bigram expansion, FTS punctuation stripping
 """
@@ -135,7 +135,7 @@ def get_model():
             try:
                 with _silenced_stdout():
                     from sentence_transformers import SentenceTransformer
-                    _model = SentenceTransformer("intfloat/e5-base-v2")
+                    _model = SentenceTransformer("intfloat/multilingual-e5-base")
             except Exception as e:
                 print(f"[n3mc] embedding model load failed: {e}", file=sys.stderr)
     return _model

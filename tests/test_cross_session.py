@@ -12,7 +12,7 @@ The critical invariant: b_session_mismatch=0.6 must NOT push a
 well-matched query below min_score=0.2.
 
   threshold: cos_sim >= 0.2 / (0.7 * 0.6) ≈ 0.476
-  e5-base-v2 on identical-domain queries reliably delivers 0.7+.
+  multilingual-e5-base on identical-domain queries reliably delivers 0.7+.
 """
 import json
 import time

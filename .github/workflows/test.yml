@@ -65,7 +65,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-e5-base-v2-${{ runner.os }}-v1
+          key: hf-multilingual-e5-base-${{ runner.os }}-v1
 
       - name: Install package + dev deps + build tooling
         run: |

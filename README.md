@@ -98,7 +98,7 @@ turn and `save_memory` runs after each meaningful exchange, all
 automatically.
 
 > First call may take 30–60 seconds the **first** time only — the
-> ~400 MB `intfloat/e5-base-v2` embedding model downloads to
+> ~400 MB `intfloat/multilingual-e5-base` embedding model downloads to
 > `~/.cache/huggingface/`. Subsequent starts complete in seconds.
 
 ---
@@ -144,7 +144,7 @@ The server refuses to start if Redis is unreachable, and the Claude Code plugin 
 - 🤖 **Multi-agent ready** — Multiple AI agents share one Redis. The `b_local` and `b_session` biases prioritize each project's own memories while still surfacing the team's collective knowledge.
 - 🏢 **Team & organization support** — Deploy Redis on a shared server and point `N3MC_REDIS_URL` to it for team-wide memory sharing (⚠️ authentication must be handled at the Redis layer).
 - 🧹 **Ephemerality is a design feature** — 7-day auto-expiry means failed attempts and abandoned designs don't bleed into the next task. `docker restart redis-stack` wipes everything instantly.
-- 💰 **Reduces token waste** — No more re-explaining past context. Memory search uses local embeddings (`intfloat/e5-base-v2`) and costs zero Claude tokens, and accurate context injection means fewer corrections and back-and-forth.
+- 💰 **Reduces token waste** — No more re-explaining past context. Memory search uses local embeddings (`intfloat/multilingual-e5-base`) and costs zero Claude tokens, and accurate context injection means fewer corrections and back-and-forth.
 
 ## How It Works
 
@@ -215,7 +215,7 @@ service — to cover the long-term side.
 any other MCP-compatible client) short-lived memory across conversations.
 It stores text entries in a local Redis Stack instance with both a BM25
 full-text index and a 768-dimension vector index
-([`intfloat/e5-base-v2`](https://huggingface.co/intfloat/e5-base-v2)), and
+([`intfloat/multilingual-e5-base`](https://huggingface.co/intfloat/multilingual-e5-base)), and
 returns hybrid-ranked results.
 
 Every operation runs on the user's machine. No API calls, no cloud
@@ -326,7 +326,7 @@ into the standard `~/.cache/huggingface/` directory.
 > 2. **pypi.org** — when `uvx --from n3memorycore-mcp-lite` (or `pip install`)
 >    resolves the package.
 > 3. **huggingface.co** — when the server first starts and downloads
->    `intfloat/e5-base-v2` (~400 MB) into `~/.cache/huggingface/`.
+>    `intfloat/multilingual-e5-base` (~400 MB) into `~/.cache/huggingface/`.
 >
 > All three fail with explicit, time-bounded errors when offline; none
 > hang. Subsequent starts use only the local cache and require no
@@ -515,7 +515,7 @@ the same regardless of how the user types the same word:
 | **NFKC normalization** | Folds compatibility forms before SHA / embedding / BM25 | `ｱﾙﾌｧ` ↔ `アルファ`, `１２３` ↔ `123`, `ﬁ` ↔ `fi` |
 | **Bigram BM25 side channel** | Overlapping bigrams emitted for space-less scripts | `記憶装置` → `記憶 憶装 装置`; same for Korean (`안녕하세요`), Thai (`สวัสดี`), Lao, Myanmar, Khmer |
 | **Diacritic fold** | Latin/Greek/Cyrillic words also indexed without combining marks | `café` matches `cafe`, `Ångström` matches `Angstrom` |
-| **e5-base-v2 embedding** | Multilingual semantic space across 100+ languages | Cross-language paraphrase retrieval |
+| **multilingual-e5-base embedding** | Multilingual semantic space across 100+ languages | Cross-language paraphrase retrieval |
 
 These run automatically on every `save_memory` and `search_memory` call.
 The raw `content` field is never rewritten — verbatim recall (spec §3.11)
