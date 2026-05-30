@@ -393,6 +393,12 @@ class Database:
         now_epoch  = _now_epoch()
         local_id   = self.cfg.get("local_id", "")
 
+        # Pre-generate chunk ids so they can be recorded on the parent doc
+        # (spec §3.5 `chunk_ids` field). This lets search_memory's TTL refresh
+        # extend EVERY sibling chunk in O(1) — no SCAN — when the parent is hit,
+        # keeping the whole document's chunks alive together (spec §3.11).
+        chunk_ids: list[str] = [_new_id() for _ in chunks]
+
         # Write parent document + docsha guard in one pipeline.
         doc_key = f"doc:{parent_id}"
         pipe = self._client.pipeline()
@@ -409,6 +415,7 @@ class Database:
                 b"session_id":      session_id.encode(),
                 b"turn_id":         turn_id.encode(),
                 b"chunk_count":     str(len(chunks)).encode(),
+                b"chunk_ids":       " ".join(chunk_ids).encode(),
             },
         )
         pipe.expire(doc_key, ttl)
@@ -418,10 +425,8 @@ class Database:
         # Write all chunks in a single pipeline (spec §3.11).
         # No per-chunk SHA guards and no per-chunk near-dedup (spec §3.8):
         # parent-level dedup above already handles near-duplicate full documents.
-        chunk_ids: list[str] = []
         chunk_pipe = self._client.pipeline()
-        for chunk in chunks:
-            chunk_id  = _new_id()
+        for chunk, chunk_id in zip(chunks, chunk_ids):
             ngram     = cjk_bigram_expand(chunk)
             vec_bytes = embed(normalize_text(chunk), is_query=False)
             fields: dict = {
@@ -443,7 +448,6 @@ class Database:
                 fields[b"embedding"] = vec_bytes
             chunk_pipe.hset(f"mem:{chunk_id}", mapping=fields)
             chunk_pipe.expire(f"mem:{chunk_id}", ttl)
-            chunk_ids.append(chunk_id)
         chunk_pipe.execute()
 
         return {
@@ -528,20 +532,25 @@ class Database:
             )
             score = final_score(cos, kw, dec, b, b_sess)
 
-            if score >= min_score_val:
-                candidates.append({
-                    "key":             key,
-                    "id":              mem_id,
-                    "content":         content,
-                    "timestamp":       timestamp,
-                    "timestamp_epoch": timestamp_epoch,
-                    "score":           score,
-                    "parent_id":       parent_id,
-                    "session_id":      row_sess,
-                    "turn_id":         turn_id,
-                    "importance":      imp,
-                    "access_count":    acc,
-                })
+            # Change B (spec §6 min_score): do NOT prune by min_score here.
+            # The lexical reranker (coverage + phrase bonus, run after parent
+            # resolution on the full verbatim body) can lift a fused score that
+            # is just below the threshold above it. Filtering at fusion time
+            # would discard those before rerank could rescue them, so the
+            # min_score cut is deferred until AFTER rerank (see below).
+            candidates.append({
+                "key":             key,
+                "id":              mem_id,
+                "content":         content,
+                "timestamp":       timestamp,
+                "timestamp_epoch": timestamp_epoch,
+                "score":           score,
+                "parent_id":       parent_id,
+                "session_id":      row_sess,
+                "turn_id":         turn_id,
+                "importance":      imp,
+                "access_count":    acc,
+            })
 
         # Sort descending so the highest-scoring chunk wins when multiple
         # chunks share the same parent (spec §3.11: keep the best hit).
@@ -568,6 +577,15 @@ class Database:
                     c["id"]           = pid
                     c["_tag"]         = f"[doc×{chunk_count}]"
                     c["_parent_key"]  = f"doc:{pid}"
+                    # Change A (spec §3.5 chunk_ids / §3.11): collect EVERY
+                    # sibling chunk key so the TTL refresh below can extend the
+                    # whole document's chunks together, not just the one that
+                    # happened to win the ranking. Older parent docs saved
+                    # without chunk_ids gracefully fall back to single-chunk
+                    # refresh (field absent → empty list).
+                    cids_raw = doc_data.get(b"chunk_ids", b"")
+                    cids = cids_raw.decode().split() if cids_raw else []
+                    c["_sibling_keys"] = [f"mem:{cid}" for cid in cids if cid]
                 # else: parent expired — orphan chunk surfaces as its own hit
                 # (graceful degrade, spec §3.11). Do NOT mark seen_parents so
                 # sibling orphan chunks each get their own listing.
@@ -585,6 +603,13 @@ class Database:
         else:
             candidates.sort(key=lambda x: x["score"], reverse=True)
 
+        # Change B (spec §6 min_score): apply the score floor AFTER rerank so a
+        # phrase/coverage boost can rescue candidates that were just under the
+        # threshold at fusion time. Filtering here (not at fusion) is the whole
+        # point of deferring it.
+        if min_score_val > 0:
+            candidates = [c for c in candidates if c["score"] >= min_score_val]
+
         # §4.3.1 since/until time filter — applied post-rerank so ranking is
         # unaffected; only results outside the window are dropped.
         if since_epoch or until_epoch:
@@ -599,18 +624,29 @@ class Database:
             candidates = filtered
 
         # TTL refresh on top-K hits (spec §3.11, §3.4 design exception).
-        # Single pipeline so chunk and parent doc are refreshed simultaneously
-        # (spec: "チャンクと親が同時にリフレッシュされる").
+        # Single pipeline so chunk, ALL sibling chunks, and parent doc are
+        # refreshed simultaneously (spec: "チャンクと親が同時にリフレッシュされる").
+        # Change A: extend every sibling chunk of a hit parent — not just the
+        # winning chunk — so the document's chunks age together and search
+        # recall via any chunk's content is preserved for the whole window.
         if self.cfg.get("ttl_refresh_on_search", True):
             ttl   = self.cfg["ttl_seconds"]
             top_k = self.cfg.get("ttl_refresh_top_k", 5)
             refresh_pipe = self._client.pipeline()
             for c in candidates[:top_k]:
-                refresh_pipe.expire(c["key"], ttl)
+                # access_count is incremented only on the chunk that actually
+                # matched (the hit), not on its silently-refreshed siblings.
                 refresh_pipe.hincrby(c["key"], "access_count", 1)
                 parent_key = c.get("_parent_key")
                 if parent_key:
                     refresh_pipe.expire(parent_key, ttl)
+                    # Refresh all sibling chunks (includes c["key"] itself).
+                    sib_keys = c.get("_sibling_keys") or [c["key"]]
+                    for sk in sib_keys:
+                        refresh_pipe.expire(sk, ttl)
+                else:
+                    # Standalone memory (no parent): refresh just itself.
+                    refresh_pipe.expire(c["key"], ttl)
             try:
                 refresh_pipe.execute()
             except Exception:
@@ -619,6 +655,7 @@ class Database:
         final: list[dict] = []
         for c in candidates[:limit]:
             c.pop("_parent_key", None)
+            c.pop("_sibling_keys", None)
             c.pop("key", None)
             final.append(c)
         return final
