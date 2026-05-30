@@ -822,6 +822,12 @@ class Database:
                 pass
 
             # Attempt TAG query for chunks; falls back to SCAN on UUID parse error.
+            # With RETURN 0 the FT.SEARCH reply is a FLAT key list
+            # [count, key1, key2, ...] — no interleaved field arrays — so iterate
+            # res[1:] one element at a time (NOT i += 2, which would drop every
+            # other chunk and leak orphans). Hyphenated UUIDs normally make this
+            # TAG query match 0 rows (§3.12), so the SCAN fallback below is what
+            # runs in practice; this path is correct for the day the TAG query works.
             chunk_keys: list[str] = []
             try:
                 res = self._client.execute_command(
@@ -832,13 +838,10 @@ class Database:
                     "DIALECT", "2",
                 )
                 if res and res[0] > 0:
-                    i = 1
-                    while i + 1 < len(res):
-                        raw = res[i]
+                    for raw in res[1:]:
                         chunk_keys.append(
                             raw.decode() if isinstance(raw, bytes) else str(raw)
                         )
-                        i += 2
             except Exception:
                 pass
 
