@@ -249,6 +249,7 @@ doc:<uuid>                  HASH (parent document — verbatim whole-body store;
     agent_name        string
     session_id      string
     chunk_count     number      number of chunks emitted for this doc
+    chunk_ids       string      space-separated list of child chunk ids (for sibling-chunk TTL refresh)
     TTL                         ttl_seconds
 
 docsha:<sha1>               STRING
@@ -339,6 +340,8 @@ Parent-document resolution happens **before** lexical rerank: chunk hits are exp
 
 Set `lexical_rerank_enabled: false` in config to skip this pass (candidates are then sorted by the hybrid score only).
 
+**The `min_score` filter is applied AFTER lexical rerank.** A candidate whose fused score sits just below `min_score` can still be kept if the phrase/coverage rerank boost lifts its final score over the threshold, so the score floor is enforced *after* rerank rather than at fusion time. Pruning at fusion time would discard a record that contains the exact query phrase but has a weak embedding before the reranker could rescue it — hence this ordering matters (see [§6](#6-configuration) `min_score`).
+
 ### 3.7 Text Tokenization & Punctuation Handling
 
 **Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the forthcoming Pro build is **not** available here.
@@ -423,7 +426,7 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
   - If the same `parent_id` has already been emitted → drop as duplicate (keep the highest-scoring hit).
   - First occurrence → `HGET doc:<parent_id>` to fetch the full body and substitute it into the result, replacing the id with the parent id.
 - The subsequent lexical rerank (token-coverage + phrase bonus) therefore sees the **full verbatim body** for parent hits, not just the matched chunk — a query phrase that appears in a non-matching chunk of the same document still boosts the parent's rank correctly.
-- When `ttl_refresh_on_search` is enabled, TTL refresh is applied to the top-K **after** rerank: for each hit the underlying `mem:<chunk_id>` (or standalone `mem:<id>`) key is refreshed and its `access_count` is incremented; if the hit resolved to a parent document, the `doc:<parent_id>` key's TTL is also refreshed so verbatim recall stays alive alongside its chunks.
+- When `ttl_refresh_on_search` is enabled, TTL refresh is applied to the top-K **after** rerank: for each hit the underlying `mem:<chunk_id>` (or standalone `mem:<id>`) key has its `access_count` incremented; if the hit resolved to a parent document, the `doc:<parent_id>` key's TTL **and the TTL of every sibling chunk listed in `chunk_ids` are refreshed together in one pipeline** (not just the single best-scoring chunk, but all chunks that make up the document). This keeps search recall via any chunk's content alive for the whole window — refreshing only the winning chunk would let sibling chunks expire mid-window and thin out the hit paths into the document. `access_count` is incremented only on the chunk that actually matched, not on its silently-refreshed siblings. Older docs saved without a `chunk_ids` field gracefully fall back to single-chunk + parent refresh.
 - Rendered output tags parent hits with `[doc×N]` (N = `chunk_count`) in the markdown.
 
 `list_memories` integration:
@@ -440,7 +443,7 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
 **Design invariants**:
 - Parent rows are intentionally excluded from the RediSearch index (kept outside `PREFIX 1 mem:`). Ranking therefore always operates on chunk bodies, so a long parent body never distorts time-decay or BM25 norms.
 - `stored_importance` and `access_count` live on chunks, not parents. A parent is the "verbatim box" and carries no ranking state.
-- As long as the parent is alive, a single chunk hit reconstructs the full body. When `ttl_refresh_on_search` is enabled (default `true`), every chunk hit that fetches the parent doc also refreshes the `doc:` key's TTL, so the parent and its chunks age together under normal use. Should the parent expire — e.g. with `ttl_refresh_on_search: false`, or if it was never searched during its initial 7-day window — orphaned chunks surface as their own short-text hits (a graceful degrade, not a regression).
+- As long as the parent is alive, a single chunk hit reconstructs the full body. When `ttl_refresh_on_search` is enabled (default `true`), every chunk hit that fetches the parent doc refreshes the `doc:` key's TTL **and the TTL of all sibling chunks listed in `chunk_ids`**, so the parent and the document's full set of chunks age together under normal use and no constituent chunk expires mid-window. Should the parent expire — e.g. with `ttl_refresh_on_search: false`, or if it was never searched during its initial 7-day window — orphaned chunks surface as their own short-text hits (a graceful degrade, not a regression).
 
 **Use cases**: when the user wants to retrieve an exact original body later ("save this setting/spec/article so I can pull it verbatim"). For the split between this mode and fact-extraction, see [§1 "Large text handling (two modes)"](#1-vision).
 
@@ -680,7 +683,7 @@ Complete schema (missing fields auto-filled with defaults below):
 - `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 7 d). Lowering it is fine; raising it far beyond a week defeats the purpose of the Lite and will be flagged during review.
 - `search_result_limit` — max results returned by `search_memory`.
 - `context_char_limit` — reserved for client-side truncation by downstream tools; not used internally.
-- `min_score` — excludes results with score below this value (default `0.2`). Set to `0.0` to disable.
+- `min_score` — excludes results with score below this value (default `0.2`). Set to `0.0` to disable. **The filter is applied after lexical rerank ([§3.6](#36-ranking-formula))** — it judges the final score including phrase/coverage boosts, so a candidate just below the threshold at fusion time can be rescued by the rerank boost.
 - `search_query_max_chars` — max characters used from a query (default `2000`; embedding model caps at ~512 tokens).
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (defaults 400 / 100 chars). Bodies longer than the threshold trigger the parent-document + chunks path (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 - `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — enable flag, per-hit weight, and cap for the frequency boost (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` disables the feature entirely and the formula falls back to `stored_importance` only.
