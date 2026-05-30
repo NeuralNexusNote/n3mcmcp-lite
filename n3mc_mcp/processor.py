@@ -346,17 +346,14 @@ def time_decay(timestamp_iso: str, half_life_days: float) -> float:
 def keyword_relevance(bm25_score: float, max_bm25: float, threshold: float) -> float:
     """Normalize BM25 score to [0,1] (spec §3.6).
 
+    |bm25_score| / max(1.0, max_|bm25_score|)
     Scores below *threshold* are treated as zero; abs() mirrors Pro's FTS5
     which can return negative values.
-
-    Denominator is max(max_bm25, 1e-9) so that when all BM25 scores are < 1.0
-    the keyword channel contributes its full 0.3 weight rather than being
-    artificially dampened by the old max(1.0, …) floor.
     """
     score = abs(bm25_score)
     if score < threshold:
         return 0.0
-    return score / max(max_bm25, 1e-9)
+    return score / max(1.0, max_bm25)
 
 
 def b_local(stored_importance: float, access_count: int, cfg: dict) -> float:

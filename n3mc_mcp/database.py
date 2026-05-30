@@ -205,113 +205,19 @@ class Database:
     # ── §3.10 repair ────────────────────────────────────────────────────────
 
     def repair_memory(self) -> dict:
-        """Repair index and remove orphaned keys (spec §3.10).
+        """Idempotent ensure_index() call (spec §3.10).
 
-        Three cleanup passes beyond the basic ensure_index():
-
-        (A) Orphaned mem:sha: guards — mem:sha:<h> whose target mem:<id> no
-            longer exists (e.g. TTL expired the mem: key but not the sha: key
-            due to a timing race, or a delete that missed the guard).
-
-        (B) Orphaned chunk keys — mem:<id> entries whose parent_id field
-            points to a doc:<parent_id> that no longer exists.
-
-        (C) Orphaned docsha: guards — docsha:<h> whose target doc:<id> no
-            longer exists.
-
-        Returns counts so callers can verify the repair was meaningful.
+        Lite version: thin operation — just re-ensure the RediSearch index.
+        No migration markers, no FTS rebuild, no re-embedding loop.
+        Existing Redis records are already indexed; expired ones are simply gone.
         """
         if not self._ok:
             return {"status": "error", "message": _DOCKER_HINT}
         try:
             self.ensure_index()
+            return {"status": "ok", "message": "index ensured"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
-
-        orphaned_sha_guards  = 0
-        orphaned_chunks      = 0
-        orphaned_docsha      = 0
-        to_delete: list[str] = []
-
-        # Pass A: orphaned mem:sha: guards
-        try:
-            cursor = 0
-            while True:
-                cursor, keys = self._client.scan(cursor, match="mem:sha:*", count=200)
-                for key in keys:
-                    raw_key = key.decode() if isinstance(key, bytes) else str(key)
-                    target_id_b = self._client.get(raw_key)
-                    if not target_id_b:
-                        to_delete.append(raw_key)
-                        orphaned_sha_guards += 1
-                        continue
-                    target_id = target_id_b.decode() if isinstance(target_id_b, bytes) else str(target_id_b)
-                    if not self._client.exists(f"mem:{target_id}"):
-                        to_delete.append(raw_key)
-                        orphaned_sha_guards += 1
-                if cursor == 0:
-                    break
-        except Exception as e:
-            print(f"[n3mc] repair pass A: {e}", file=sys.stderr)
-
-        # Pass B: orphaned chunk keys (parent doc gone)
-        try:
-            cursor = 0
-            while True:
-                cursor, keys = self._client.scan(cursor, match="mem:*", count=200)
-                for key in keys:
-                    raw_key = key.decode() if isinstance(key, bytes) else str(key)
-                    if raw_key.startswith("mem:sha:"):
-                        continue
-                    try:
-                        pid_b = self._client.hget(raw_key, b"parent_id")
-                        if not pid_b:
-                            continue
-                        pid = pid_b.decode() if isinstance(pid_b, bytes) else str(pid_b)
-                        if pid and not self._client.exists(f"doc:{pid}"):
-                            to_delete.append(raw_key)
-                            orphaned_chunks += 1
-                    except Exception:
-                        pass
-                if cursor == 0:
-                    break
-        except Exception as e:
-            print(f"[n3mc] repair pass B: {e}", file=sys.stderr)
-
-        # Pass C: orphaned docsha: guards (parent doc gone)
-        try:
-            cursor = 0
-            while True:
-                cursor, keys = self._client.scan(cursor, match="docsha:*", count=200)
-                for key in keys:
-                    raw_key = key.decode() if isinstance(key, bytes) else str(key)
-                    parent_id_b = self._client.get(raw_key)
-                    if not parent_id_b:
-                        to_delete.append(raw_key)
-                        orphaned_docsha += 1
-                        continue
-                    parent_id = parent_id_b.decode() if isinstance(parent_id_b, bytes) else str(parent_id_b)
-                    if not self._client.exists(f"doc:{parent_id}"):
-                        to_delete.append(raw_key)
-                        orphaned_docsha += 1
-                if cursor == 0:
-                    break
-        except Exception as e:
-            print(f"[n3mc] repair pass C: {e}", file=sys.stderr)
-
-        if to_delete:
-            pipe = self._client.pipeline()
-            for k in to_delete:
-                pipe.delete(k)
-            pipe.execute()
-
-        return {
-            "status":                    "ok",
-            "message":                   "index ensured",
-            "orphaned_sha_guards_removed": orphaned_sha_guards,
-            "orphaned_chunks_removed":   orphaned_chunks,
-            "orphaned_docsha_removed":   orphaned_docsha,
-        }
 
     # ── §3.8 duplicate detection ─────────────────────────────────────────────
 
@@ -510,19 +416,11 @@ class Database:
         pipe.execute()
 
         # Write all chunks in a single pipeline (spec §3.11).
-        # Per-chunk SHA guards prevent re-indexing identical chunk content when
-        # overlapping large documents are saved again (e.g. after minor edits).
-        # Near-dedup per chunk is skipped for speed; the parent-level KNN check
-        # above already handles near-duplicate full documents.
-        chunk_sha_keys = [f"mem:sha:{_sha1(c)}" for c in chunks]
-        existing_flags = self._client.mget(chunk_sha_keys)  # None = new, bytes = already indexed
-
+        # No per-chunk SHA guards and no per-chunk near-dedup (spec §3.8):
+        # parent-level dedup above already handles near-duplicate full documents.
         chunk_ids: list[str] = []
         chunk_pipe = self._client.pipeline()
-        for chunk, sha_key, already_exists in zip(chunks, chunk_sha_keys, existing_flags):
-            if already_exists is not None:
-                # Identical chunk already indexed (e.g. overlapping re-save). Skip.
-                continue
+        for chunk in chunks:
             chunk_id  = _new_id()
             ngram     = cjk_bigram_expand(chunk)
             vec_bytes = embed(normalize_text(chunk), is_query=False)
@@ -545,7 +443,6 @@ class Database:
                 fields[b"embedding"] = vec_bytes
             chunk_pipe.hset(f"mem:{chunk_id}", mapping=fields)
             chunk_pipe.expire(f"mem:{chunk_id}", ttl)
-            chunk_pipe.set(sha_key, chunk_id.encode(), ex=ttl)
             chunk_ids.append(chunk_id)
         chunk_pipe.execute()
 
@@ -554,7 +451,7 @@ class Database:
             "saved":       True,
             "parent_id":   parent_id,
             "chunks":      len(chunks),
-            "saved_count": len(chunks),
+            "saved_count": len(chunk_ids),
             "ids":         chunk_ids,
             "ttl_seconds": ttl,
         }
@@ -958,30 +855,14 @@ class Database:
                     if cursor == 0:
                         break
 
-            # Collect per-chunk SHA guards so they're cleaned up atomically.
-            chunk_sha_keys: list[str] = []
-            if chunk_keys:
-                get_pipe = self._client.pipeline()
-                for ck in chunk_keys:
-                    get_pipe.hget(ck, b"content")
-                chunk_contents = get_pipe.execute()
-                for raw in chunk_contents:
-                    if raw:
-                        try:
-                            chunk_sha_keys.append(
-                                f"mem:sha:{_sha1(raw.decode('utf-8'))}"
-                            )
-                        except Exception:
-                            pass
-
+            # Chunks have no individual sha guards (spec §3.8 "チャンク側は個別の
+            # sha ガードを付けず") — just delete parent, docsha:, and all chunks.
             pipe = self._client.pipeline()
             pipe.delete(doc_key)
             if sha_key:
                 pipe.delete(sha_key)
             for ck in chunk_keys:
                 pipe.delete(ck)
-            for csk in chunk_sha_keys:
-                pipe.delete(csk)
             pipe.execute()
             return {
                 "status":         "deleted",
@@ -1034,7 +915,8 @@ class Database:
         deleted_chunks   = 0
         deleted_docs     = 0
 
-        # Phase 1: scan mem:* (skip sha guards)
+        # Phase 1: scan mem:* (skip sha guards).
+        # Only singles carry sha guards (spec §3.8: chunks do not have sha guards).
         cursor = 0
         while True:
             cursor, keys = self._client.scan(cursor, match="mem:*", count=200)
@@ -1056,18 +938,18 @@ class Database:
                 if sid != session_id or oid != owner_id:
                     continue
                 keys_to_delete.append(raw_key)
-                # Collect mem:sha: guard for both singles and chunks so they're
-                # cleaned up together (chunks now carry SHA guards too).
-                if content_b:
-                    try:
-                        sha_keys.append(
-                            f"mem:sha:{_sha1(content_b.decode('utf-8'))}"
-                        )
-                    except Exception:
-                        pass
                 if pid:
+                    # Chunk: no sha guard to collect (spec §3.8).
                     deleted_chunks += 1
                 else:
+                    # Standalone: collect its sha guard.
+                    if content_b:
+                        try:
+                            sha_keys.append(
+                                f"mem:sha:{_sha1(content_b.decode('utf-8'))}"
+                            )
+                        except Exception:
+                            pass
                     deleted_singles += 1
             if cursor == 0:
                 break
