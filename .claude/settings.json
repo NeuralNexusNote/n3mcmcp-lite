@@ -2,9 +2,6 @@
   "permissions": {
     "allow": [
       "mcp__ccd_session__mark_chapter",
-      "mcp__n3mc-workingmemory__search_memory",
-      "mcp__n3mc-workingmemory__save_memory",
-      "mcp__n3mc-workingmemory__list_memories",
       "Bash(netstat -ano *)"
     ]
   }

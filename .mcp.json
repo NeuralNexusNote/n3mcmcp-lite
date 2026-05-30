@@ -1,9 +1,3 @@
 {
-  "mcpServers": {
-    "n3mc-workingmemory": {
-      "type": "stdio",
-      "command": "n3mc-workingmemory",
-      "args": []
-    }
-  }
+  "mcpServers": {}
 }
