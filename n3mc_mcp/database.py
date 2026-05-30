@@ -599,18 +599,22 @@ class Database:
             candidates = filtered
 
         # TTL refresh on top-K hits (spec §3.11, §3.4 design exception).
+        # Single pipeline so chunk and parent doc are refreshed simultaneously
+        # (spec: "チャンクと親が同時にリフレッシュされる").
         if self.cfg.get("ttl_refresh_on_search", True):
             ttl   = self.cfg["ttl_seconds"]
             top_k = self.cfg.get("ttl_refresh_top_k", 5)
+            refresh_pipe = self._client.pipeline()
             for c in candidates[:top_k]:
-                try:
-                    self._client.expire(c["key"], ttl)
-                    self._client.hincrby(c["key"], "access_count", 1)
-                    parent_key = c.get("_parent_key")
-                    if parent_key:
-                        self._client.expire(parent_key, ttl)
-                except Exception:
-                    pass
+                refresh_pipe.expire(c["key"], ttl)
+                refresh_pipe.hincrby(c["key"], "access_count", 1)
+                parent_key = c.get("_parent_key")
+                if parent_key:
+                    refresh_pipe.expire(parent_key, ttl)
+            try:
+                refresh_pipe.execute()
+            except Exception:
+                pass
 
         final: list[dict] = []
         for c in candidates[:limit]:
