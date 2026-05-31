@@ -78,10 +78,23 @@ def _new_id() -> str:
 
 
 def _parse_fields(flist) -> dict[str, str]:
-    """Decode alternating [field, value, field, value …] list from FT.SEARCH."""
-    result: dict[str, str] = {}
+    """Decode FT.SEARCH field-value pairs — handles RESP2 list and RESP3 dict.
+
+    Older Redis Stack (RESP2): flist is a flat list [field, val, field, val, …].
+    Newer Redis Stack or redis-py ≥5.x may return a Python dict directly.
+    Both are decoded to the same {str: str} output.
+    """
     if not flist:
-        return result
+        return {}
+    # RESP3 / auto-parsed: already a Python dict
+    if isinstance(flist, dict):
+        return {
+            k.decode("utf-8") if isinstance(k, bytes) else str(k):
+            v.decode("utf-8") if isinstance(v, bytes) else str(v)
+            for k, v in flist.items()
+        }
+    # RESP2 flat alternating list
+    result: dict[str, str] = {}
     for j in range(0, len(flist) - 1, 2):
         k = flist[j].decode("utf-8") if isinstance(flist[j], bytes) else str(flist[j])
         v = flist[j + 1].decode("utf-8") if isinstance(flist[j + 1], bytes) else str(flist[j + 1])
@@ -234,6 +247,7 @@ class Database:
                 "LIMIT", "0", "5",
                 "DIALECT", "2",
             )
+            res = self._unwrap_search_response(res)
             if res and res[0] > 0:
                 i = 1
                 while i + 1 < len(res):
@@ -660,6 +674,44 @@ class Database:
             final.append(c)
         return final
 
+    @staticmethod
+    def _unwrap_search_response(res) -> list:
+        """Normalize FT.SEARCH response across redis-py versions.
+
+        redis-py <8: returns a raw RESP2 list [count, key, fields, ...]
+        redis-py ≥8: may return a dict or SearchResult via registered callbacks.
+        We extract the raw list form in either case so downstream parsing is
+        version-independent.
+        """
+        if isinstance(res, list):
+            return res
+        # dict (redis-py 8 callback format): try common key names
+        if isinstance(res, dict):
+            # {total_results: N, results: [...]}, or similar
+            count = res.get("total_results", res.get("total", 0))
+            results = res.get("results", res.get("docs", []))
+            # Rebuild the RESP2-style flat list for downstream compatibility
+            flat: list = [count]
+            for doc in results:
+                if isinstance(doc, dict):
+                    key  = doc.get("id", "")
+                    fmap = doc.get("fields", doc.get("extra_attributes", doc))
+                    # Remove meta-keys that aren't field-value pairs
+                    fmap = {k: v for k, v in fmap.items() if k not in ("id", "score")}
+                    flat.append(key.encode() if isinstance(key, str) else key)
+                    flat.append({k.encode() if isinstance(k, str) else k:
+                                  v.encode() if isinstance(v, str) else v
+                                  for k, v in fmap.items()})
+                else:
+                    # Unknown inner format — skip
+                    pass
+            return flat
+        # SearchResult or other object — try iterating as a sequence
+        try:
+            return list(res)
+        except TypeError:
+            return [0]
+
     def _vector_search(self, query: str, owner_id: str, limit: int) -> dict[str, dict]:
         """KNN search — no owner_id TAG filter (UUID hyphen issue §3.12)."""
         vec_bytes = embed(query, is_query=True)
@@ -678,6 +730,7 @@ class Database:
                 "LIMIT", "0", str(knn_limit),
                 "DIALECT", "2",
             )
+            res = self._unwrap_search_response(res)
         except Exception as e:
             print(f"[n3mc] vector search: {e}", file=sys.stderr)
             return {}
@@ -728,6 +781,7 @@ class Database:
                 "LIMIT", "0", str(bm25_limit),
                 "DIALECT", "2",
             )
+            res = self._unwrap_search_response(res)
         except Exception as e:
             print(f"[n3mc] BM25 search: {e}", file=sys.stderr)
             return {}
@@ -787,6 +841,7 @@ class Database:
                 "LIMIT", "0", str(fetch_limit),
                 "DIALECT", "2",
             )
+            res = self._unwrap_search_response(res)
             if res and res[0] > 0:
                 i = 1
                 while i + 1 < len(res):
@@ -874,6 +929,7 @@ class Database:
                     "LIMIT", "0", "1000",
                     "DIALECT", "2",
                 )
+                res = self._unwrap_search_response(res)
                 if res and res[0] > 0:
                     for raw in res[1:]:
                         chunk_keys.append(
