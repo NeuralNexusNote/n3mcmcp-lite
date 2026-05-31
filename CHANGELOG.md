@@ -11,6 +11,49 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.8.0] — 2026-05-31
+
+### Added
+- **Sibling-chunk TTL refresh** (`database.py`): `doc:<uuid>` parent hash now
+  stores a `chunk_ids` field (space-joined list of all child chunk IDs).
+  `search_memory` uses this to refresh **every sibling chunk** in a single
+  pipeline when the parent is hit — not just the winning chunk — keeping the
+  whole document's chunk set alive together throughout the TTL window.
+  `access_count` is still incremented only on the actually-matched chunk.
+  Older parent docs without the field fall back gracefully to single-chunk
+  + parent refresh.
+- **Six standalone eval scripts** under `tests/eval_*.py`: offline HF model
+  check, latency measurement, Redis-down startup, Unicode round-trip,
+  uvx-missing startup, and verbatim recall verification.
+
+### Changed
+- **`min_score` applied after lexical rerank** (`database.py`): The score
+  floor is now enforced after the phrase/coverage rerank pass. A candidate
+  just below the threshold at fusion time can now be rescued by a rerank
+  boost. Previously the cut ran at fusion time, discarding records before
+  rerank could lift them.
+- **Spec compliance — BM25 formula restored** (`processor.py`):
+  `keyword_relevance()` denominator reverted to `max(1.0, max_bm25)` (spec
+  §3.6). The 1.7.0 change to `max(max_bm25, 1e-9)` was spec-incompatible.
+- **Spec compliance — `repair_memory` simplified** (`database.py`): Reverted
+  to a thin `ensure_index()` only call (spec §3.10). The three orphan-cleanup
+  passes introduced in 1.7.0 were beyond the spec's intent.
+- **Spec compliance — chunk SHA guards removed** (`database.py`): Per-chunk
+  `mem:sha:` guards are no longer written (spec §3.8 "チャンク側は個別の sha
+  ガードを付けず"). `delete_memory` cascade and `delete_by_session` updated
+  accordingly.
+
+### Fixed
+- **`delete_memory` cascade key parsing** (`database.py`): `FT.SEARCH …
+  RETURN 0` returns a flat key list `[count, key1, key2, …]` with no
+  interleaved field arrays. The old loop used `i += 2`, collecting only every
+  other chunk key and leaking orphans on the TAG-query success path. Changed
+  to `res[1:]` iteration.
+- **TTL refresh round-trips** (`database.py`): Replaced up to 15 individual
+  Redis commands per `search_memory` call with a single
+  `refresh_pipe.execute()`, matching the spec's "チャンクと親が同時に
+  リフレッシュされる" intent.
+
 ## [1.7.0] — 2026-05-10
 
 Score-improvement release: soft chunking, BM25 fix, per-chunk SHA dedup
