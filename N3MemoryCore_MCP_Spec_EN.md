@@ -65,34 +65,50 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 
 ### Quick Start
 
-1. Start Redis Stack:
-   ```bash
-   # First time only (creates the container):
-   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+> **The primary way to use the N3MC series is to have an AI generate the implementation FROM the spec (this document).** The spec is written in detail specifically to make AI regeneration easy ("described with the same structure as the Pro build to ease AI regeneration"). Hand it to Claude (or another AI) to implement, customize, or regenerate the server. **Installing the published package via pip / marketplace is a secondary, "bonus" convenience** for trying it quickly.
 
-   # Every subsequent session (container already exists):
-   docker start redis-stack
-   ```
-   Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start redis-stack` thereafter.
+Either way, start **Redis Stack** first:
 
-   **Persistence is forbidden — enforced at server startup, not via
-   docker args.** The MCP server issues `CONFIG SET appendonly no` and
-   `CONFIG SET save ""` on every connect (§3.4 `_enforce_ephemeral`),
-   so any manual re-enable between sessions is reverted on the next
-   Lite run. Earlier iterations of this spec put `--appendonly no
-   --save ""` on the `docker run` line as a belt-and-suspenders, but
-   the empty-string argument for `--save` is mangled by Windows
-   PowerShell and cmd.exe quoting (it has left containers with a
-   broken entrypoint in practice), so the docker args have been
-   removed and server-side enforcement is the sole source of truth.
-   Rationale for the ban itself: ephemerality is the product boundary
-   that separates the free Lite build from the paid persistent
-   N3MemoryCore — Lite is "a rolling 7-day scratchpad that truly
-   forgets on restart", not "a durable store with a TTL". If the user
-   wants continuous memory, they upgrade. `_enforce_ephemeral` makes
-   it *mechanically impossible* to turn Lite into a persistent store
-   by accident, regardless of the user's shell or docker flags.
-2. Install the package (choose one):
+```bash
+# First time only (creates the container):
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+
+# Every subsequent session (container already exists):
+docker start redis-stack
+```
+Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start redis-stack` thereafter.
+
+> **Persistence is forbidden — enforced at server startup, not via
+> docker args.** The MCP server issues `CONFIG SET appendonly no` and
+> `CONFIG SET save ""` on every connect (§3.4 `_enforce_ephemeral`),
+> so any manual re-enable between sessions is reverted on the next
+> Lite run. Earlier iterations of this spec put `--appendonly no
+> --save ""` on the `docker run` line as a belt-and-suspenders, but
+> the empty-string argument for `--save` is mangled by Windows
+> PowerShell and cmd.exe quoting (it has left containers with a
+> broken entrypoint in practice), so the docker args have been
+> removed and server-side enforcement is the sole source of truth.
+> Rationale for the ban itself: ephemerality is the product boundary
+> that separates the free Lite build from the paid persistent
+> N3MemoryCore — Lite is "a rolling 7-day scratchpad that truly
+> forgets on restart", not "a durable store with a TTL". If the user
+> wants continuous memory, they upgrade. `_enforce_ephemeral` makes
+> it *mechanically impossible* to turn Lite into a persistent store
+> by accident, regardless of the user's shell or docker flags.
+
+#### Method A: Generate from the spec (primary, recommended)
+
+1. **Start Redis Stack** (above).
+2. **Hand the spec to an AI and ask it to implement**: give `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`) to Claude and ask "implement n3mcmcp-lite per this spec." The AI generates the package layout, RediSearch index, MCP tool registration, and stdio launch. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
+3. **Install the result**: run `pip install -e .` in the project root, then register the server in your MCP client's config ([§8](#8-mcp-client-configuration)).
+4. **Restart the client.** The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
+
+#### Method B: Install the package (bonus)
+
+If you just want to run it quickly from the published package:
+
+1. **Start Redis Stack** (above).
+2. **Install the package** (choose one):
    - **pip** (global or venv):
      ```bash
      pip install n3memorycore-mcp-lite
@@ -106,8 +122,8 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
      /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
      /plugin install n3mc-workingmemory@neuralnexusnote
      ```
-3. Register the server in your MCP client's config (see [§8](#8-mcp-client-configuration)). Skip this step when installing via the plugin marketplace — the plugin registers the server automatically.
-4. Restart the client. The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
+3. **Register the server** in your MCP client's config (see [§8](#8-mcp-client-configuration)). Skip this step when installing via the plugin marketplace — the plugin registers the server automatically.
+4. **Restart the client.** The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
 
 ### Data Backup
 

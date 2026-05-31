@@ -11,6 +11,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.9.1] — 2026-05-31
+
+### Docs
+- **Quickstart reordered to lead with spec-based generation** (§Quick Start,
+  JP/EN + release copies): the N3MC series' primary workflow is having an AI
+  generate the implementation FROM the spec; pip / marketplace install is a
+  secondary "bonus." Quickstart now presents **Method A: Generate from the
+  spec (primary)** before **Method B: Install the package (bonus)**, with
+  Redis Stack startup and the ephemerality note shared by both. No code or
+  behavior changes.
+
 ## [1.9.0] — 2026-05-31
 
 ### Added
