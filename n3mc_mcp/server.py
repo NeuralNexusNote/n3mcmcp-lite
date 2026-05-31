@@ -38,7 +38,7 @@ from mcp.types import TextContent, Tool
 from .config import load_config
 from .database import Database, _DOCKER_HINT
 from .instructions import INSTRUCTIONS
-from .processor import get_model, purify
+from .processor import get_model, purify, set_model_name
 
 _db: Database = None
 
@@ -417,6 +417,11 @@ async def _main() -> None:
     cfg["_session_id"] = (
         os.environ.get("N3MC_SESSION_ID", "").strip() or str(uuid.uuid4())
     )
+
+    # Apply the operator-selected embedding model (config §3.2) BEFORE the
+    # first get_model() call below. The index is built with embedding_dim,
+    # which must match the chosen model's output dimension.
+    set_model_name(cfg.get("embedding_model", "intfloat/multilingual-e5-base"))
 
     _db = Database(cfg)
     _db.connect()

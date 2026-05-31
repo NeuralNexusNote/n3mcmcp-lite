@@ -30,6 +30,13 @@ DEFAULTS: dict[str, Any] = {
     "b_session_match":         1.0,
     "b_session_mismatch":      0.6,
     "skip_code_blocks":        False,
+    # Embedding model (spec §3.2). Operator-selectable so the quality /
+    # resource / language tradeoff is the deployment's choice, not baked in.
+    # `embedding_dim` MUST match the chosen model's output dimension and is
+    # used to build the RediSearch vector index. Changing either requires a
+    # process restart and an index flush (different dim = incompatible vectors).
+    "embedding_model":         "intfloat/multilingual-e5-base",
+    "embedding_dim":           768,
 }
 
 

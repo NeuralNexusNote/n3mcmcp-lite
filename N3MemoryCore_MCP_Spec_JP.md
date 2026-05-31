@@ -180,7 +180,8 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 
 ### 3.2 埋め込み
 
-- モデル：`intfloat/multilingual-e5-base` / ベクトル：`float[768]`
+- モデル：`intfloat/multilingual-e5-base`（既定） / ベクトル：`float[768]`（既定）
+- **モデルは設定で差し替え可能**：`embedding_model`（既定 `intfloat/multilingual-e5-base`）と `embedding_dim`（既定 `768`）を `config.json` で変更することで、各デプロイが品質・リソース・言語のトレードオフを自分で選べる（例：`intfloat/multilingual-e5-large`（1024 次元）、ドメイン特化の多言語モデル）。製品自体は特定言語に肩入れせず中立を保ち、選択権は運用者にある。`embedding_dim` は選んだモデルの出力次元と**一致させること**——RediSearch のベクトルインデックスはこの値で構築される。モデルまたは次元を変更したらプロセス再起動とインデックスのフラッシュが必要（次元が違うと既存ベクトルと非互換）。**AI はこれらを自動改変してはならない（§3 冒頭の警告）——人間による `config.json` 手編集でのみ変更する。**
 - エンコード時は必ず `normalize_embeddings=True` を指定し、L2 正規化ベクトル（ノルム=1）を保証する。コサイン距離を使う場合でも重要：正規化されていない入力は `(1 − cosine_distance)` ↔ 類似度 の等価を崩す。
 - **入力プレフィックス（必須）**：プレフィックスなしでは本モデルの精度は著しく低下します：
 
@@ -666,7 +667,9 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
   "rerank_phrase_weight":     0.2,
   "b_session_match":          1.0,
   "b_session_mismatch":       0.6,
-  "skip_code_blocks":         false
+  "skip_code_blocks":         false,
+  "embedding_model":          "intfloat/multilingual-e5-base",
+  "embedding_dim":            768
 }
 ```
 
@@ -682,6 +685,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — 融合スコア後の軽量語彙リランカー（[§3.6](#36-ランキング式)）。`false` で従来スコア素通し。
 - `b_session_match` / `b_session_mismatch` — ランキング式の `b_session` 係数（[§3.6](#36-ランキング式)）。検索リクエストの `effective_session`（呼び出し時引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUID）と行の保存時 `session_id` を比較し、一致なら `b_session_match`（既定 `1.0`）、それ以外なら `b_session_mismatch`（既定 `0.6`）を最終スコアに乗算する。両方を `1.0` に設定すれば実質無効化（全行対称）。
 - `skip_code_blocks` — `true` のとき `save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含む本文を拒否し、`{"status": "skipped_code", "saved": false}` を返す。既定は `false`（FastAPI 時代の N3MemoryCore に倣い「コードをメモリに入れたくない」ユーザー向けのオプトイン）。ヒューリスティックはフェンス記号のみ — 散文とコード混在でも一括拒否であり、コード部分だけを剥離する処理は行わない。LLM は §5 の指示で、`skipped_code` を受けた同一ペイロードを再送せず、代わりにコードの要約散文を保存するよう誘導される。
+- `embedding_model` / `embedding_dim` — 埋め込みモデル名（既定 `intfloat/multilingual-e5-base`）と、そのモデルの出力ベクトル次元（既定 `768`）。[§3.2](#32-埋め込み) 参照。運用者が品質・リソース・言語のトレードオフを選べるよう設定可能化した項目で、製品自体は言語中立を保つ。`embedding_dim` は **`embedding_model` の実際の出力次元と一致させること** — RediSearch のベクトルインデックス（`DIM`）はこの値で構築されるため、不一致だと保存・検索が失敗する。両者の変更は**プロセス再起動 + インデックスフラッシュ**を要する（Lite は 7 日 TTL なので、既存データは放置しても自然消滅する）。既定のままなら従来挙動と完全に同一。
 
 > **1 PC 内の複数アカウント**：OS ユーザーごとに各自の `config.json` で動く。Redis を共有したい場合は両方の設定の `redis_url` を揃える — エントリは `owner_id` TAG フィルタで分離される。
 

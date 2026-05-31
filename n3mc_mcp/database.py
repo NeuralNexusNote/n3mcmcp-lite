@@ -208,7 +208,7 @@ class Database:
                 "parent_id",       "TAG",
                 "embedding",       "VECTOR", "FLAT", "6",
                                    "TYPE", "FLOAT32",
-                                   "DIM", "768",
+                                   "DIM", str(self.cfg.get("embedding_dim", 768)),
                                    "DISTANCE_METRIC", "COSINE",
             )
         except Exception as e:

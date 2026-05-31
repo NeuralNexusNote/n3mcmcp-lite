@@ -18,10 +18,31 @@ from typing import Optional
 import numpy as np
 
 _model = None
+# Embedding model name (spec §3.2 default). Configurable via the
+# `embedding_model` config field so each deployment can pick its own
+# quality / resource / language tradeoff (e5-base ↔ e5-large ↔ a
+# domain-specific multilingual model) without editing code. The product
+# stays language-neutral: the choice is the operator's, not baked in.
+# Changing the model usually changes the vector dimension too — keep
+# `embedding_dim` (config) in sync and flush the index when switching.
+_DEFAULT_MODEL_NAME = "intfloat/multilingual-e5-base"
+_model_name = _DEFAULT_MODEL_NAME
 # Double-check locking: cheap pre-lock read keeps the fast path lock-free
 # once the model is loaded; re-check inside the lock prevents a race
 # where two callers both see _model is None before the first lock is acquired.
 _model_lock = threading.Lock()
+
+
+def set_model_name(name: str) -> None:
+    """Set the embedding model name BEFORE the first get_model() call.
+
+    Called once at startup from the resolved config (server._main). Has no
+    effect once the model is already loaded — a model swap requires a process
+    restart (and an index flush if the vector dimension changed).
+    """
+    global _model_name
+    if name and isinstance(name, str) and name.strip():
+        _model_name = name.strip()
 
 # Space-less script Unicode ranges — each character in these ranges is
 # treated as part of a contiguous run that gets bigram-expanded for the
@@ -135,9 +156,10 @@ def get_model():
             try:
                 with _silenced_stdout():
                     from sentence_transformers import SentenceTransformer
-                    _model = SentenceTransformer("intfloat/multilingual-e5-base")
+                    _model = SentenceTransformer(_model_name)
             except Exception as e:
-                print(f"[n3mc] embedding model load failed: {e}", file=sys.stderr)
+                print(f"[n3mc] embedding model load failed ({_model_name}): {e}",
+                      file=sys.stderr)
     return _model
 
 

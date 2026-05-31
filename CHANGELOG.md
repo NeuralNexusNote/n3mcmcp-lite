@@ -11,6 +11,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.9.0] — 2026-05-31
+
+### Added
+- **Configurable embedding model** (`config.py`, `processor.py`, `database.py`,
+  `server.py`): the embedding model is no longer hardcoded. Two new config
+  fields — `embedding_model` (default `intfloat/multilingual-e5-base`) and
+  `embedding_dim` (default `768`) — let each deployment pick its own quality /
+  resource / language tradeoff (e.g. `multilingual-e5-large` at 1024 dims, or a
+  domain-specific multilingual model) without editing code. The product stays
+  language-neutral; the choice is the operator's. The RediSearch vector index
+  is now built with `embedding_dim`, so it follows the chosen model. With the
+  defaults unchanged, behavior is identical to 1.8.0.
+  - `processor.set_model_name()` injects the configured model name before the
+    first `get_model()` call. A model swap requires a process restart and an
+    index flush (a different dimension is incompatible with existing vectors).
+
+### Fixed
+- **redis-py 8.x FT.SEARCH dict response** (`database.py`): redis-py 8.0
+  registers a response callback that converts the raw RESP2 list into a dict,
+  which broke every search path with `KeyError: 0` at `res[0]`. Added
+  `_unwrap_search_response()` to normalize list / dict / object responses back
+  to the canonical RESP2 flat-list form, applied to all FT.SEARCH calls.
+  `redis` is also pinned to `>=5.0.0,<8.0.0` until full 8.x support is verified.
+
 ## [1.8.0] — 2026-05-31
 
 ### Added

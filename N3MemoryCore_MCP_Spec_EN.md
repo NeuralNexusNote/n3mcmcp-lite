@@ -181,7 +181,8 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 
 ### 3.2 Embeddings
 
-- Model: `intfloat/multilingual-e5-base` / Vector: `float[768]`
+- Model: `intfloat/multilingual-e5-base` (default) / Vector: `float[768]` (default)
+- **The model is configurable**: set `embedding_model` (default `intfloat/multilingual-e5-base`) and `embedding_dim` (default `768`) in `config.json` so each deployment picks its own quality / resource / language tradeoff (e.g. `intfloat/multilingual-e5-large` at 1024 dims, or a domain-specific multilingual model). The product itself stays language-neutral — the choice belongs to the operator, not baked into the code. `embedding_dim` MUST match the chosen model's output dimension — the RediSearch vector index is built with this value. Changing either the model or the dimension requires a process restart and an index flush (a different dimension is incompatible with existing vectors). **AI MUST NOT auto-change these (see the §3 opening warning) — change them only via a human `config.json` edit.**
 - Always specify `normalize_embeddings=True` at encoding time to guarantee L2-normalized vectors (norm=1). This matters even with cosine distance: an unnormalized input breaks the `(1 − cosine_distance)` ↔ similarity identity.
 - **Input Prefixes (Required)**: Without prefixes, this model's accuracy degrades significantly:
 
@@ -675,7 +676,9 @@ Complete schema (missing fields auto-filled with defaults below):
   "rerank_phrase_weight":     0.2,
   "b_session_match":          1.0,
   "b_session_mismatch":       0.6,
-  "skip_code_blocks":         false
+  "skip_code_blocks":         false,
+  "embedding_model":          "intfloat/multilingual-e5-base",
+  "embedding_dim":            768
 }
 ```
 
@@ -691,6 +694,7 @@ Complete schema (missing fields auto-filled with defaults below):
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` passes the fused score through unchanged.
 - `b_session_match` / `b_session_mismatch` — the `b_session` factor in the ranking formula (see [§3.6](#36-ranking-formula)). For each row, the search compares the request's `effective_session` (per-call argument → `N3MC_SESSION_ID` env var → per-process startup UUID) against the row's stored `session_id`: matches multiply the score by `b_session_match` (default `1.0`), mismatches by `b_session_mismatch` (default `0.6`). Set both to `1.0` to disable the bias entirely (all rows symmetric).
 - `skip_code_blocks` — when `true`, `save_memory` rejects any content containing a triple-backtick fence (```` ``` ````) and returns `{"status": "skipped_code", "saved": false}`. Default `false` (inherit the FastAPI-era N3MemoryCore behavior where users who did not want code in memory could opt out). Heuristic only — the fence marker is the signal; mixed prose+code is rejected wholesale, not stripped. The LLM is instructed (§5) to avoid retrying the same payload on `skipped_code` and to save a prose description instead.
+- `embedding_model` / `embedding_dim` — the embedding model name (default `intfloat/multilingual-e5-base`) and its output vector dimension (default `768`). See [§3.2](#32-embeddings). Made configurable so the operator can pick the quality / resource / language tradeoff while the product stays language-neutral. `embedding_dim` MUST match the actual output dimension of `embedding_model` — the RediSearch vector index (`DIM`) is built from this value, so a mismatch breaks save and search. Changing either requires a **process restart + index flush** (Lite's 7-day TTL means stale data expires on its own if left). With the defaults unchanged, behavior is identical to prior versions.
 
 > **Multi-account on a single PC**: each OS user runs the server under their own `config.json` by default. To share a Redis across accounts, set the same `redis_url` in both configs — entries are segregated via the `owner_id` TAG filter.
 
