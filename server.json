@@ -7,13 +7,13 @@
     "url": "https://github.com/NeuralNexusNote/n3mcmcp-lite",
     "source": "github"
   },
-  "version": "1.6.2",
+  "version": "1.9.1",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "n3memorycore-mcp-lite",
-      "version": "1.6.2",
+      "version": "1.9.1",
       "transport": {
         "type": "stdio"
       }
