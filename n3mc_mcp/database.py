@@ -222,14 +222,18 @@ class Database:
     # ── §3.8 duplicate detection ─────────────────────────────────────────────
 
     def _near_dedup(self, vec_bytes: bytes, owner_id: str) -> Optional[float]:
-        """KNN=5 near-duplicate check; owner_id filtered in Python (spec §3.12)."""
+        """KNN=5 near-duplicate check across all team members (n3mc-postgres parity).
+
+        owner_id is accepted for API compatibility but no longer used to filter.
+        If any team member's record is semantically identical it counts as a dup.
+        """
         threshold = self.cfg.get("dedup_threshold", 0.95)
         try:
             res = self._client.execute_command(
                 "FT.SEARCH", INDEX_NAME,
                 "*=>[KNN 5 @embedding $vec AS __dist]",
                 "PARAMS", "2", "vec", vec_bytes,
-                "RETURN", "2", "__dist", "owner_id",
+                "RETURN", "1", "__dist",
                 "SORTBY", "__dist",
                 "LIMIT", "0", "5",
                 "DIALECT", "2",
@@ -238,9 +242,6 @@ class Database:
                 i = 1
                 while i + 1 < len(res):
                     fdict = _parse_fields(res[i + 1])
-                    if fdict.get("owner_id") != owner_id:
-                        i += 2
-                        continue
                     dist = _to_float(fdict.get("__dist", "1.0"))
                     sim = cosine_sim_from_distance(dist)
                     if sim >= threshold:
@@ -490,6 +491,12 @@ class Database:
         b_sess_match    = self.cfg.get("b_session_match", 1.0)
         b_sess_mismatch = self.cfg.get("b_session_mismatch", 0.6)
 
+        # b_install (n3mc-postgres parity): records written by this installation
+        # (local_id match) get a gentle ranking boost; others are visible but demoted.
+        own_local        = self.cfg.get("local_id", "")
+        b_inst_match    = self.cfg.get("b_local_match", 1.0)
+        b_inst_mismatch = self.cfg.get("b_local_mismatch", 0.8)
+
         vec_results  = self._vector_search(query, owner_id, limit)
         bm25_results = self._bm25_search(query, owner_id, limit)
 
@@ -515,6 +522,7 @@ class Database:
             mem_id          = vr.get("id") or br.get("id", "")
             row_sess        = vr.get("session_id") or br.get("session_id", "")
             turn_id         = vr.get("turn_id") or br.get("turn_id", "")
+            row_local       = vr.get("local_id") or br.get("local_id", "")
 
             cos  = vr.get("cos_sim", 0.0)
             bm25 = br.get("bm25_score", 0.0)
@@ -530,7 +538,14 @@ class Database:
                 if (effective_session and row_sess == effective_session)
                 else b_sess_mismatch
             )
-            score = final_score(cos, kw, dec, b, b_sess)
+            # b_install: same-installation records (same local_id) rank slightly
+            # higher than teammates' records — mirrors n3mc-postgres b_local behavior.
+            b_inst = (
+                b_inst_match
+                if (own_local and row_local == own_local)
+                else b_inst_mismatch
+            )
+            score = final_score(cos, kw, dec, b, b_sess) * b_inst
 
             # Change B (spec §6 min_score): do NOT prune by min_score here.
             # The lexical reranker (coverage + phrase bonus, run after parent
@@ -661,7 +676,11 @@ class Database:
         return final
 
     def _vector_search(self, query: str, owner_id: str, limit: int) -> dict[str, dict]:
-        """KNN search — no owner_id TAG filter (UUID hyphen issue §3.12)."""
+        """KNN search — no owner_id filter; all records visible (n3mc-postgres parity).
+
+        owner_id is returned so callers can compute b_local_id ranking. Records
+        from any owner are included so team members see each other's memories.
+        """
         vec_bytes = embed(query, is_query=True)
         if not vec_bytes:
             return {}
@@ -671,8 +690,8 @@ class Database:
                 "FT.SEARCH", INDEX_NAME,
                 f"*=>[KNN {knn_limit} @embedding $vec AS __dist]",
                 "PARAMS", "2", "vec", vec_bytes,
-                "RETURN", "11",
-                "__dist", "owner_id", "content", "timestamp", "timestamp_epoch",
+                "RETURN", "12",
+                "__dist", "owner_id", "local_id", "content", "timestamp", "timestamp_epoch",
                 "importance", "access_count", "parent_id", "id", "session_id", "turn_id",
                 "SORTBY", "__dist",
                 "LIMIT", "0", str(knn_limit),
@@ -690,9 +709,6 @@ class Database:
         while i + 1 < len(res):
             key   = res[i].decode() if isinstance(res[i], bytes) else str(res[i])
             fdict = _parse_fields(res[i + 1])
-            if fdict.get("owner_id") != owner_id:
-                i += 2
-                continue
             dist = _to_float(fdict.get("__dist", "1.0"))
             out[key] = {
                 "cos_sim":         cosine_sim_from_distance(dist),
@@ -705,12 +721,13 @@ class Database:
                 "id":              fdict.get("id", ""),
                 "session_id":      fdict.get("session_id", ""),
                 "turn_id":         fdict.get("turn_id", ""),
+                "local_id":        fdict.get("local_id", ""),
             }
             i += 2
         return out
 
     def _bm25_search(self, query: str, owner_id: str, limit: int) -> dict[str, dict]:
-        """BM25 FTS search — no owner_id TAG filter (spec §3.12)."""
+        """BM25 FTS search — no owner_id filter; all records visible (n3mc-postgres parity)."""
         fts_q = prepare_query(query)
         if not fts_q:
             return {}
@@ -722,8 +739,8 @@ class Database:
                 fts_query,
                 "SCORER", "BM25",
                 "WITHSCORES",
-                "RETURN", "10",
-                "owner_id", "content", "timestamp", "timestamp_epoch",
+                "RETURN", "11",
+                "owner_id", "local_id", "content", "timestamp", "timestamp_epoch",
                 "importance", "access_count", "parent_id", "id", "session_id", "turn_id",
                 "LIMIT", "0", str(bm25_limit),
                 "DIALECT", "2",
@@ -744,9 +761,6 @@ class Database:
                 score_raw.decode() if isinstance(score_raw, bytes) else score_raw
             )
             fdict = _parse_fields(res[i + 2])
-            if fdict.get("owner_id") != owner_id:
-                i += 3
-                continue
             out[key] = {
                 "bm25_score":      score,
                 "content":         fdict.get("content", ""),
@@ -758,6 +772,7 @@ class Database:
                 "id":              fdict.get("id", ""),
                 "session_id":      fdict.get("session_id", ""),
                 "turn_id":         fdict.get("turn_id", ""),
+                "local_id":        fdict.get("local_id", ""),
             }
             i += 3
         return out
@@ -765,15 +780,13 @@ class Database:
     # ── list ─────────────────────────────────────────────────────────────────
 
     def list_memories(self, limit: int = 20) -> list[dict]:
-        """Return standalone memories + parent docs newest-first (spec §3.11).
+        """Return standalone memories + parent docs newest-first.
 
-        FT.SEARCH '*' fetches all indexed mem: entries; Python filters to
-        those owned by this owner AND with empty parent_id (standalone only).
-        Parent docs are fetched separately via SCAN doc:* (outside the index).
+        All records (any owner) are visible — n3mc-postgres parity for team use.
+        Chunks are hidden; parents shown with [doc×N] tag.
         """
         if not self._ok:
             return []
-        owner_id = self.cfg["owner_id"]
         results: list[dict] = []
 
         # Standalone memories from the RediSearch index.
@@ -782,7 +795,7 @@ class Database:
             res = self._client.execute_command(
                 "FT.SEARCH", INDEX_NAME,
                 "*",
-                "RETURN", "5", "owner_id", "parent_id", "content", "timestamp", "id",
+                "RETURN", "4", "parent_id", "content", "timestamp", "id",
                 "SORTBY", "timestamp_epoch", "DESC",
                 "LIMIT", "0", str(fetch_limit),
                 "DIALECT", "2",
@@ -791,10 +804,9 @@ class Database:
                 i = 1
                 while i + 1 < len(res):
                     fdict = _parse_fields(res[i + 1])
-                    if (fdict.get("owner_id") != owner_id
-                            or fdict.get("parent_id", "")):
+                    if fdict.get("parent_id", ""):
                         i += 2
-                        continue
+                        continue  # skip chunks; parent doc covers them
                     results.append({
                         "id":        fdict.get("id", ""),
                         "content":   fdict.get("content", ""),
@@ -814,8 +826,6 @@ class Database:
                 for key in keys:
                     try:
                         d = self._client.hgetall(key)
-                        if d.get(b"owner_id", b"").decode() != owner_id:
-                            continue
                         raw_content = d.get(b"content", b"")
                         preview     = raw_content.decode("utf-8") if raw_content else ""
                         chunk_count = d.get(b"chunk_count", b"?").decode()

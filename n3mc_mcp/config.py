@@ -29,6 +29,8 @@ DEFAULTS: dict[str, Any] = {
     "rerank_phrase_weight":    0.2,
     "b_session_match":         1.0,
     "b_session_mismatch":      0.6,
+    "b_local_match":           1.0,
+    "b_local_mismatch":        0.8,
     "skip_code_blocks":        False,
 }
 
