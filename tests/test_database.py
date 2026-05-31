@@ -187,13 +187,7 @@ class TestVectorSearch:
         results = db.search_memory("anything at all")
         assert results == []
 
-    def test_owner_visibility(self, cfg, redis_client):
-        """Different owner_id records are now visible to all (n3mc-postgres parity).
-
-        owner_id is stored and returned but no longer used as a hard filter.
-        Records from any installation are visible; local_id match gives a ranking
-        boost (b_local_match=1.0) vs mismatch (b_local_mismatch=0.8).
-        """
+    def test_owner_filter(self, cfg, redis_client):
         import uuid
         from n3mc_mcp.database import Database
 
@@ -211,9 +205,7 @@ class TestVectorSearch:
         db1.save_memory("owner1 specific content about dolphins")
         time.sleep(0.5)
         results = db2.search_memory("dolphins")
-        # Records from owner1 ARE visible to owner2 (team-visibility design)
-        assert len(results) >= 1
-        assert any("dolphins" in r.get("content", "") for r in results)
+        assert len(results) == 0
 
 
 # ── TestSha1 ─────────────────────────────────────────────────────────────────
