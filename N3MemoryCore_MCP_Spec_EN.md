@@ -183,6 +183,23 @@ n3memorycore-mcp-lite/
 
 > **⚠️ AI must not auto-modify**: AI must not autonomously change any of the following specifications for speed improvement or optimization. Changes to the embedding model, vector dimensions, or TTL are only permitted by a human manually editing `config.json`.
 
+> ### 📌 Known implementation pitfalls (found during implementation, debugging & review — required reading)
+>
+> When re-implementing from this spec, the following are the classic traps that "look like they work but break a core feature." See the "⚠️ Implementation note" in each section for details.
+>
+> | # | Trap | Symptom | Fix | Detail |
+> |---|------|---------|-----|--------|
+> | 1 | redis-py 8.0 defaults to **RESP3** | `FT.SEARCH` always returns 0 results | Handle the RESP3 dict response (current impl) + pin `redis<8.0.0`, or `from_url(..., protocol=2)` | [§3.3](#33-redis-connection--ttl) |
+> | 2 | BM25 score not fetched | Keyword search disabled (degrades to vector-only) | `.with_scores().scorer("BM25")` | [§3.6](#36-ranking-formula) |
+> | 3 | NFKC normalization not applied | Full-/half-width dupes & search drift | NFKC on embedding & dedup hash only | [§3.7](#37-tokenization--punctuation) |
+> | 4 | Model load **blocks** startup | MCP connection timeout (~40s) | Background after stdio start + lock for thread safety | [§3.9](#39-startup-sequence--self-recovery) |
+> | 5 | `doc.id` is the **full key** (`mem:<uuid>`) | `mem:mem:...` ghost keys (TTL-less orphans) / `[doc×0]` / delete fails | Normalize to bare UUID with `_doc_bare_id()` | [§3.12](#312-tag-query-uuid-constraint--python-side-filtering) |
+> | 6 | `SCAN mem:*` also matches `mem:sha:*` | `HGET` fails with `WRONGTYPE` | Exclude by prefix or catch the exception | [§3.12](#312-tag-query-uuid-constraint--python-side-filtering) |
+> | 7 | `serverInfo.version` / `instructions` unset | Empty version / instructions not advertised | `Server(name, version=, instructions=)` | [§4.2](#42-initialize-response) |
+> | 8 | No `turn_id` in `search_memory` output | `recall_thread` can't be called (workflow breaks) | Add `turn_id` to RETURN and to the markdown | [§4.3.1](#431-retrieval-extensions) |
+> | 9 | Running pytest during the Evidence Report | `FLUSHDB` wipes live data | Stop pytest during §10 / use a separate Redis | [§9](#9-tests-pytest) |
+> | 10 | Measuring "0.5s steady state" over the MCP round-trip | Looks like 5–10s, false negative | 0.5s is a pure server-side target | [§10](#10-self-evaluation-evidence-report) |
+
 ### 3.1 ID Hierarchy
 
 N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
@@ -213,6 +230,8 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 ### 3.3 Redis Connection & TTL
 
 **Connection**: constructed from `redis_url` (config field) or the `N3MC_REDIS_URL` environment variable (env wins). Default: `redis://localhost:6379/0`. `decode_responses=False` — the client must handle binary embedding payloads.
+
+> **⚠️ Implementation note (redis-py 8.0+ / RESP3)**: As of redis-py 8.0 the default protocol of `from_url()` became **RESP3**. Combining `decode_responses=False` with RESP3 makes `FT.SEARCH` responses arrive as a **dict keyed by bytes**, `Result.from_resp3` fails to parse, and **search always returns 0 results**. **The current implementation absorbs this by (a) pinning `redis<8.0.0` in `pyproject.toml` and (b) also handling the case where `FT.SEARCH` returns a dict response.** If you deliberately use a newer redis-py, **explicitly pass `protocol=2` (RESP2)** on connect (`redis.from_url(url, decode_responses=False, protocol=2)`). Apply this to **both** the live client and the test fixtures.
 
 **TTL**: every `HSET` of `mem:<uuid>` is followed (atomically via `PIPELINE`) by `EXPIRE mem:<uuid> <ttl_seconds>`. The sibling `mem:sha:<sha1>` guard is written with `SET ... EX <ttl_seconds>` in the same pipeline. Default TTL is 604 800 s (7 d).
 
@@ -340,6 +359,12 @@ RediSearch returns `cosine_distance ∈ [0, 2]` for normalized vectors. Clamping
 
 (RediSearch BM25 scores are non-negative, but the `abs()` keeps the algorithm identical to the forthcoming Pro build where FTS5 produces negative scores.)
 
+> **⚠️ Implementation note (fetching the BM25 score — the most frequent bug)**: RediSearch `FT.SEARCH` **does not return scores by default**. Without **`.with_scores()` on the redis-py `Query`, `doc.score` is `None`**, the implementation falls back to `bm25 = 0.0`, and **keyword_relevance is always 0 → the BM25 leg of the hybrid search (weight 0.3) dies completely** (it degrades to vector-only; the lexical rerank compensates, which is what makes it deceptively appear to work). Furthermore, even with `.with_scores()`, the **default scorer is TFIDF**, which on a small corpus returns a flat `1.0` for every doc and does not reflect term frequency. **Explicitly set the scorer to `BM25`**:
+> ```python
+> Query(raw_q).with_scores().scorer("BM25").paging(0, k).dialect(2)
+> ```
+> To survive Redis version differences (`BM25` was renamed to `BM25STD`), fall back in the order `BM25` → `BM25STD` → default for robustness. Measured (two docs containing the same term 1× vs 5×), `BM25` differentiates them at `0.20` / `0.56` respectively.
+
 **time_decay**:
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
@@ -373,6 +398,8 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 ```
 
 **Empty-query rule**: if the cleaned query is empty after stripping, skip keyword search and rank using vector search only.
+
+> **⚠️ Implementation note (don't forget to apply NFKC normalization)**: As defined in [§3.13](#313-encoding-safety), **NFKC normalization is applied in exactly two places: embedding generation and dedup-hash computation** (`unicodedata.normalize("NFKC", text)`). This makes full-/half-width (`ＡＩ`↔`AI`, `２０２６`↔`2026`) and composed/decomposed forms equivalent for search and dedup. It is **easy to forget**, so to be explicit: normalize **both** the text fed to `embed()` and the SHA1 input used to build the `mem:sha:` / `docsha:` guard keys with NFKC. **Do not apply it to the stored `content` HASH field** (preserve the verbatim contract). Run the same normalization consistently across all of save / dedup-check / delete (otherwise the hash at save time won't match the hash at delete time).
 
 ### 3.8 Duplicate Rejection
 
@@ -418,7 +445,11 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
    - Load `intfloat/multilingual-e5-base` into memory so the first tool call is not slowed by the one-time model load.
    - **Non-fatal**: if the model fails to load (e.g. offline, HF cache absent), log a warning and continue. The model will be retried lazily on first `save_memory` / `search_memory`.
 
-Steps 1 and 3 must complete before the server accepts tool calls. Steps 2 and 4 are best-effort — an unreachable Redis does not stop the process but disables the tools until Redis becomes reachable again.
+> **⚠️ Implementation note (load the model in the background, *after* the stdio loop starts)**: Initializing `SentenceTransformer` takes **~30–40 seconds** even with the HF cache present, because of PyTorch init (measured 39s). Running it synchronously *before* the stdio loop starts makes the **MCP `initialize` handshake time out, so the client (e.g. Claude Code) fails to connect**. Start step 4 in the background (e.g. via `ThreadPoolExecutor`) **after `stdio_server()` begins listening**. That lets you return the initialize response right after steps 1–3 (measured ~2s), while the model becomes ready before the first tool call arrives.
+>
+> **Thread safety**: the background load above can race with the "first tool call," so `get_model()` may be invoked from two threads at once. Protect the singleton with **double-checked locking** (`threading.Lock`).
+
+Steps 1 and 3 must complete before the server accepts tool calls. Steps 2 and 4 are best-effort — an unreachable Redis does not stop the process but disables the tools until Redis becomes reachable again. **Step 4 must be backgrounded as noted above.**
 
 ### 3.10 Repair
 
@@ -483,6 +514,18 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
 **Performance note**: Fetching globally and filtering in Python incurs extra network transfer when multiple owner IDs share the same Redis instance. The Lite build assumes a single-user, single-install deployment, so this is not a practical concern. Should multi-tenant use arise, consider storing a separate hyphen-free derived field (e.g. `owner_id_tag = owner_id.replace("-", "")`) alongside the canonical `owner_id` and using that field for TAG queries.
 
 **The TAG index schema is preserved**: The `owner_id` and `parent_id` TAG field declarations in §3.5 remain intact. If a future Redis Stack release resolves the UUID hyphen parse error, the Python-side filtering can be moved back into the FT.SEARCH queries without any schema migration.
+
+> **⚠️ Implementation note (`doc.id` returns the full Redis key — double-prefix bugs are common)**: Under RESP2 (`protocol=2`), the **`doc.id` in `FT.SEARCH` results is always the full Redis key (`"mem:<uuid>"`)**, not the bare UUID stored in the HASH `id` field — even when `id` is listed in `RETURN_FIELDS`. Unaware of this, doing `MEM_PREFIX + doc.id` produces a **double-prefixed ghost key `"mem:mem:<uuid>"`**; `EXPIRE`/`HINCRBY` then act on it and create a **TTL-less orphan key** (breaking the "TTL on every write" contract of §3.4).
+>
+> Fix: use a `_doc_bare_id(doc)` helper that strips the leading `mem:` exactly once to **normalize to the bare UUID**, and store the bare UUID in the row dict's `id`. Always build `MEM_PREFIX`-prefixed operations (`EXPIRE`, `HINCRBY`, `DELETE`) from this bare UUID. The **impact is broad**, so audit every FT.SEARCH consumer:
+> - `hybrid_search` **TTL refresh** (after parent resolution `row["id"]` is the bare parent UUID; stash the original chunk UUID in a separate field before adding `mem:`. The `chunk_ids` sibling-chunk bulk refresh of §3.11 must use the same bare-UUID rule.)
+> - `delete_by_session` **single-memory deletion** (`MEM_PREFIX + bare_id`)
+> - `list_memories` **display ID** (unify the user-facing ID to the bare UUID)
+> - `delete_memory` cascade (also normalize to bare UUID in the `@parent_id` SCAN fallback)
+>
+> Also note that **`SCAN mem:*` matches `mem:sha:*` (STRING type) and `SCAN doc:*` matches `docsha:*` (STRING type)**. Exclude them by prefix before reading HASH fields, or catch the `WRONGTYPE` exception (otherwise `HGET` fails with `WRONGTYPE`).
+>
+> **Fetching `chunk_count` during parent resolution**: when folding a chunk hit into its parent, fetch not only `content` but also **`chunk_count` (and `chunk_ids` / `turn_id`)** from `doc:<pid>`, otherwise the `[doc×N]` tag in the results is always `[doc×0]` (fetching them in a single pipeline is efficient).
 
 ### 3.13 Encoding Safety
 
@@ -594,6 +637,8 @@ The server advertises:
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
 
+> **⚠️ Implementation note (don't forget to set version / instructions)**: `serverInfo.version` and `instructions` can be **passed as `Server()` constructor arguments** (`Server(name, version="1.6.0", instructions=INSTRUCTIONS)`). Forget this and the version is easily empty and the instructions never advertised. Passing them to the constructor lets `create_initialization_options()` pick them up automatically. Depending on the MCP SDK version, also assigning `init_options.instructions` afterward makes it reliable.
+
 ### 4.3 Tools
 
 Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §4.3.1; same names as the forthcoming Pro build, except `delete_memories_by_session` which is Lite-only — Pro will keep only the per-record `delete_memory` to minimize accidental-deletion risk on a persistent store):
@@ -629,6 +674,8 @@ Either bound may be specified alone. These do not alter the existing ranking log
 | `recall_thread` | `turn_id: string, before?: int (default 2), after?: int (default 2)` | Returns markdown that interleaves the entry with the given `turn_id` plus the `before` preceding and `after` following entries, sorted ascending by save timestamp. The Lite implementation scans all stored entries (parent documents, standalone memories, and chunks) sharing the same `turn_id` and returns them in chronological order. When nothing matches, returns the JSON string `{"status":"not_found","turn_id":...}`. |
 
 **Operational rule**: The connected LLM SHOULD pass a hit's `turn_id` to `recall_thread` when the snippet returned by `search_memory` is insufficient to answer. End users do not need to invoke this tool directly.
+
+> **⚠️ Implementation note (emit `turn_id` in the `search_memory` response)**: For the operational rule above to work, the LLM must be able to read the `turn_id` to pass to `recall_thread` from the `search_memory` results. Therefore **include each hit's `turn_id` in the `search_memory` markdown output** (omit when empty). In practice, add `turn_id` to the `RETURN_FIELDS` of `_vector_search` / `_bm25_search`; on parent resolution, fetch `turn_id` from `doc:<pid>` and put it on the row dict; and emit a `**turn_id**: \`...\`` line in the final markdown. Without this, `recall_thread` is effectively uncallable (the spec's operational workflow does not close).
 
 ### 4.4 Error Handling
 
@@ -845,6 +892,8 @@ Tests auto-skip (not fail) if Redis Stack is not reachable at `N3MC_REDIS_TEST_U
 
 > **⚠️ Destructive test DB**: RediSearch can only create indexes on DB 0 (`Cannot create index on db != 0`), so the test suite FLUSHDBs DB 0 before and after every test. Do **not** point `N3MC_REDIS_TEST_URL` at a Redis instance that holds data you care about — run a dedicated container for testing.
 
+> **⚠️ Do not run pytest during the Evidence Report (§10)**: §10 saves and searches real memories against a live MCP server (the same DB 0). Running `pytest` in the middle of it means **`FLUSHDB` wipes the §10 data along with everything else**, so verification suddenly turns up "no results" and gets confusing. While running §10, stop pytest or point the tests at a separate (dedicated) Redis on another container/host.
+
 ### Directory layout
 
 ```
@@ -912,6 +961,8 @@ pytest tests/test_database.py -v
 pytest tests/ -v -k "not TestEmbedding"
 ```
 
+> **⚠️ The `slow` marker (optional)**: Heavy tests that load the embedding model can be excluded with `-k "not TestEmbedding"` as above. Alternatively, tag them with `@pytest.mark.slow` and register `slow` under `[tool.pytest.ini_options].markers` in `pyproject.toml`, then exclude them with `pytest -m "not slow"` (an unregistered marker raises `PytestUnknownMarkWarning`).
+
 > **⚠️ Relationship to the Evidence Report**: A failing automated test does **not** block the §10 sign-off. The Evidence Report is the sole pass/fail gate for implementation completeness. The automated suite is an optional regression aid and must not trigger an endless fix-and-retry loop during the first build.
 
 ---
@@ -921,6 +972,8 @@ pytest tests/ -v -k "not TestEmbedding"
 > Once implementation is complete, the AI runs the following checks autonomously and reports each item at ⭐⭐⭐⭐⭐. This is not a post-generation one-shot scorecard: it assumes the §9 pytest suite is green. MCP Lite is judged on *best-in-class behavior given the Redis-Stack + 7-day-TTL constraint set*.
 
 1. **Latency & process health**: Call `search_memory` from an MCP client and measure both the first call (which includes model load) and subsequent calls. Target: **≤3.0 s first call / ≤0.5 s steady state on CPU**. Also confirm that calling any tool while Redis Stack is down does **not** crash the server — it must return the "start Redis Stack" hint.
+
+   > **⚠️ Interpreting the measurement**: "≤0.5 s steady state" is a target for **pure server-side processing** (embedding generation + Redis KNN/BM25 + ranking). Measured *through* an MCP client (e.g. Claude Code), the **JSON-RPC round-trip plus client-side LLM processing time is added on top**, and the end-to-end median can be **5–10 s** (this is not a spec violation). To measure the pure server side, use a microbenchmark that calls the `processor`/`database` functions directly. Also note, per §3.9, that the model load is backgrounded, so **if the "first tool call" arrives before the background load finishes it may wait up to ~40 s** (the first call after the model is loaded is a few seconds).
 
 2. **Real-person recall test (historical data)**: Save a passage about a real historical figure via `save_memory`, then search for that figure's name with `search_memory`. Pass criterion: the saved record appears in the **top-3 results**.
    - Japanese example: "坂本龍馬" (Sakamoto Ryoma)

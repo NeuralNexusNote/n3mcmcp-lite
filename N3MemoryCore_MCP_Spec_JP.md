@@ -182,6 +182,23 @@ n3memorycore-mcp-lite/
 
 > **⚠️ AI は自動改変してはならない**：速度向上・最適化の名目で以下の仕様を自律的に変更してはなりません。埋め込みモデル・ベクトル次元・TTL の変更は人間による `config.json` 手編集でのみ許可されます。
 
+> ### 📌 実装上の既知の落とし穴（実装・デバッグ・レビューで判明・必読）
+>
+> 本仕様書から再実装する際、以下は「動いているように見えて核心機能が壊れる」典型的な罠である。各詳細は該当節の「⚠️ 実装注意」を参照。
+>
+> | # | 罠 | 症状 | 対処 | 詳細 |
+> |---|----|------|------|------|
+> | 1 | redis-py 8.0 が **RESP3** 既定 | `FT.SEARCH` が常に 0 件 | RESP3 の dict 応答をハンドリング（現行実装）＋ `redis<8.0.0` ピン、または `from_url(..., protocol=2)` | [§3.3](#33-redis-接続と-ttl) |
+> | 2 | BM25 スコア未取得 | キーワード検索が無効化（ベクトルのみに退化） | `.with_scores().scorer("BM25")` | [§3.6](#36-ランキング式) |
+> | 3 | NFKC 正規化の適用漏れ | 全角/半角の重複・検索ゆれ | embedding と dedup hash のみに NFKC | [§3.7](#37-トークナイズと句読点処理) |
+> | 4 | モデルロードが起動を**ブロック** | MCP 接続タイムアウト（~40s） | stdio 起動後にバックグラウンド + ロックでスレッド安全化 | [§3.9](#39-起動シーケンスと自己回復) |
+> | 5 | `doc.id` が**フルキー**（`mem:<uuid>`） | `mem:mem:...` ゴーストキー（TTL なし孤立） / `[doc×0]` / 削除失敗 | `_doc_bare_id()` で裸 UUID 統一 | [§3.12](#312-tag-クエリの-uuid-制約と-python-側フィルタリング) |
+> | 6 | `SCAN mem:*` が `mem:sha:*` にもマッチ | `HGET` が `WRONGTYPE` で落ちる | プレフィックス除外 or 例外捕捉 | [§3.12](#312-tag-クエリの-uuid-制約と-python-側フィルタリング) |
+> | 7 | `serverInfo.version` / `instructions` 未設定 | version 空・指示未広告 | `Server(name, version=, instructions=)` | [§4.2](#42-initialize-応答) |
+> | 8 | `search_memory` 応答に `turn_id` 無し | `recall_thread` が呼べない（運用フロー断絶） | RETURN に `turn_id`、markdown に出力 | [§4.3.1](#431-取り出し拡張ツールretrieval-extensions) |
+> | 9 | Evidence Report 中に pytest 実行 | `FLUSHDB` がライブデータを消す | §10 中は pytest を止める／別 Redis | [§9](#9-テストpytest) |
+> | 10 | 「定常 0.5s」を MCP 往復で計測 | 5〜10s に見え誤判定 | 0.5s は純サーバー側目標と理解 | [§10](#10-自律評価evidence-report) |
+
 ### 3.1 ID 階層
 
 N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フィールドを使います：
@@ -212,6 +229,8 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 ### 3.3 Redis 接続と TTL
 
 **接続**：`redis_url`（設定フィールド）または環境変数 `N3MC_REDIS_URL`（環境変数が優先）から構築。既定値：`redis://localhost:6379/0`。`decode_responses=False` — クライアントはバイナリ埋め込みペイロードを扱う必要がある。
+
+> **⚠️ 実装注意（redis-py 8.0+ / RESP3）**：redis-py 8.0 から `from_url()` の既定プロトコルが **RESP3** になった。`decode_responses=False` と RESP3 を併用すると `FT.SEARCH` の応答が **bytes キーの dict** として届き、`Result.from_resp3` のパースが失敗して**検索結果が常に 0 件**になる。**現行実装はこれを (a) `pyproject.toml` で `redis<8.0.0` をピンし、かつ (b) `FT.SEARCH` が dict 応答を返した場合のハンドリングを併用して吸収している。** 新しい redis-py を意図的に使う場合は、接続時に **`protocol=2`（RESP2）を明示**すること（`redis.from_url(url, decode_responses=False, protocol=2)`）。この設定は接続クライアント・テストフィクスチャの**両方**に適用する。
 
 **TTL**：`mem:<uuid>` への `HSET` は毎回 `EXPIRE mem:<uuid> <ttl_seconds>` と（`PIPELINE` でアトミックに）組み合わせる。兄弟である `mem:sha:<sha1>` ガードは同じパイプライン内で `SET ... EX <ttl_seconds>` にて書き込む。既定 TTL は 604 800 秒（7 日）。
 
@@ -336,6 +355,13 @@ RediSearch は正規化ベクトルに対し `cosine_distance ∈ [0, 2]` を返
 
 （RediSearch の BM25 は非負だが、FTS5 が負値を返す Pro 版（公開予定）と同じアルゴリズムに揃えるため `abs()` を保つ。）
 
+> **⚠️ 実装注意（BM25 スコアの取得・最頻出バグ）**：RediSearch の `FT.SEARCH` は **既定ではスコアを返さない**。redis-py の `Query` で **`.with_scores()` を呼ばないと `doc.score` が `None`** となり、実装が `bm25 = 0.0` にフォールバックして **keyword_relevance が常に 0 → ハイブリッド検索の BM25 側（重み 0.3）が完全に死ぬ**（実質ベクトル検索のみに退化する。語彙リランクが代償するため一見動作して見えるのが厄介）。
+> さらに `.with_scores()` を付けても **既定スコアラーは TFIDF** で、小規模コーパスでは全 doc が一律 `1.0` を返し term frequency が反映されない。**スコアラーを `BM25` に明示指定**すること：
+> ```python
+> Query(raw_q).with_scores().scorer("BM25").paging(0, k).dialect(2)
+> ```
+> Redis のバージョン差（`BM25` → `BM25STD` への改称）に備え、`BM25` → `BM25STD` → 既定 の順でフォールバックすると堅牢。実測（同一語を 1 回 vs 5 回含む 2 文書）で `BM25` がそれぞれ `0.20` / `0.56` と差別化することを確認済み。
+
 **time_decay**：
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
@@ -369,6 +395,8 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 ```
 
 **空クエリ規則**：整形後に空文字列になった場合、キーワード検索はスキップしベクトル検索のみでランキングする。
+
+> **⚠️ 実装注意（NFKC 正規化の適用漏れに注意）**：[§3.13](#313-エンコーディング安全策) が定める通り、**NFKC 正規化は「embedding 生成」と「dedup hash 計算」の 2 か所にのみ適用**する（`unicodedata.normalize("NFKC", text)`）。これにより全角↔半角（`ＡＩ`↔`AI`、`２０２６`↔`2026`）・合成/分解形が検索・重複判定で同一視される。**実装時に忘れやすい**ため明示する：`embed()` のエンコード対象テキストと、`mem:sha:` / `docsha:` ガードキー生成用の SHA1 入力の両方を NFKC 正規化すること。**保存される `content` HASH フィールドには適用しない**（verbatim 契約を守る）。save / dedup-check / delete の全経路で一貫して同じ正規化を通すこと（さもないと保存時と削除時でハッシュが一致しない）。
 
 ### 3.8 重複判定
 
@@ -414,7 +442,11 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
    - `intfloat/multilingual-e5-base` をメモリにロードし、初回ツール呼び出しが一度だけのモデルロードで遅くならないようにする。
    - **非致命的**：ロード失敗（オフライン・HF キャッシュ未生成等）時は警告を出して続行。初回 `save_memory` / `search_memory` で遅延リトライする。
 
-手順 1 と 3 は完了してからでないとツール呼び出しを受け付けない。手順 2 と 4 はベストエフォート — Redis 到達不可はプロセスを止めないが、Redis が戻るまでツールは無効。
+> **⚠️ 実装注意（モデルロードは stdio ループ起動「後」にバックグラウンドで）**：`SentenceTransformer` の初期化は HF キャッシュ済みでも PyTorch 初期化のため **~30〜40 秒** かかる（実測 39s）。これを stdio ループ起動「前」に同期実行すると、**MCP `initialize` ハンドシェイクがタイムアウトしてクライアント（Claude Code 等）が接続失敗**する。手順 4 は **`stdio_server()` が listening を開始した後**に `ThreadPoolExecutor` 等でバックグラウンド起動すること。これにより手順 1〜3（実測 ~2s）の完了直後に initialize 応答を返せ、モデルは最初のツール呼び出しが来るまでに準備が整う。
+>
+> **スレッド安全性**：上記バックグラウンドロードと「最初のツール呼び出し」が競合して `get_model()` が 2 スレッドから同時に呼ばれうる。`get_model()` は **double-checked locking**（`threading.Lock`）でシングルトンを保護すること。
+
+手順 1 と 3 は完了してからでないとツール呼び出しを受け付けない。手順 2 と 4 はベストエフォート — Redis 到達不可はプロセスを止めないが、Redis が戻るまでツールは無効。**手順 4 は上記の通りバックグラウンド化必須。**
 
 ### 3.10 修復
 
@@ -479,6 +511,18 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 **パフォーマンス上の注意**：グローバル取得後の Python フィルタリングは、複数ユーザーが同一 Redis を共有する場合（`owner_id` の違うレコードが混在する場合）に余分なネットワーク転送が発生する。Lite 版は単一ユーザー・単一インストールを想定しているため実用上の問題は生じないが、マルチテナント要件がある場合は `owner_id` からハイフンを除いた派生フィールド（TAG 用）を別途保持する構成を検討する。
 
 **TAG フィールドは引き続きインデックス定義に残す**：将来の RediSearch バージョンで UUID TAG クエリの構文エラーが解消された場合、上記フィルタリングを FT.SEARCH クエリ側に戻せるようにするため、`owner_id`・`parent_id` の TAG インデックス定義（§3.5）はそのまま維持する。
+
+> **⚠️ 実装注意（`doc.id` はフル Redis キーを返す — 二重プレフィックスバグ多発）**：RESP2（`protocol=2`）では `FT.SEARCH` 結果の **`doc.id` は常にフル Redis キー（`"mem:<uuid>"`）** を返す（HASH の `id` フィールド値である裸 UUID ではない）。`RETURN_FIELDS` に `id` を含めても同様。これを知らずに `MEM_PREFIX + doc.id` とすると **`"mem:mem:<uuid>"` という二重プレフィックスのゴーストキー**が生まれ、`EXPIRE`/`HINCRBY` がそこへ作用して **TTL なしの孤立キー**を作る（§3.4 の「全書き込みに TTL」契約を破る）。
+>
+> 対処：`_doc_bare_id(doc)` ヘルパーで先頭の `mem:` を 1 回だけ剥がして**裸 UUID に統一**し、行 dict の `id` には裸 UUID を格納する。`MEM_PREFIX` を付ける操作（`EXPIRE`・`HINCRBY`・`DELETE`）は常にこの裸 UUID から組み立てる。**影響範囲は広い**ので全 FT.SEARCH 消費箇所を点検すること：
+> - `hybrid_search` の **TTL リフレッシュ**（親解決後は `row["id"]` が裸の親 UUID、元チャンク UUID は別フィールドに退避してから `mem:` を付与。`chunk_ids` による兄弟チャンク一括リフレッシュ（§3.11）も同じ裸 UUID 規則で組み立てる）
+> - `delete_by_session` の **単一メモリ削除**（`MEM_PREFIX + bare_id`）
+> - `list_memories` の **表示 ID**（ユーザー向け ID を裸 UUID で統一）
+> - `delete_memory` のカスケード（`@parent_id` SCAN フォールバックでも同様に裸 UUID 化）
+>
+> あわせて **`SCAN mem:*` は `mem:sha:*`（STRING 型）にも、`SCAN doc:*` は `docsha:*`（STRING 型）にもマッチする**。HASH フィールドを読む前にプレフィックスで除外するか `WRONGTYPE` 例外を捕捉すること（さもないと `HGET` が `WRONGTYPE` で落ちる）。
+>
+> **親解決時の `chunk_count` 取得**：チャンクヒットを親に折りたたむ際、`doc:<pid>` から `content` だけでなく **`chunk_count`（と `chunk_ids`・`turn_id`）も取得**しないと、検索結果の `[doc×N]` タグが常に `[doc×0]` になる（1 パイプラインでまとめて取得すると効率的）。
 
 ### 3.13 エンコーディング安全策
 
@@ -584,6 +628,8 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 7 日で失効する」旨を明示する。**
 
+> **⚠️ 実装注意（version / instructions の設定漏れに注意）**：`serverInfo.version` と `instructions` は **`Server()` コンストラクタ引数で渡せる**（`Server(name, version="1.6.0", instructions=INSTRUCTIONS)`）。これを忘れると version が空・instructions が未広告になりやすい。コンストラクタで渡せば `create_initialization_options()` が自動で拾う。MCP SDK のバージョンによっては `init_options.instructions` への後付け代入も併用すると確実。
+
 ### 4.3 ツール
 
 `tools/list` で公開する 7 ツール（6 基本ツール + `recall_thread`（§4.3.1）。名前は Pro 版（公開予定）と揃える。`delete_memories_by_session` のみ Lite 専用 — Pro 版は永続化を重視するため誤削除リスクを避け個別 `delete_memory` のみを公開する予定）：
@@ -619,6 +665,8 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 | `recall_thread` | `turn_id: string, before?: int (既定 2), after?: int (既定 2)` | 指定 `turn_id` のエントリと、それ以前 `before` 件・それ以後 `after` 件を時系列で並べた markdown を返す。並び替えは保存時刻の昇順。Lite では Redis に保存された全エントリの中で「同一 turn_id を持つ親ドキュメント／単独メモリ／チャンク」をスキャンして返す。ヒットゼロの場合 `{"status":"not_found","turn_id":...}` を JSON 文字列で返す。 |
 
 **運用**: 接続中の LLM は `search_memory` のスニペットで文脈不足と判断したとき、ヒットの `turn_id` を `recall_thread` に渡して周辺会話を取得すること。ユーザーがこのツールを直接指定する必要はない。
+
+> **⚠️ 実装注意（`search_memory` 応答に `turn_id` を出力すること）**：上記運用が成立するには、`recall_thread` に渡す `turn_id` を LLM が `search_memory` の結果から読み取れる必要がある。したがって **`search_memory` の markdown 出力に各ヒットの `turn_id` を含める**こと（空のときは省略可）。実装上は `_vector_search` / `_bm25_search` の `RETURN_FIELDS` に `turn_id` を追加し、親解決時は `doc:<pid>` から `turn_id` を取得して行 dict に載せ、最終 markdown に `**turn_id**: \`...\`` 行を出す。これが無いと `recall_thread` は事実上呼べない（仕様の運用フローが閉じない）。
 
 ### 4.4 エラー処理
 
@@ -836,6 +884,8 @@ Redis Stack が `N3MC_REDIS_TEST_URL`（既定 `redis://localhost:6379/0`）で�
 
 > **⚠️ 破壊的なテスト DB**：RediSearch は DB 0 以外でインデックスを作成できません（`Cannot create index on db != 0`）。このためテストスイートは各テストの前後で DB 0 を `FLUSHDB` します。残したいデータが入っている Redis には `N3MC_REDIS_TEST_URL` を向けないでください — テスト専用コンテナを用意してください。
 
+> **⚠️ Evidence Report（§10）実施中は pytest を走らせない**：§10 はライブの MCP サーバー（同じ DB 0）に対して実メモリを保存・検索する。その最中に `pytest` を実行すると **`FLUSHDB` が §10 のデータごと消す**ため、検証が突然「該当なし」になり混乱する。§10 を回している間は pytest を止めるか、テストを別コンテナ／別ホストの Redis（テスト専用）に向けること。
+
 ### ディレクトリ構成
 
 ```
@@ -903,6 +953,8 @@ pytest tests/test_database.py -v
 pytest tests/ -v -k "not TestEmbedding"
 ```
 
+> **⚠️ `slow` マーカー（任意）**：埋め込みモデルをロードする重いテストは上記のとおり `-k "not TestEmbedding"` で除外できる。代替として `@pytest.mark.slow` を付け、`pyproject.toml` の `[tool.pytest.ini_options].markers` に `slow` を登録しておけば `pytest -m "not slow"` でも高速回帰できる（マーカー未登録だと `PytestUnknownMarkWarning` が出る）。
+
 > **⚠️ Evidence Report との関係**: 自動テストの不合格は §10 の合否をブロックしない。Evidence Report が実装完了の唯一の合否基準である。自動テストは開発者が任意で実行する補助的な回帰テストであり、初回実装時に無限の修正・再試行ループを引き起こしてはならない。
 
 ---
@@ -912,6 +964,8 @@ pytest tests/ -v -k "not TestEmbedding"
 > 実装完了後、AI は以下を自律実行し、各項目を ⭐⭐⭐⭐⭐ で報告すること。スコアはコード生成直後の一発勝負ではなく、§9 の pytest が緑である前提で判定する。MCP Lite 版は Redis Stack 前提・7 日 TTL という制約下での最善を測る。
 
 1. **常駐速度テスト**: MCP クライアントから `search_memory` を呼び、初回（モデルロード含む）と 2 回目以降の応答時間を計測せよ。合格目標は CPU 環境で **初回 3.0s 以内・定常 0.5s 以内**。Redis Stack が起動していない状態で呼び出した場合、サーバーがクラッシュせず「Redis Stack を起動してください」のヒントを返すことも併せて確認せよ。
+
+   > **⚠️ 計測の解釈**：「定常 0.5s 以内」は **純サーバー側処理**（埋め込み生成 + Redis KNN/BM25 + ランキング）の目標値である。MCP クライアント経由（Claude Code 等）で計測すると **JSON-RPC 往復・クライアント側の LLM 処理時間が上乗せ**され、エンドツーエンドの中央値は **5〜10s** になることがある（これは仕様逸脱ではない）。純サーバー側を測りたい場合は `processor`/`database` 関数を直接呼ぶマイクロベンチを使うこと。また §3.9 の通りモデルロードはバックグラウンド化されるため、**「初回ツール呼び出し」がバックグラウンドロード完了前に届くと最大 ~40s 待つ**ことがある点も計測時に留意（モデルロード後の初回は数秒）。
 
 2. **実在人物テスト（実在歴史データ）**: 実在の歴史人物に関するテキストを `save_memory` で保存後、その人物名で `search_memory` を実行し、**上位 3 件以内**に該当レコードが含まれることを合格基準とする。
    - 日本語版の例: 「坂本龍馬」
