@@ -50,8 +50,9 @@ _db: Database = None
 # §4.2: serverInfo.version = package __version__; instructions advertised.
 app = Server("n3mc-workingmemory", version=__version__, instructions=INSTRUCTIONS)
 
-# §6 notices are prepended to the FIRST successful search_memory output only.
-_notices_shown = False
+# §6 notices: each is prepended once, to the first successful search_memory
+# output after it was added (v1.7.1).
+_notices_seen: set = set()
 
 _VERSION_SENTENCE = (
     "_If several versions of the same content appear, the one with the "
@@ -122,14 +123,17 @@ def _render_search(results: list[dict], notices: Optional[list[str]] = None) -> 
 
 
 def _take_notices() -> list[str]:
-    """Pending config notices (cfg["_notices"]), returned once per process (§6)."""
-    global _notices_shown
-    if _notices_shown:
-        return []
-    _notices_shown = True
+    """Notices (cfg["_notices"]) not shown yet in this process (§6, v1.7.1).
+
+    Each notice is shown once, on the first successful search_memory after it
+    was added — so a notice added later (e.g. shared_redis after a reconnect)
+    still reaches the LLM."""
     if _db is None:
         return []
-    return list(_db.cfg.get("_notices") or [])
+    cfg = getattr(_db, "cfg", None) or {}
+    pending = [n for n in (cfg.get("_notices") or []) if n not in _notices_seen]
+    _notices_seen.update(pending)
+    return pending
 
 # ── §11 turn-end nudges ──────────────────────────────────────────────────────
 
@@ -200,17 +204,19 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": (
                             "§4.3.1 — ISO 8601 date or datetime (e.g. '2026-05-01' or "
-                            "'2026-05-01T09:00:00Z'). Only entries saved ON OR AFTER "
-                            "this timestamp are returned. Date-only values are treated "
-                            "as 00:00:00 UTC."
+                            "'2026-05-01T09:00:00+09:00'). Only entries saved ON OR "
+                            "AFTER this timestamp are returned. Date-only values and "
+                            "values without an offset are read in the server's local "
+                            "time (the clock of saved=); date-only means 00:00:00. "
+                            "An unreadable value is an error."
                         ),
                     },
                     "until": {
                         "type": "string",
                         "description": (
                             "§4.3.1 — ISO 8601 date or datetime. Only entries saved "
-                            "ON OR BEFORE this timestamp are returned. Date-only values "
-                            "are treated as 23:59:59 UTC."
+                            "ON OR BEFORE this timestamp are returned. Read like "
+                            "since; date-only means 23:59:59.999999 local time."
                         ),
                     },
                 },
@@ -291,7 +297,7 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="delete_memory",
             description=(
-                "Delete a memory by ID. "
+                "Delete a memory by ID (only memories of the configured owner). "
                 "If the ID is a parent document (doc:<uuid>), cascades to all child chunks."
             ),
             inputSchema={
@@ -327,8 +333,10 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="repair_memory",
             description=(
-                "Re-ensure the RediSearch index (idempotent). "
-                "Returns {status, message}."
+                "Re-ensure the RediSearch index (idempotent) and add missing "
+                "vectors (up to 200 per call) to entries saved while the "
+                "embedding model was unavailable. "
+                "Returns {status, message, reembedded, remaining}."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -531,8 +539,16 @@ async def _main() -> None:
 
     _db = Database(cfg)
     _db.connect()
-    _db.enforce_ephemeral()
-    _db.ensure_index()
+    # v1.7.1 (LM3): nothing here may end the process. A plain Redis without
+    # RediSearch leaves the server in the "index missing" state (retried per
+    # call); a connection lost during start is handled like any lost one.
+    try:
+        _db.enforce_ephemeral()
+        _db.ensure_index()
+    except _CONN_ERRORS:
+        _db.mark_disconnected()
+    except Exception as e:
+        print(f"[n3mc] startup setup: {e}", file=sys.stderr)
 
     init_opts = app.create_initialization_options()
     try:
@@ -572,7 +588,7 @@ async def _main() -> None:
 
 def _preload_model() -> None:
     try:
-        get_model()
+        get_model(wait=None)  # the background load itself waits without limit
     except Exception as e:
         print(f"[n3mc] model preload failed (will lazy-retry): {e}", file=sys.stderr)
 

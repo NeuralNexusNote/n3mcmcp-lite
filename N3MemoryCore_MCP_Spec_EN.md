@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.7.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.7.1 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
@@ -44,7 +44,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 
 **Volatility contract:**
 - Every write to Redis sets a TTL equal to `ttl_seconds` (default 604 800 = 7 d).
-- Both the primary record (`mem:<uuid>`) and its exact-duplicate guard key (`mem:sha:<sha1>`) share the same TTL and expire together.
+- Both the primary record (`mem:<uuid>`) and its exact-duplicate guard key (`mem:sha:<sha1>`) share the same TTL and expire together — also after a search hit refreshes the record's TTL (the guard is refreshed with it, v1.7.1).
 - Expiration is delegated to Redis; no background cleanup job runs.
 - Restarting the Redis container with its volume removed wipes all memory immediately.
 
@@ -78,11 +78,14 @@ docker start redis-stack
 ```
 Re-running the `docker run` command after the container exists fails with `Conflict. The container name "/redis-stack" is already in use`. Use `docker start redis-stack` thereafter.
 
-> **Persistence is forbidden — enforced at server startup, not via
-> docker args.** The MCP server issues `CONFIG SET appendonly no` and
-> `CONFIG SET save ""` on every connect (§3.4 `_enforce_ephemeral`),
-> so any manual re-enable between sessions is reverted on the next
-> Lite run. Earlier iterations of this spec put `--appendonly no
+> **Persistence is turned off by the server, not via docker args.**
+> On every connect the MCP server issues `CONFIG SET appendonly no` and
+> `CONFIG SET save ""` (§3.4 `enforce_ephemeral()`), so any manual
+> re-enable between sessions is reverted on the next Lite run —
+> **but only when that Redis holds nothing but N3MC keys** (v1.7.1).
+> A Redis that also stores other data keeps its persistence settings,
+> and the server shows a `shared_redis` notice recommending a dedicated
+> container (§3.4). Earlier iterations of this spec put `--appendonly no
 > --save ""` on the `docker run` line as a belt-and-suspenders, but
 > the empty-string argument for `--save` is mangled by Windows
 > PowerShell and cmd.exe quoting (it has left containers with a
@@ -92,9 +95,10 @@ Re-running the `docker run` command after the container exists fails with `Confl
 > that separates the free Lite build from the paid persistent
 > N3MemoryCore — Lite is "a rolling 7-day scratchpad that truly
 > forgets on restart", not "a durable store with a TTL". If the user
-> wants continuous memory, they upgrade. `_enforce_ephemeral` makes
-> it *mechanically impossible* to turn Lite into a persistent store
-> by accident, regardless of the user's shell or docker flags.
+> wants continuous memory, they upgrade. On a dedicated container,
+> `enforce_ephemeral()` makes it *mechanically impossible* to turn Lite
+> into a persistent store by accident, regardless of the user's shell or
+> docker flags.
 
 #### Method A: Generate from the spec (primary, recommended)
 
@@ -207,6 +211,15 @@ n3memorycore-mcp-lite/
 > | 16 | `mcp` without an upper bound | A fresh install (`uvx`, `pip`, plugin) gets `mcp` 2.x and the server dies on import: `AttributeError: 'Server' object has no attribute 'list_tools'` — `/mcp` shows only `Connection closed` | Pin `mcp>=1.0.0,<2.0.0` in `pyproject.toml` until the server is ported to the 2.x API | [Setup](#prerequisites) |
 > | 17 | Model download retried on every call / degraded search not reported | Offline first run: each `save_memory` ~24 s, each `search_memory` ~12 s; keyword-only results look normal | Retry at most once a minute; notice on every degraded `search_memory`, `detail` on `save_memory` | [§3.9](#39-startup-sequence--self-recovery) |
 > | 18 | Only `strip()` decides "empty" | `\x00`, a lone `U+200B` or `U+FEFF` is saved as a memory that shows as nothing | Reject content with no visible character (`has_visible_text`); store everything else verbatim | [§3.13](#313-encoding-safety) |
+> | 19 | `min_score` / relative cut judged on the final score | Records older than ~2 days and every record saved before the MCP server restarted (another `session_id`) fall under 0.6 × the top score and disappear | Judge both floors on `filter_score` (no `time_decay`, no `b_session`); order by the final score | [§3.14](#314-search-result-shaping-v170) |
+> | 20 | Only `socket_connect_timeout` set | A Redis that accepts the connection but never answers (`docker pause`, sleep/resume) blocks `PING` forever; the event loop and every later tool call hang | `socket_timeout=5`; a read timeout is a lost connection | [§3.9](#39-startup-sequence--self-recovery) |
+> | 21 | `config.json` created by every starting process | Two servers starting together get different `owner_id`s; one of them saves records nobody sees after the next start | Exclusive create, re-read if it exists; temp file + `os.replace` for every write | [§6](#6-configuration) |
+> | 22 | Parent document written before the chunks | A failure between the two writes leaves `doc:` + `docsha:` without chunks: unsearchable, and re-saving is rejected as `duplicate` for 7 days | Embed every chunk first, take the guard with `SET NX`, then write parent and chunks in one pipeline (release the guard on failure) | [§3.8](#38-duplicate-rejection-v170-exact-only) |
+> | 23 | No range check on numeric config | `chunk_overlap >= chunk_threshold` loops forever; `ttl_seconds: 604800.5` or `0` makes every save fail; `embedding_dim: 768.0` stops the server at start | Per-key type and range table; `chunk_text` always advances | [§6](#6-configuration) |
+> | 24 | `FT.CREATE` failure re-raised at start | A plain Redis without RediSearch (or a connection lost during start) ends the process; the client only sees a dead server | Stay up without an index, retry per call, return a "Redis Stack required" error | [§3.9](#39-startup-sequence--self-recovery) |
+> | 25 | Persistence turned off on any Redis | Someone else's Redis on `localhost:6379` silently loses its RDB/AOF and its data at the next restart | Only when the DB is empty or holds only N3MC keys; otherwise notice `shared_redis` | [§3.4](#34-ephemerality-no-modifications-or-optimizations-allowed) |
+> | 26 | Tool calls wait for the model lock without limit | During the first-run download (minutes) every tool call blocks and may hit the client's tool timeout | Wait at most 20 s, then continue keyword-only with a notice | [§3.9](#39-startup-sequence--self-recovery) |
+> | 27 | TTL refresh skips the dedup guards; BM25 terms ANDed; unreadable `since` ignored | Frequently used records can be saved twice after 7 days; sentence-like queries get no keyword hits; `since="yesterday"` searches everything | Refresh guards with the record; join terms with OR; reject unreadable time bounds | [§3.3](#33-redis-connection--ttl), [§3.7](#37-text-tokenization--punctuation-handling), [§4.3.1](#431-retrieval-extension-tools) |
 
 ### 3.1 ID Hierarchy
 
@@ -243,7 +256,11 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 
 **TTL**: every `HSET` of `mem:<uuid>` is followed (atomically via `PIPELINE`) by `EXPIRE mem:<uuid> <ttl_seconds>`. The sibling `mem:sha:<sha1>` guard is written with `SET ... EX <ttl_seconds>` in the same pipeline. Default TTL is 604 800 s (7 d).
 
-**Pipeline atomicity**: the three commands (`HSET`, `EXPIRE`, `SET`) ship as one pipeline, so partial-failure interleavings that could produce a record without a TTL or a sha-guard without a record are not possible.
+**Pipeline atomicity**: the three commands (`HSET`, `EXPIRE`, `SET`) ship as one pipeline, so partial-failure interleavings that could produce a record without a TTL or a sha-guard without a record are not possible. The long-content path follows the same rule since v1.7.1: after every chunk embedding has been computed and the `docsha:` guard has been taken with `SET … NX EX`, the parent document and **all** chunks are written in **one** pipeline; if that pipeline fails, the guard is deleted again (§3.8 (B)). Pipelines are sent with `transaction=True` (`MULTI`/`EXEC`).
+
+**Guards follow their record's TTL (v1.7.1)**: whenever a record's TTL is reset by a search hit (§3.11 / §3.14 step 6), the dedup guard of that record is reset in the same pipeline — `SET mem:sha:<sha1> <id> EX <ttl_seconds>` for a standalone record, `SET docsha:<sha1> <parent_id> EX <ttl_seconds>` for a parent document. The `<sha1>` is recomputed from the stored content with the same function `save_memory` uses (SHA-1 of the NFKC-normalized text), so records saved by earlier versions need no extra field. A chunk has no guard of its own; its parent's guard is reset when the parent is.
+
+> **⚠️ Why (v1.7.1, Lite review LM7)**: v1.7.0 reset only `mem:<id>` / `doc:<id>`. A record that kept coming up in searches lived on, but its guard expired 7 days after the save, after which the same content could be saved again and the record existed twice — contradicting "the record and its guard expire together".
 
 ### 3.4 Ephemerality (No Modifications or Optimizations Allowed)
 
@@ -256,6 +273,15 @@ On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline
 - Write buffering / deferred pipelines beyond the single save call.
 
 **Reason**: the Lite build's differentiation is explicit volatility; circumventing it erodes the product distinction.
+
+**`enforce_ephemeral()` — turning off Redis persistence (v1.7.1)**: called after every successful connect (startup and every reconnect, §3.9).
+
+1. Look at the keys of the connected DB with `SCAN` (`COUNT 1000`), stopping at the first key that does not start with `mem:`, `doc:` or `docsha:` (`mem:sha:` keys start with `mem:`). The RediSearch index itself is not a key.
+2. If the DB is empty or holds only those keys: `CONFIG SET appendonly no` and `CONFIG SET save ""`.
+3. Otherwise **do not change the configuration**. Add the notice `shared_redis` (shown like the config notices of §6, on the first successful `search_memory`): `shared_redis: the Redis at <host>:<port> also holds keys that are not N3MC's, so its persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a dedicated container (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) for Lite.`
+4. If `CONFIG` is refused (managed Redis, `rename-command`, ACL), print one line to stderr and add the notice `config_refused` (same wording rules: what happened, that persistence may still be on, the dedicated-container hint). Never fail the connection because of it.
+
+> **⚠️ Why (v1.7.1, Lite review LM4)**: v1.7.0 changed the persistence of whatever Redis it was pointed at, and the default URL is `localhost:6379`. A user who already ran Redis for something else lost that data at the next Redis restart, without any message. Lite's 7-day promise is kept by the TTL on every key; turning persistence off only keeps N3MC data off the disk, which does not justify touching another program's data. The behaviour was also described only in the Quick Start note.
 
 ### 3.5 Data Layout
 
@@ -318,7 +344,8 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
 - **Primary Key**: UUIDv7 (time-sortable; generated at insert time). The reference implementation uses `uuid_utils.uuid7`.
 - **Parent docs are NOT indexed**: `doc:` / `docsha:` keys live outside the `PREFIX 1 mem:` index prefix. Search always hits chunks (`mem:*`) first; the parent is looked up in a post-retrieval step (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 - **Delete semantics**: `delete_memory` branches on the id:
-  - If a `doc:<uuid>` key exists with that id → delete the parent, `docsha:<sha1>`, and every chunk whose `parent_id` matches, in a single pipeline (cascade).
+  - Only records of the configured `owner_id` are deleted (v1.7.1; another owner's id → `not_found`).
+  - If a `doc:<uuid>` key exists with that id → delete the parent, `docsha:<sha1>`, and every chunk listed in its `chunk_ids` (older parents without `chunk_ids`: chunks whose `parent_id` matches, §3.11), in a single pipeline (cascade).
   - Otherwise → delete `mem:<uuid>` and its sibling `mem:sha:<sha1>` as before.
 
 ### 3.6 Ranking Formula
@@ -383,14 +410,23 @@ Default `half_life_days = 3` — deliberately shorter than the 7-day TTL so that
 
 After the hybrid score above is computed, an optional CPU-only rerank pass boosts each candidate's score by:
 
-- `coverage × rerank_weight` (default weight `0.3`), where `coverage` is the fraction of query tokens that appear in the content. Tokenization is whitespace-split **augmented with CJK bigram tokens** so that Japanese/Chinese queries contribute a real coverage signal (without bigrams, `.split()` collapses a pure-CJK query into a single token and coverage degenerates to a binary whole-query-substring match).
+- `coverage × rerank_weight` (default weight `0.3`), where `coverage` is the fraction of query tokens that appear in the content. **Both the query and the content are tokenized with `prepare_query` (§3.7)** — NFKC, control characters and ASCII / CJK / full-width punctuation to spaces, whitespace split **augmented with CJK bigram tokens**, lower-cased — so `note,` in the content counts as `note`, and Japanese/Chinese queries contribute a real coverage signal (without bigrams, `.split()` collapses a pure-CJK query into a single token and coverage degenerates to a binary whole-query-substring match). (v1.7.0 split on whitespace only, so a word followed by punctuation never counted — Lite review LM8.)
 - `rerank_phrase_weight` (default `0.2`) added when the entire query string appears as a substring of the content (case-insensitive).
 
 Parent-document resolution happens **before** lexical rerank: chunk hits are expanded to their full `doc:<parent_id>` body first, then rerank operates on the full verbatim content. This ensures that a query phrase appearing in a non-matching chunk of the same document still boosts the parent's rank correctly (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 
 Set `lexical_rerank_enabled: false` in config to skip this pass (candidates are then sorted by the hybrid score only).
 
-**The `min_score` filter is applied AFTER lexical rerank.** A candidate whose fused score sits just below `min_score` can still be kept if the phrase/coverage rerank boost lifts its final score over the threshold, so the score floor is enforced *after* rerank rather than at fusion time. Pruning at fusion time would discard a record that contains the exact query phrase but has a weak embedding before the reranker could rescue it — hence this ordering matters (see [§6](#6-configuration) `min_score`).
+**The `min_score` filter is applied AFTER lexical rerank, on `filter_score` (v1.7.1, below).** A candidate whose fused score sits just below `min_score` can still be kept if the phrase/coverage rerank boost lifts its final score over the threshold, so the score floor is enforced *after* rerank rather than at fusion time. Pruning at fusion time would discard a record that contains the exact query phrase but has a weak embedding before the reranker could rescue it — hence this ordering matters (see [§6](#6-configuration) `min_score`).
+
+**`filter_score` — what the floors judge (v1.7.1, decision LD1)**: every candidate carries two values.
+
+| Value | Formula | Used for |
+|---|---|---|
+| `score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local × b_session` + rerank boost | The order of the results and the `score=` shown |
+| `filter_score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × b_local` + rerank boost | `min_score` (§3.6) and the relative cut (§3.14 step 5) |
+
+`time_decay` and `b_session` decide **which records come first**, not whether a record is shown: a 3-day-old record or one saved before the server restarted (another `session_id`) still appears when it is as relevant as the top hit, just lower in the list. The rerank boost is added to both values.
 
 The v1.7.0 shaping steps that run around this formula (vector floor, newest version first, relative cut) are in [§3.14](#314-search-result-shaping-v170).
 
@@ -426,9 +462,21 @@ def drop_lone_cjk_tokens(q: str) -> str:
     return ' '.join(kept) if kept else q
 ```
 
-`_bm25_search` uses `drop_lone_cjk_tokens(prepare_query(query))`. RediSearch ANDs the query terms, and a single CJK character left after bigram expansion (`「記憶装置」は？` → `記憶 憶装 装置 は`) is almost never indexed as a token on its own, so without this step the whole BM25 leg still returns 0 hits. A query that consists only of single CJK characters is kept as is. `prepare_query` also drops tokens that contain no letter or digit (`str.isalnum`), such as a lone `_`: RediSearch does not index them, so a query made only of them became `@content:()` and failed with a syntax error.
+`_bm25_search` uses `drop_lone_cjk_tokens(prepare_query(query))` and **joins the remaining terms with OR** (v1.7.1, decision LD3):
 
-> **⚠️ Why control characters and CJK punctuation must go (v1.7.0)**: a control character such as `\x00` left in the query makes `FT.SEARCH` fail with `Syntax error`; the error is caught, so the BM25 leg silently disappears for that query. CJK punctuation is not in the ASCII set, so `「記憶装置」は？` was expanded into bigrams such as `「記` and `は？`. RediSearch joins query terms with AND, so one bigram that never occurs in any document turns the whole BM25 leg into **0 hits** — and Japanese questions almost always end with `？` or contain `「」`. Stripping them on both sides restores keyword matching. A BM25 failure must never fail `search_memory`: catch it and continue with vector results.
+```python
+terms = drop_lone_cjk_tokens(prepare_query(query)).split()
+q = "|".join(terms)
+fts_query = f"(@content:({q}) | @content_ngram:({q}))"
+```
+
+A record matches when it contains **any** term; BM25 scores records with more and rarer terms higher, and the lexical rerank adds the coverage of all terms, so the ranking does what the AND used to do. A single CJK character left after bigram expansion (`「記憶装置」は？` → `記憶 憶装 装置 は`) is usually a particle and would match almost every Japanese record under OR, so it is still dropped. A query that consists only of single CJK characters is kept as is.
+
+> **⚠️ Why OR (v1.7.1, Lite review LM8)**: RediSearch joins the terms inside `@field:(a b c)` with AND. `quick fox` found a record, but `quick fox elephant`, `what did the quick fox do` and `記憶装置 大阪` found nothing, because no record contained every term; the keyword part (30 %) of the score was then 0. Free made the same change (decision D4).
+
+`prepare_query` also drops tokens that contain no letter or digit (`str.isalnum`), such as a lone `_`: RediSearch does not index them, so a query made only of them became `@content:()` and failed with a syntax error.
+
+> **⚠️ Why control characters and CJK punctuation must go (v1.7.0)**: a control character such as `\x00` left in the query makes `FT.SEARCH` fail with `Syntax error`; the error is caught, so the BM25 leg silently disappears for that query. CJK punctuation is not in the ASCII set, so `「記憶装置」は？` was expanded into bigrams such as `「記` and `は？`. With the terms joined by AND (before v1.7.1), one bigram that never occurs in any document turned the whole BM25 leg into **0 hits** — and Japanese questions almost always end with `？` or contain `「」`. Stripping them on both sides restores keyword matching. A BM25 failure must never fail `search_memory`: catch it and continue with vector results.
 
 **Empty-query rule**: if the cleaned query is empty after stripping, skip keyword search and rank using vector search only.
 
@@ -441,23 +489,28 @@ def drop_lone_cjk_tokens(q: str) -> str:
 **(A) Single-chunk path** (body ≤ `chunk_threshold`):
 
 1. **Exact dedup (O(1))** — `EXISTS mem:sha:<sha1(content)>`. If the key exists, return `{"status": "duplicate", "saved": false}`.
-
-Otherwise proceed with the HSET + EXPIRE + sha1-guard pipeline.
+2. Compute the embedding.
+3. **Take the guard atomically (v1.7.1)** — `SET mem:sha:<sha1> <id> NX EX <ttl_seconds>`. If it returns nothing, another save of the same content got there first: return `duplicate`. (Step 1 only avoids computing an embedding for an obvious duplicate; step 3 decides. v1.7.0's `EXISTS` → write let two simultaneous saves of the same content both through.)
+4. Pipeline `HSET mem:<id>` + `EXPIRE`. If this fails, delete the guard taken in step 3 (best effort) so the content can be saved again, then report the error.
 
 **(B) Multi-chunk path** (body > `chunk_threshold`): dedup runs at the **parent-document level** against the full body.
 
 1. **Parent-level exact dedup (O(1))** — `EXISTS docsha:<sha1(full_text)>`. If the key exists, return `{"status": "duplicate", "saved": false, "parent_id": "<existing>"}`.
 2. Chunks themselves are **not** given per-chunk sha guards. Reason: sliding-window chunks are overlapping by design and would otherwise reject each other.
 
-If the parent-level check passes, a single `save_memory` call writes, in order:
-- `doc:<parent_id>` via HSET + EXPIRE + `docsha:<sha1(full_text)>` guard (one pipeline)
-- All chunk HSET + EXPIRE commands batched in a **single pipeline** (no per-chunk sha guard; each chunk's `parent_id` field is set to the parent id)
+If the parent-level check passes, a single `save_memory` call (v1.7.1):
+1. Splits the body and **computes the embedding of every chunk first** (no Redis write yet).
+2. Takes the guard: `SET docsha:<sha1(full_text)> <parent_id> NX EX <ttl_seconds>`; if it returns nothing, return `duplicate` with the existing `parent_id`.
+3. Writes `doc:<parent_id>` (HSET + EXPIRE) and **all** chunks (HSET + EXPIRE each; no per-chunk sha guard; each chunk's `parent_id` field is set to the parent id) in **one** pipeline.
+4. If step 3 fails, deletes `docsha:` (best effort) and reports the error, so nothing is left half-written and the same body can be saved again.
+
+> **⚠️ Why (v1.7.1, Lite review LM1)**: v1.7.0 wrote the parent and `docsha:` in a first pipeline and computed the chunk embeddings and wrote the chunks afterwards. A failure in between (connection lost, embedding exception) left a parent and a guard without chunks: the document could not be found (search hits chunks only), and re-saving it was rejected as `duplicate` for 7 days (reproduced).
 
 > **⚠️ No near-duplicate (similarity) rejection (removed in v1.7.0)**: v1.6.x also rejected a new entry when an existing one had `cos_sim >= dedup_threshold` (0.95), for short entries and for whole documents. With `multilingual-e5` that threshold cannot tell "the same content again" from "an updated version" or "a different item with the same shape": a fact saved again with a new value ("the budget is 120" after "the budget is 100"), or a setting sheet re-made with a few values changed, scores ≥ 0.95 and **the new version was silently discarded** (`near_duplicate`) — the user's latest decision never reached memory. Only exact duplicates are rejected now. When both versions come back, `search_memory` puts the newest first and shows `saved=` times ([§3.14](#314-search-result-shaping-v170)). The `dedup_threshold` config key is ignored.
 
 ### 3.9 Startup Sequence & Self-Recovery
 
-The server's `_startup()` runs these steps in order, **before** the stdio loop begins accepting requests:
+The server's `_main()` runs these steps in order, **before** the stdio loop begins accepting requests:
 
 1. **Load config** (`load_config()`):
    - Read `config.json` from the data directory.
@@ -469,7 +522,11 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 2. **Redis connect & ping**:
    - Build a client from `redis_url`.
    - `PING`. **If it fails**: log a warning to `stderr` with the recovery hint (below) and continue without a working connection. The server stays up — the user can start Redis without restarting the MCP server (see "Redis availability on every tool call").
-   - Build the client with `socket_connect_timeout=2` so a reconnect attempt against a stopped Redis fails within seconds instead of hanging a tool call.
+   - Build the client with `socket_connect_timeout=2` **and `socket_timeout=5`** (v1.7.1). The connect timeout makes a reconnect attempt against a stopped Redis fail within seconds; the read/write timeout makes a Redis that accepted the connection but stopped answering (`docker pause`, a host that has just resumed from sleep, a congested network) fail within 5 seconds instead of blocking forever. A `redis.TimeoutError` is handled exactly like a lost connection (item 3 below).
+   - **Why 5 seconds**: the largest single Redis round trip Lite makes is the one-pipeline write of a long document (§3.8 (B)); with the default `chunk_threshold` a 100,000-character body is about 260 chunks. Measured on the test Redis (Windows 11, Docker Desktop, 2026-11-13): that pipeline (parent, guard and 260 chunks with 768-dimension vectors) took 0.031 s (median of 5; max 0.044 s), and one KNN plus one BM25 `FT.SEARCH` took 0.007 s (max 0.008 s) — two orders of magnitude below 5 s.
+   - When the client is rebuilt (reconnect), `close()` the old client first so its connection pool is released.
+
+   > **⚠️ Why (v1.7.1, Lite review LH2)**: v1.7.0 set only `socket_connect_timeout`. With the Redis container paused, `ensure_connected()` was still waiting after 20 seconds (reproduced); the tools run synchronously inside the event loop, so every later tool call hung as well and the server never recovered by itself.
 
    **Redis availability on every tool call (v1.7.0)** — the connection is checked per call, not only at startup:
 
@@ -482,12 +539,16 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 3. **Ensure RediSearch index** (`ensure_index()`):
    - `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...` as per [§3.5](#35-data-layout).
-   - Catch `ResponseError` whose message contains `"already exists"`; re-raise any other error.
+   - `ResponseError` containing `"already exists"` is success. Then compare the index's vector dimension (`FT.INFO n3mc_idx`, the `DIM` of the `embedding` attribute) with `embedding_dim`; if they differ, add the notice `index_dim_mismatch` (`index_dim_mismatch: the existing index n3mc_idx was built for <old> dimensions but embedding_dim is <new>; new vectors are not indexed. Drop the index (FT.DROPINDEX n3mc_idx) or flush the test DB, then restart.`). (v1.7.1; v1.7.0 accepted the old index silently and new vectors never reached it — Lite review LL8.)
+   - **Any other failure does not stop the process (v1.7.1)**. The server keeps running in an "index missing" state and `ensure_connected()` tries `ensure_index()` again before every tool call. While the index is missing, every tool returns the backend error of item 2 below with the hint `The Redis at <host>:<port> does not provide RediSearch (FT.CREATE failed: <reason>). N3MC Lite needs Redis Stack, not plain Redis: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`. A connection error during `ensure_index()` is handled like any lost connection.
    - Idempotent: safe to call on every boot.
+
+   > **⚠️ Why (v1.7.1, Lite review LM3)**: v1.7.0 re-raised every other `FT.CREATE` error out of `_main()`. Pointed at a plain Redis (`unknown command 'FT.CREATE'`) — or losing the connection during start — the process ended, and the client showed only a server that would not start, with no hint. §4.4 promises the opposite: the server stays connected and the LLM tells the user what to do.
 
 4. **Preload embedding model** (`get_model()`):
    - Load `intfloat/multilingual-e5-base` into memory so the first tool call is not slowed by the one-time model load.
    - **Non-fatal**: if the model fails to load (e.g. offline, HF cache absent), log a warning and continue. The model is retried lazily by later `save_memory` / `search_memory` calls, **but at most once every 60 seconds** (`MODEL_RETRY_SECONDS`): within that window `embed()` returns `None` immediately instead of attempting the download again.
+   - **Tool calls during the load wait at most 20 seconds (v1.7.1, decision LD4)**: a tool call that needs the model while the background load holds the lock waits for the lock for at most `MODEL_WAIT_SECONDS = 20`. If the load has not finished by then, `embed()` returns `None` for this call: `search_memory` runs keyword-only and prepends `> ⚠️ N3MC notice: The embedding model (<embedding_model>) is still loading (the first start downloads ~440 MB), so this search used keywords only and new entries are saved without vectors. Retry in a minute.`; `save_memory` saves without a vector and adds `"warning": "embedding_unavailable", "detail": "<the same text>"`. Entries saved without a vector get one later from `repair_memory` (§3.10). **Why 20 seconds**: with the Hugging Face cache present, constructing the model takes about 5 s after the import (measured, note below), so a call that arrives during a normal start still gets vectors with a 4× margin; a first-run download takes minutes and would otherwise block every tool call (and the event loop) past typical client tool timeouts.
    - **Degraded-mode notice (v1.7.0)**: while the model is unavailable, the server says so instead of degrading silently. `processor.model_status()` returns the last load error. `search_memory` prepends `> ⚠️ N3MC notice: <model_unavailable_message>` to its output (every call while degraded, not only the first), and `save_memory` adds `"detail": "<model_unavailable_message>"` next to `"warning": "embedding_unavailable"`. The message (English): `The embedding model (<embedding_model>) could not be loaded (<error>), so search is keyword-only (BM25) and new entries are saved without vectors. The first start downloads the model (~440 MB) from Hugging Face: check the network or proxy, or pre-download it. The server retries automatically.` `stderr` gets one line per failed attempt (at most once a minute).
 
      > **⚠️ Why (v1.7.0, A6 offline test)**: with no network and no cached model, v1.6.x retried the download inside every tool call — `save_memory` took ~24 s and `search_memory` ~12 s each — and `search_memory` gave no sign that the vector leg was off; the only log line was `Cannot send a request, as the client has been closed.`
@@ -503,13 +564,15 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 >
 > **Thread safety**: the background load above can race with the "first tool call," so `get_model()` may be invoked from two threads at once. Protect the singleton with **double-checked locking** (`threading.Lock`).
 
-Steps 1 and 3 must complete before the server accepts tool calls. Steps 2 and 4 are best-effort — an unreachable Redis does not stop the process but disables the tools until Redis becomes reachable again. **Step 4 must be backgrounded as noted above.**
+Step 1 must complete before the server accepts tool calls. Steps 2, 3 and 4 are best-effort — an unreachable Redis, or one without RediSearch (step 3, v1.7.1), does not stop the process but disables the tools until it is usable again (each tool call retries). **Step 4 must be backgrounded as noted above.**
 
 ### 3.10 Repair
 
-The `repair_memory` tool in the Lite build is a **thin idempotent operation**: it calls `ensure_index()` again. There are no migration markers, no FTS rebuild, no re-embedding loop — Redis records that exist are already indexed by the RediSearch side-channel, and expired records are simply gone.
+The `repair_memory` tool in the Lite build is a **thin idempotent operation**: it calls `ensure_index()` again and, since v1.7.1, **adds missing vectors**. There are no migration markers and no FTS rebuild — Redis records that exist are already indexed by the RediSearch side-channel, and expired records are simply gone.
 
-Return shape: `{"status": "ok", "message": "index ensured"}`, or `{"status": "error", "message": "<detail>"}` on failure.
+**Re-embedding (v1.7.1, Lite review LL1)**: entries saved while the model was unavailable (§3.9 step 4) have no `embedding` field and are found by BM25 only. When the model is available, `repair_memory` `SCAN`s `mem:*` (skipping `mem:sha:*`), and for up to 200 hashes of the configured `owner_id` without `embedding` computes `embed(content)` (passage prefix) and `HSET`s the field — without changing the TTL. If the model is unavailable it re-embeds nothing; the response keeps `"message": "index ensured"` and adds `"warning": "embedding_unavailable"` with the model's `detail` (§3.9 step 4).
+
+Return shape: `{"status": "ok", "message": "index ensured", "reembedded": N, "remaining": M}` (`remaining` = entries still without a vector after this call, counted while scanning; call again if > 0), or `{"status": "error", "message": "<detail>"}` on failure.
 
 This is a deliberate simplification versus the forthcoming Pro build (which will run FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 7 d old.
 
@@ -517,9 +580,8 @@ This is a deliberate simplification versus the forthcoming Pro build (which will
 
 When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the server automatically:
 
-1. Splits the body into sliding windows of `chunk_threshold` chars with `chunk_overlap` overlap (default 100).
-2. Allocates a fresh `parent_id` (UUIDv7) and writes `doc:<parent_id>` with the **full verbatim body** (no truncation, no code-block stripping — the input is stored byte-for-byte). Sets `docsha:<sha1(full_text)>` as the parent-level exact-duplicate guard.
-3. Batches all chunk HSET + EXPIRE commands in a **single pipeline**, setting each `mem:<chunk_id>`'s `parent_id` TAG field to the parent id. Per-chunk sha guards are skipped (the parent-level exact guard `docsha:` handles whole-document duplicates — see [§3.8 (B)](#38-duplicate-rejection-v170-exact-only)).
+1. Splits the body into sliding windows of `chunk_threshold` chars with `chunk_overlap` overlap (default 100). **Every window advances by at least one character** (v1.7.1): the next window starts after the soft break, or at `end - overlap` after a hard cut, but never at or before the current start (`start = max(start + 1, …)`). §6 also rejects `chunk_overlap >= chunk_threshold`; this rule makes `chunk_text` safe even if called with such values. (v1.7.0 looped forever on a body without breaks when `chunk_overlap >= chunk_threshold` — Lite review LM2.)
+2. Computes the embedding of every chunk, then (§3.8 (B)) takes the `docsha:<sha1(full_text)>` guard and writes `doc:<parent_id>` — the **full verbatim body** (no truncation, no code-block stripping — the input is stored byte-for-byte) — together with every chunk in **one pipeline**, setting each `mem:<chunk_id>`'s `parent_id` TAG field to the parent id. Per-chunk sha guards are skipped (the parent-level exact guard `docsha:` handles whole-document duplicates — see [§3.8 (B)](#38-duplicate-rejection-v170-exact-only)).
 
 `search_memory` integration:
 
@@ -539,7 +601,8 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
 
 `delete_memory` integration:
 
-- If the id resolves to a `doc:<uuid>` key, the server first attempts `FT.SEARCH @parent_id:{<id>}` to collect chunks. If that TAG query fails (UUID hyphen issue — §3.12), it falls back to `SCAN mem:*` and checks the `parent_id` field in Python. The parent, `docsha:`, and all collected chunks are then deleted in a single pipeline.
+- **Owner check (v1.7.1)**: if the record (or parent) belongs to another `owner_id`, return `{"status": "not_found", "id": ...}` and delete nothing — the same scope as `delete_memories_by_session`. (v1.7.0 deleted any id it was given — Lite review LL3.)
+- If the id resolves to a `doc:<uuid>` key, the chunks to delete are the ids in its `chunk_ids` field. Only for a parent saved before `chunk_ids` existed, fall back to `FT.SEARCH @parent_id:{<id>}` and then to `SCAN mem:*` with a Python-side `parent_id` check (UUID hyphen issue — §3.12). The parent, `docsha:`, and all chunks are then deleted in a single pipeline.
 - Otherwise the usual single-memory delete applies.
 
 **Design invariants**:
@@ -562,7 +625,7 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
 | `_vector_search` | `*=>[KNN N @embedding $vec AS __dist]` — no owner filter; `owner_id` added to RETURN | Keep only records where `owner_id` matches |
 | `_bm25_search` | `(@content:(...) \| @content_ngram:(...))` — no owner filter; `owner_id` added to RETURN | Keep only records where `owner_id` matches |
 | `list_memories` | `*` (match-all); `owner_id` and `parent_id` added to RETURN | Keep records where `owner_id` matches **and** `parent_id` is empty string |
-| `delete_memory` (cascade) | Attempt `@parent_id:{<id>}` via FT.SEARCH first; on parse error fall back to `SCAN mem:*` | In fallback path, compare `parent_id` field value in Python |
+| `delete_memory` (cascade) | None when the parent has `chunk_ids` (v1.7.1). Only for an older parent without it: attempt `@parent_id:{<id>}` via FT.SEARCH; on parse error fall back to `SCAN mem:*` | Owner check on the record first; in the fallback path, compare `parent_id` field value in Python |
 
 **Performance note**: Fetching globally and filtering in Python incurs extra network transfer when multiple owner IDs share the same Redis instance. The Lite build assumes a single-user, single-install deployment, so this is not a practical concern. Should multi-tenant use arise, consider storing a separate hyphen-free derived field (e.g. `owner_id_tag = owner_id.replace("-", "")`) alongside the canonical `owner_id` and using that field for TAG queries.
 
@@ -643,8 +706,12 @@ sees an explicit refusal rather than a silent encoding crash.
 **Invisible-only input contract (v1.7.0)**: `save_memory` also rejects
 content that has **no visible character** — every character is whitespace,
 a control or format character (Unicode category `Cc` / `Cf`, e.g. `U+0000`,
-`U+001B`, `U+200B`, `U+FEFF`), a separator (`Zs` / `Zl` / `Zp`) or a
-variation selector (`U+FE00`–`U+FE0F`, `U+E0100`–`U+E01EF`). The reply is
+`U+001B`, `U+200B`, `U+FEFF`), a separator (`Zs` / `Zl` / `Zp`), a
+variation selector (`U+FE00`–`U+FE0F`, `U+E0100`–`U+E01EF`), or (v1.7.1) one
+of the blank-looking letters `U+115F`, `U+1160`, `U+3164`, `U+FFA0` (Hangul
+fillers) and `U+2800` (braille blank) — they have category `Lo` / `So` but
+render as nothing (Lite review LL5). Combining marks on their own stay
+"visible". The reply is
 `{"status":"error","saved":false,"reason":"empty content (no visible
 characters)"}`. The check is `processor.has_visible_text()`; it only decides
 *whether* to save and never changes what is saved — content with at least one
@@ -698,14 +765,16 @@ v1.6.x ranked every KNN candidate. With `multilingual-e5`, even unrelated record
 
 1. **Time window (pre-filter)** — `since` / `until` are applied inside the KNN and BM25 queries (see [§4.3.1](#431-retrieval-extension-tools)), not after ranking.
 2. **Vector floor** — drop vector candidates whose `cos_sim < vector_min_cos` (default `0.85`). A dropped row can still enter through BM25 (with `cos_sim = 0.0`). **0.85 was measured with `multilingual-e5-base`; re-measure it when `embedding_model` is changed.**
-3. **Fusion score** — §3.6 formula, then parent-document resolution (§3.11), then lexical rerank (§3.6), then the `min_score` floor (§3.6).
+3. **Fusion score** — §3.6 formula, then parent-document resolution (§3.11), then lexical rerank (§3.6), then the `min_score` floor (§3.6) on `filter_score` (v1.7.1).
 4. **Newest version first** (`version_order_enabled`, default `true`) — when the user re-makes a setting or a fact, both the old and the new version are stored (near-duplicates are no longer rejected, §3.8) and both come back.
    - For each result take a **representative embedding**: a standalone row uses its own `embedding`; a parent document uses the `embedding` of its first chunk (`chunk_ids[0]`). Skip rows whose representative text (the standalone `content`, or the first chunk's `content`) is shorter than `version_min_chars` (default `100`) — short rows are too similar to each other to tell versions from different facts.
    - Two results whose representative cosine is `>= version_sim_threshold` (default `0.98`) are versions of the same content; group them transitively.
    - Inside each group, re-order the rows newest first by `(timestamp_epoch, id)` (`id` is a UUIDv7, so rows saved in the same second are still ordered). **Every position keeps its score** — only the rows move, so the newest version inherits the group's best score. Mark **every row of a group of two or more** with `_version_group` (the group number, starting at 1) — also when the newest version was already on top and nothing moved, so the old versions survive the relative cut below. Nothing is deleted. Parent documents saved before `chunk_ids` existed have no representative and are not grouped.
    - 0.98 was measured with `multilingual-e5-base`: the same setting re-made → 1.0; settings with the same shape but different values → 0.88–0.91; different items inside one long reply → at most 0.95.
-5. **Relative cut** — drop results whose score is below `relative_min_score_ratio` (default `0.6`) × the top score, except rows marked `_version_group` (old versions stay visible next to the new one). `0.0` disables it.
-6. **TTL refresh / access_count** for the top `ttl_refresh_top_k` (§3.11), then truncate to `limit`.
+5. **Relative cut** — drop results whose **`filter_score`** is below `relative_min_score_ratio` (default `0.6`) × the highest `filter_score` (v1.7.1), except rows marked `_version_group` (old versions stay visible next to the new one). `0.0` disables it. Step 4 moves rows while each position keeps its `score`; `filter_score` moves with the position in the same way.
+6. **TTL refresh / access_count** for the top `ttl_refresh_top_k` (§3.11), then truncate to `limit`. **Increment `access_count` only on a key that still exists (v1.7.1, Lite review LL4)**: run `EXPIRE` first and `HINCRBY` only where `EXPIRE` returned 1 (two pipelines, or one Lua script). A key that expired between the search and the refresh would otherwise be recreated by `HINCRBY` as a hash holding only `access_count` and no TTL.
+
+> **⚠️ Why (v1.7.1, Lite review LH1; decision LD1)**: v1.7.0 compared the final score, which already contains `time_decay` (3-day half-life) and `b_session` (0.6 for another session). With equal relevance, a record about 2.2 days older than the top hit (0.5^(2.2/3) ≈ 0.6) and every record from another session fell under the cut — and because the default `session_id` is a new UUID per server process, every record saved before the MCP server last restarted counts as another session. Reproduced: with a fresh current-session record at cos 0.86 (score 0.602, cut 0.361), a 3-day-old same-session record at cos 0.95 (0.332) and 1-day-old other-session records at cos 0.99 (0.330) and 0.95 (0.317) were all dropped. Lite is a 7-day working memory; one recent hit hid everything older than two days.
 
 **Output format** (`search_memory` markdown, v1.7.0):
 
@@ -748,10 +817,10 @@ Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
 | `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Results are shaped and rendered as in [§3.14](#314-search-result-shaping-v170) (vector floor, newest version first, relative cut, `saved=` times). The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | Body ≤ `chunk_threshold`: exact dedup only (§3.8), then HSET + EXPIRE. Returns `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
-| `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). |
-| `delete_memory` | `id: string`                              | If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk with matching `parent_id`. Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
+| `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). **Pages through the index (v1.7.1)**: fetch newest first in pages of 200 (`LIMIT <offset> 200`, sorted by `timestamp_epoch` desc) and keep paging until `limit` standalone memories of this owner are collected or the index is exhausted. (v1.7.0 read one block of `max(limit × 5, 200)` rows; after a 260-chunk document the block held only chunks, and a standalone memory saved just before it was not listed — Lite review LM6.) |
+| `delete_memory` | `id: string`                              | Only records of the configured `owner_id` (another owner's id → `{"status":"not_found","id":...}`, v1.7.1). If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk listed in its `chunk_ids` (§3.11). Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
 | `delete_memories_by_session` | `session_id: string`         | Bulk-delete every standalone memory, parent document, child chunk, and sha guard tied to the given `session_id`, scoped to the configured `owner_id`. Response: `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. When nothing matches: `{"status":"not_found", "session_id": ..., "deleted": 0}` (a re-call is a safe no-op). **Irreversible — confirm `session_id` with the user before calling.** Lite-only (see [§10 Test 6](#10-self-evaluation-evidence-report)). |
-| `repair_memory` | —                                         | `ensure_index()`; see [§3.10](#310-repair).                            |
+| `repair_memory` | —                                         | `ensure_index()` and adding missing vectors (up to 200 per call); see [§3.10](#310-repair). |
 
 All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
 
@@ -764,7 +833,13 @@ All tool responses are a single `TextContent` element. `save_memory` / `delete_m
 | Argument | Type | Behavior |
 | --- | --- | --- |
 | `since` | `string` (ISO 8601 date or datetime) | Restrict to entries saved at or after this timestamp. Date-only inputs are interpreted as `00:00:00`. |
-| `until` | `string` (ISO 8601 date or datetime) | Restrict to entries saved at or before this timestamp. Date-only inputs are interpreted as `23:59:59`. |
+| `until` | `string` (ISO 8601 date or datetime) | Restrict to entries saved at or before this timestamp. Date-only inputs are interpreted as `23:59:59.999999`. |
+
+**Time zone (v1.7.1)**: a date-only value or a datetime without an offset is read in the **server's local time zone** — the same clock as `saved=` in the output ([§3.14](#314-search-result-shaping-v170)) — and converted to epoch seconds. A value with an offset (`2026-11-13T09:00:00+09:00`, `…Z`) is used as given. `T` or a space may separate date and time.
+
+**Unreadable values (v1.7.1)**: if `since` or `until` is given but cannot be parsed (`yesterday`, `2026/11/13`, `2026-13-01`), the search is not run and the response is a `TextContent` `Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 or 2026-11-13T09:00:00+09:00 (got '<value>')` (`until` likewise). If `since` is later than `until`: `Error: since is later than until`. An empty string means "no bound".
+
+> **⚠️ Why (v1.7.1, Lite review LM9)**: v1.7.0 treated an unparsable value as "no filter", so `since="yesterday"` returned results from the whole store and the LLM answered as if they were filtered. It also read offset-less values as UTC while `saved=` shows local time, so on a UTC+9 host `since="2026-11-13"` dropped what `saved=` showed as saved between 00:00 and 08:59 that day. Free made the same change (v1.5.0).
 
 Either bound may be specified alone. These do not alter the ranking formula. They are applied as **pre-filters inside both queries** — KNN: `@timestamp_epoch:[<since> <until>]=>[KNN N @embedding $vec AS __dist]`; BM25: `(<text query>) @timestamp_epoch:[<since> <until>]` (use `-inf` / `+inf` for an open bound). NUMERIC filters do not hit the UUID TAG problem of §3.12.
 
@@ -872,13 +947,38 @@ Complete schema (missing fields auto-filled with defaults below):
 
 | Case | Behavior |
 |---|---|
-| File missing | Write the defaults with fresh `owner_id` / `local_id` |
+| File missing | Create it **exclusively** with the defaults and fresh `owner_id` / `local_id` (v1.7.1, below). If another process created it first, use that file instead |
 | Not valid JSON, or the top level is not an object | **Do not modify the file.** Run on defaults; use fresh UUIDs for this process only (not saved). Emit notice `config_unreadable` (text: `config_unreadable: <path> could not be read (<reason>) …`) |
-| A value has the wrong type (e.g. `"vector_min_cos": "0.83"`, a quoted number) | Ignore **only that item** (use its default) and use the others. Do not modify the file. Emit notice `config_type` naming the items |
+| A value has the wrong type (e.g. `"vector_min_cos": "0.83"`, a quoted number) or is outside its allowed range (table below) | Ignore **only that item** (use its default) and use the others. Do not modify the file. Emit notice `config_type` naming the items |
 | Readable | Fill missing fields with defaults and save (as before) |
 
-- Type check (`config_value_ok`): if the default is a bool, accept only bools; if a number, only numbers (int or float, but not bool); if a string, only strings. Fields without a default (`owner_id`, `local_id`) and unknown fields are not checked.
-- **Notices**: `load_config()` collects these messages in `cfg["_notices"]` (a list of strings, each starting with its key, e.g. `config_type: …`) and prints each to `stderr`. The server prepends them to the output of the **first successful** `search_memory` call of the process (an error response must still start with `Error:`, so the notices wait for the next successful search) as `> ⚠️ N3MC notice: <message>` lines, so the connected LLM can tell the user (§5 rule 11). Fixing the file and restarting the client clears them.
+- Type check (`config_value_ok(key, value, chunk_threshold=None)`; `chunk_threshold` is the value in effect, needed for `chunk_overlap`): if the default is a bool, accept only bools; if a string, only strings; numbers follow the table below (a bool is never a number). Fields without a default (`owner_id`, `local_id`) and unknown fields are not checked.
+
+**Allowed values (v1.7.1, Lite review LM2)**:
+
+| Keys | Type | Allowed range |
+|---|---|---|
+| `ttl_seconds` | integer | ≥ 1 |
+| `search_result_limit`, `search_query_max_chars`, `embedding_dim` | integer | ≥ 1 |
+| `chunk_threshold` | integer | ≥ 50 |
+| `chunk_overlap` | integer | ≥ 0 and < `chunk_threshold` (the value in effect after checking `chunk_threshold`). When the configured value — or the default 100, if the key is absent or rejected — is not below `chunk_threshold`, use `chunk_threshold // 4` (lowering only `chunk_threshold` to 100 or less must not break saving) |
+| `ttl_refresh_top_k`, `version_min_chars` | integer | ≥ 0 |
+| `half_life_days` | number | > 0 |
+| `bm25_min_threshold`, `access_count_weight`, `access_count_max_boost`, `rerank_weight`, `rerank_phrase_weight` | number | ≥ 0 |
+| `min_score`, `vector_min_cos`, `relative_min_score_ratio`, `version_sim_threshold`, `b_session_match`, `b_session_mismatch` | number | 0–1 |
+
+- "Integer" means a JSON integer: `604800.5` and also `768.0` are rejected. v1.7.0 accepted them; `ttl_seconds: 604800.5` (or `0`, or a negative value) made every `save_memory` fail with a Redis `DataError`, `embedding_dim: 768.0` made `FT.CREATE` fail at start, and `chunk_overlap >= chunk_threshold` (e.g. only `chunk_threshold` lowered to 100) made `chunk_text` loop forever on a body without breaks — none with a notice.
+- An out-of-range value is handled like a wrong type: only that key uses its default, and `config_type` names it.
+
+**Writing `config.json` (v1.7.1, Lite review LH3)**:
+
+- **Creating** a missing file: write the content to a temporary file in the same folder, then create the target exclusively — `os.link(tmp, path)` (fails if the target exists), or `open(path, "x")` where hard links are not available — and remove the temporary file. If the target already exists, another process won: stop creating, read that file and use its `owner_id` / `local_id`. If it cannot be parsed yet (a writer that does not use this rule), wait 0.1 s and read again, up to 2 seconds.
+- **Updating** (filling missing fields) and the legacy migration (§7): write a temporary file in the same folder and `os.replace` it onto the target, so an interrupted write never leaves a truncated file.
+
+> **⚠️ Why (v1.7.1, Lite review LH3)**: v1.7.0 let every starting process generate its own `owner_id` and write the file. Starting 8 processes at once, 5 times out of 5 all 8 ended up with different `owner_id`s and 7 kept running with an ID that was not in the file; their saves returned `saved: true`, but search and list filter by `owner_id`, so those memories were invisible from the next start on. The Claude desktop app on the development PC starts two registrations at the same moment.
+
+- **While `config.json` is unreadable** (the run uses fresh in-memory IDs, table above), every `save_memory` response adds `"warning": "config_unreadable", "detail": "config.json could not be read, so this entry was saved under a temporary owner_id and will not be visible after the server restarts. Fix <path> and restart the MCP client."` (v1.7.1; v1.7.0 warned only on the first search — Lite review LL9). The warning is added to responses that saved something. If the entry was also saved without a vector, the two are combined: `"warning": "embedding_unavailable; config_unreadable"` and the two `detail` texts joined with a space.
+- **Notices**: `load_config()` collects these messages in `cfg["_notices"]` (a list of strings, each starting with its key, e.g. `config_type: …`) and prints each to `stderr`. The connection layer adds `shared_redis` / `config_refused` (§3.4) and `index_dim_mismatch` (§3.9) to the same list. The server prepends each notice **once**, to the output of the first successful `search_memory` call after the notice was added (an error response must still start with `Error:`, so the notices wait for the next successful search), as `> ⚠️ N3MC notice: <message>` lines, so the connected LLM can tell the user (§5 rule 11). A notice added later in the process — `shared_redis` after a reconnect, for example — is therefore shown on the next successful search (v1.7.1; v1.7.0 showed notices only on the first search of the process, so later ones were never shown). Fixing the cause and restarting the client clears them.
 
 > **Multi-account on a single PC**: each OS user runs the server under their own `config.json` by default. To share a Redis across accounts, set the same `redis_url` in both configs — entries are segregated via the `owner_id` TAG filter.
 
@@ -893,7 +993,7 @@ Files inside the data directory:
 
 > **⚠️ Why the home directory, not the platform app-data directory (v1.7.0)**: up to v1.6.x the config lived in the platform user-data directory (`%LOCALAPPDATA%\n3mc-workingmemory\n3mc-workingmemory\` on Windows, via `platformdirs`). The Microsoft Store (MSIX) build of the Claude desktop app runs the MCP servers it launches inside its package container, and Windows **redirects their reads and writes under `%LOCALAPPDATA%`** to `%LOCALAPPDATA%\Packages\<package>\LocalCache\Local\…`. The same PC therefore had two `config.json` files with two different `owner_id`s — one for servers launched by the desktop app, one for servers launched from a terminal (`claude`, scripts) — and because search and list filter by `owner_id` (§3.12), memories saved from one were invisible to the other, on the same Redis. The home directory is not redirected, so every launcher reads the same file.
 
-**Migration (once)**: when `~/.n3mc-workingmemory/config.json` does not exist (and `N3MC_DATA_DIR` is not set), `load_config()` copies the legacy file from the platform user-data directory (`platformdirs.user_data_dir("n3mc-workingmemory")` + `config.json`, as seen by the starting process) byte-for-byte to the new location, prints one line to `stderr`, and leaves the legacy file in place. The first process to start after the upgrade decides which `owner_id` is kept; entries saved under the other `owner_id` (at most `ttl_seconds`, 7 days, old) stop appearing in results and expire on their own. If no legacy file exists, a new config is created as usual. Redis state lives wherever the Redis container stores it (by default, an anonymous Docker volume that vanishes with `docker rm -f redis-stack`).
+**Migration (once)**: when `~/.n3mc-workingmemory/config.json` does not exist (and `N3MC_DATA_DIR` is not set), `load_config()` copies the legacy file from the platform user-data directory (`platformdirs.user_data_dir("n3mc-workingmemory")` + `config.json`, as seen by the starting process) byte-for-byte to the new location, prints one line to `stderr`, and leaves the legacy file in place. The copy uses the exclusive-create rule of §6 (temporary file + `os.link`), so two processes migrating at once end up with one file. The first process to start after the upgrade decides which `owner_id` is kept; entries saved under the other `owner_id` (at most `ttl_seconds`, 7 days, old) stop appearing in results and expire on their own. If no legacy file exists, a new config is created as usual. Redis state lives wherever the Redis container stores it (by default, an anonymous Docker volume that vanishes with `docker rm -f redis-stack`).
 
 ---
 
@@ -967,7 +1067,7 @@ By default, Claude Code prompts the user for each MCP tool call. **For the auto-
 - `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — the tools **as the plugin provides them**. Claude Code names a plugin's MCP tools `mcp__plugin_<plugin-name>_<server-name>__<tool>` and permission rules must use that plugin-scoped form ([permissions docs](https://code.claude.com/docs/en/permissions.md), "Servers that a plugin provides").
 - `mcp__n3mc-workingmemory__*` — the same tools when the server is registered directly (`claude mcp add`, `.mcp.json`).
 
-Wildcards cover all seven tools, including `recall_thread`, and any tool added later. The hook writes only when a rule is missing, never removes entries the user already has (e.g. the explicit per-tool list from v1.6.x), and leaves unrelated fields untouched.
+Wildcards cover all seven tools, including `recall_thread`, and any tool added later. The hook writes only when a rule is missing, never removes entries the user already has (e.g. the explicit per-tool list from v1.6.x), and leaves unrelated fields untouched. **Writing (v1.7.1, Lite review LL2)**: re-read the file immediately before writing and merge the missing rules into what is there at that moment (another program may have changed it since the first read), then write a temporary file in the same folder and `os.replace` it onto `settings.json`, so an interrupted write never leaves a truncated file.
 
 **When `settings.json` cannot be updated (v1.7.0)** — if a rule is missing but the file cannot be read as a JSON object (invalid JSON, wrong top-level type, `permissions` / `allow` of the wrong type) or cannot be written (read-only file, no permission, locked by a corporate policy), the hook does **not** change anything and reports it instead of failing silently: one `stderr` line (kept in Claude Code's debug log) and the same `systemMessage` + `additionalContext` JSON as below, e.g. `[n3mc-workingmemory] Could not update ~/.claude/settings.json (PermissionError: …), so the memory tools were not pre-approved and Claude Code will ask for permission on every memory call. Make the file writable, or add "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" to permissions.allow yourself.` It still exits 0. Nothing is reported when the rules are already present (a read-only file that already has them is fine). v1.6.x swallowed these errors: exit 0, no output (found by the A8 test).
 
@@ -976,10 +1076,10 @@ Wildcards cover all seven tools, including `recall_thread`, and any tool added l
 **Python fallback and visible failure** — the `hooks.json` command tries `python` → `py` (Windows Python Launcher) → `python3` in a `||` chain. If **none** is on `PATH`, a fourth, Python-free step prints one JSON object to stdout and exits 0:
 
 ```json
-{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), so the memory tools could not be pre-approved and Claude Code will ask for permission on every memory call. Install Python 3, or add \"mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
+{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory tools may not be pre-approved and Claude Code may ask for permission on every memory call. Install Python 3, or add \"mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
 ```
 
-`systemMessage` is shown to the user as a warning, and `additionalContext` lets the connected LLM explain it. A plain non-zero exit is **not** enough: Claude Code reports a failed `SessionStart` hook only as a `SessionStart hook error` notice in the transcript carrying the first stderr line (`python: command not found`), which says neither what breaks nor how to fix it, and the `/plugin` Errors tab lists plugin *load* errors (invalid `hooks.json`, bad paths), not hook *runtime* failures ([hooks docs](https://code.claude.com/docs/en/hooks.md), [plugin troubleshooting](https://code.claude.com/docs/en/plugins/troubleshooting.md)). v1.6.x relied on the Errors tab and was effectively silent.
+The fourth step also runs when a Python step exists but exits non-zero (an exception before the script's own handler), so the text names both causes (v1.7.1, Lite review LL7; the script itself always exits 0, so this is rare). `systemMessage` is shown to the user as a warning, and `additionalContext` lets the connected LLM explain it. A plain non-zero exit is **not** enough: Claude Code reports a failed `SessionStart` hook only as a `SessionStart hook error` notice in the transcript carrying the first stderr line (`python: command not found`), which says neither what breaks nor how to fix it, and the `/plugin` Errors tab lists plugin *load* errors (invalid `hooks.json`, bad paths), not hook *runtime* failures ([hooks docs](https://code.claude.com/docs/en/hooks.md), [plugin troubleshooting](https://code.claude.com/docs/en/plugins/troubleshooting.md)). v1.6.x relied on the Errors tab and was effectively silent.
 
 The same hook also performs a **`uvx` pre-flight check**: the plugin manifest ([`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)) launches the MCP server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so a missing `uvx` would otherwise surface only as an opaque `ENOENT` in the MCP launcher. The hook calls `shutil.which("uvx")` and, if not found, prints the same kind of JSON (`systemMessage` + `additionalContext`) with a bilingual install hint (`pipx install uv`, `curl -LsSf https://astral.sh/uv/install.sh | sh`, plus the docs URL) and exits 0. When both apply, the messages are combined into one JSON object (a hook's stdout must be a single JSON object).
 
@@ -1023,7 +1123,9 @@ pip install -e ".[dev]"
 N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
-**There is no default test URL (v1.7.0).** Tests that need Redis are skipped unless `N3MC_REDIS_TEST_URL` is set, and the suite refuses to run (skips with a reason) when that URL equals the `redis_url` in the user's real `config.json` or `N3MC_REDIS_URL`. Every test file uses the same `REDIS_TEST_URL` from `conftest.py`; no test may hard-code a Redis URL. v1.6.x defaulted to `redis://localhost:6379/0` — the same Redis the MCP server uses — so a plain `pytest` wiped the user's working memory.
+**There is no default test URL (v1.7.0).** Tests that need Redis are skipped unless `N3MC_REDIS_TEST_URL` is set, and the suite refuses to run (skips with a reason) when that URL equals the `redis_url` in the user's real `config.json` or `N3MC_REDIS_URL`. The real `config.json` is read with `encoding="utf-8-sig"`, like the server reads it (a BOM must not hide its `redis_url`).
+
+**Second guard: the DB itself (v1.7.1, Lite review LL6)**: comparing URLs misses aliases of the same server (the PC's host name, its LAN address, `127.0.0.2`). Before **every** `FLUSHDB`, the fixtures check the DB: flush only if `DBSIZE` is 0 or the marker key `__n3mc_test_db__` exists; right after flushing, `SET __n3mc_test_db__ 1`. A DB with data and no marker is never flushed — the Redis tests skip with the reason `N3MC_REDIS_TEST_URL points at a Redis that holds data and is not marked as a test DB`. To reuse a test container that holds leftovers from an older suite, flush it yourself once. (Because the marker is not an N3MC key, `enforce_ephemeral()` treats a marked test DB as shared and leaves its persistence settings alone — the safe side; `TestEnforceEphemeral` uses its own empty / N3MC-only states.) Every test file uses the same `REDIS_TEST_URL` from `conftest.py`; no test may hard-code a Redis URL. v1.6.x defaulted to `redis://localhost:6379/0` — the same Redis the MCP server uses — so a plain `pytest` wiped the user's working memory.
 
 Tests auto-skip (not fail) if `N3MC_REDIS_TEST_URL` is unset or Redis Stack is not reachable there. Tests that do not need Redis (ranking, shaping, config) run without it.
 
@@ -1096,9 +1198,27 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestExactOnlyDedup` | A near-identical short fact with a new value is saved; a re-made long document with a few changes is saved; exact duplicates are still rejected (*Redis*) |
 | `TestTimeWindow` | `since` / `until` return in-range rows even when more than `limit × 5` newer rows are closer to the query (*Redis*) |
 | `TestShaping` | `vector_min_cos` drops low-cosine vector candidates; relative cut; the newest version moves to the top and inherits the slot score; `_version_group` rows survive the relative cut; short rows (< `version_min_chars`) are not grouped |
-| `TestRender` | `saved=` in local time, the version sentence, notices printed only on the first search |
+| `TestRender` | `saved=` in local time, the version sentence, each notice printed once; **v1.7.1**: a notice added after the first search is printed on the next search |
 | `TestConfig` | An unreadable `config.json` is not modified; a wrongly typed item is ignored and reported; bool is not accepted as a number |
-| `TestTestSafety` | `conftest` refuses a test URL equal to the live `redis_url` |
+| `TestTestSafety` | `conftest` refuses a test URL equal to the live `redis_url`. **v1.7.1**: the live `config.json` is read with a BOM; a DB with data and no marker is not flushed |
+| `TestFilterScore` (v1.7.1) | With a fresh current-session record at cos 0.86 on top, a 3-day-old same-session record and 1-day-old other-session records at cos 0.95–0.99 survive the relative cut and `min_score`; the order is still by the final score |
+| `TestRedisTimeouts` (v1.7.1, *Redis*) | The client is built with `socket_timeout=5`; a server socket that accepts and never answers makes `ensure_connected()` return within ~5 s with the backend error; the old client is closed on reconnect |
+| `TestConfigCreate` (v1.7.1) | Several processes creating `config.json` at once end with one `owner_id` (every process uses the file's ID); updates go through a temporary file and `os.replace`; the legacy migration uses the exclusive-create rule (temporary file + `os.link`) |
+| `TestConfigRanges` (v1.7.1) | `ttl_seconds` `604800.5` / `0`, `embedding_dim` `768.0`, `chunk_overlap >= chunk_threshold`, `chunk_threshold` 10, `half_life_days` 0, `min_score` 1.5 are ignored with `config_type`; `chunk_text(text, 100, 100)` on a body without breaks terminates |
+| `TestLongSaveAtomic` (v1.7.1, *Redis*) | An embedding failure in the middle of a long save leaves no `doc:` / `docsha:` key, and the same body can then be saved; the guard is taken with `SET NX` and the parent and all chunks are written in one pipeline |
+| `TestIndexFailure` (v1.7.1) | `FT.CREATE` failing with `unknown command` does not end `_main()`; tools return the "Redis Stack required" hint; the index is retried on the next call; an existing index with another `DIM` adds `index_dim_mismatch` |
+| `TestEnforceEphemeral` (v1.7.1, *Redis*) | An empty DB or one with only `mem:` / `doc:` / `docsha:` keys gets `CONFIG SET`; a DB with another key does not, and `shared_redis` is added; a refused `CONFIG` adds `config_refused` without failing the connection |
+| `TestModelWait` (v1.7.1) | While the load holds the lock longer than `MODEL_WAIT_SECONDS` (patched short), `search_memory` answers keyword-only with the "still loading" notice and `save_memory` saves without a vector with `detail` |
+| `TestListPaging` (v1.7.1, *Redis*) | After a standalone memory and a 260-chunk document, `list_memories(20)` lists both |
+| `TestGuardRefresh` (v1.7.1, *Redis*) | A search hit resets the TTL of `mem:sha:` (standalone) and `docsha:` (document) together with the record |
+| `TestOrBm25` (v1.7.1, *Redis*) | `quick fox elephant` and `what did the quick fox do` hit a record containing `quick fox`; `記憶装置 大阪` hits a record containing 記憶装置; rerank coverage counts `note,` as `note` |
+| `TestTimeBoundsStrict` (v1.7.1) | `since="yesterday"` / `"2026/11/13"` return the `Error:` text; `since > until` is an error; a date-only value is local midnight (fixed non-UTC zone) |
+| `TestRepairReembed` (v1.7.1, *Redis*) | Entries saved without `embedding` get one from `repair_memory` (at most 200 per call, TTL unchanged, `reembedded` / `remaining` reported) |
+| `TestDeleteOwner` (v1.7.1, *Redis*) | `delete_memory` on another owner's id returns `not_found` and deletes nothing; a parent's chunks are deleted from `chunk_ids` |
+| `TestGuardNx` (v1.7.1, *Redis*) | Two simultaneous saves of the same content store one record; a failed write after taking the guard releases it |
+| `TestAccessCountNoGhost` (v1.7.1, *Redis*) | A key that expires between the search and the TTL refresh is not recreated by `HINCRBY` |
+| `TestHangulFiller` (v1.7.1) | `U+3164`, `U+115F`, `U+1160`, `U+FFA0`, `U+2800` alone are rejected as no visible characters; with a visible character they are stored verbatim |
+| `TestPluginHook` (additions, v1.7.1) | `settings.json` is re-read just before writing and replaced atomically; the fallback text names "or the permission script failed" |
 
 ### Example runs
 
