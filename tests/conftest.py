@@ -1,27 +1,74 @@
+"""Shared fixtures (spec §9).
+
+SAFETY (v1.7.0): the suite FLUSHDBs DB 0 of the Redis it uses. There is no
+default test URL — Redis tests run only against the dedicated instance named
+by N3MC_REDIS_TEST_URL, and never against the live `redis_url` of the user's
+config.json / N3MC_REDIS_URL. v1.6.x defaulted to redis://localhost:6379/0,
+the same Redis the MCP server uses, so a plain `pytest` wiped working memory.
+"""
+import json
 import os
+from urllib.parse import urlparse
+
 import pytest
 import redis
 
+REDIS_TEST_URL = os.environ.get("N3MC_REDIS_TEST_URL", "").strip()
 
-REDIS_TEST_URL = os.environ.get("N3MC_REDIS_TEST_URL", "redis://localhost:6379/0")
+
+def _norm_url(url: str) -> tuple:
+    u = urlparse(url)
+    host = (u.hostname or "localhost").lower()
+    if host in ("localhost", "::1", "0.0.0.0"):
+        host = "127.0.0.1"
+    db = (u.path or "/0").lstrip("/") or "0"
+    return (host, u.port or 6379, db)
 
 
-def _redis_available() -> bool:
+def _live_redis_urls() -> set:
+    """redis_url values the real MCP server may be using."""
+    urls = {"redis://localhost:6379/0"}  # the built-in default
+    env = os.environ.get("N3MC_REDIS_URL")
+    if env:
+        urls.add(env)
+    try:
+        from n3mc_mcp.paths import get_config_path
+        path = get_config_path()
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("redis_url"), str):
+                urls.add(data["redis_url"])
+    except Exception:
+        pass
+    return {_norm_url(u) for u in urls}
+
+
+def _skip_reason() -> str:
+    if not REDIS_TEST_URL:
+        return ("N3MC_REDIS_TEST_URL is not set — Redis tests need a DEDICATED "
+                "Redis Stack (they FLUSHDB it), see spec §9")
+    if _norm_url(REDIS_TEST_URL) in _live_redis_urls():
+        return ("refusing to run: N3MC_REDIS_TEST_URL points at the live "
+                "redis_url used by the MCP server (tests would FLUSHDB it)")
     try:
         r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
         r.ping()
-        return True
-    except Exception:
-        return False
+    except Exception as e:
+        return f"Redis Stack not reachable at N3MC_REDIS_TEST_URL ({e})"
+    return ""
 
+
+REDIS_SKIP_REASON = _skip_reason()
 
 requires_redis = pytest.mark.skipif(
-    not _redis_available(), reason="Redis Stack not available"
+    bool(REDIS_SKIP_REASON), reason=REDIS_SKIP_REASON or "redis available"
 )
 
 
 @pytest.fixture
 def redis_client():
+    if REDIS_SKIP_REASON:
+        pytest.skip(REDIS_SKIP_REASON)
     r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
     r.flushdb()
     yield r
@@ -37,11 +84,9 @@ def cfg(tmp_path):
         "_session_id": str(uuid.uuid4()),
         "redis_url": REDIS_TEST_URL,
         "ttl_seconds": 604800,
-        "dedup_threshold": 0.95,
         "half_life_days": 3,
         "bm25_min_threshold": 0.1,
         "search_result_limit": 20,
-        "context_char_limit": 3000,
         "min_score": 0.0,
         "search_query_max_chars": 2000,
         "chunk_threshold": 400,
@@ -54,6 +99,11 @@ def cfg(tmp_path):
         "lexical_rerank_enabled": False,
         "rerank_weight": 0.3,
         "rerank_phrase_weight": 0.2,
+        # v1.7.0 shaping off by default in unit fixtures (dummy vectors);
+        # tests/test_regressions.py turns each step on explicitly.
+        "vector_min_cos": 0.0,
+        "relative_min_score_ratio": 0.0,
+        "version_order_enabled": False,
     }
 
 

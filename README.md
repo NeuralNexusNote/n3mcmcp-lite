@@ -226,7 +226,7 @@ storage.
 | Tool                          | Purpose                                                                          |
 | ----------------------------- | -------------------------------------------------------------------------------- |
 | `search_memory`               | Hybrid (vector + BM25) search, ranked & time-decayed, `session_id` boost         |
-| `save_memory`                 | Persist a short entry (7d TTL, dedup: exact + near-duplicate)                    |
+| `save_memory`                 | Persist a short entry (7d TTL, exact duplicates rejected)                        |
 | `list_memories`               | Most-recent entries, newest first                                                |
 | `delete_memory`               | Remove a specific entry by id (cascades to chunks if id is a parent doc)         |
 | `delete_memories_by_session`  | Bulk-delete every memory tied to a `session_id` — wraps up a finished project    |
@@ -471,12 +471,15 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "local_id":                 "<uuid>",
   "redis_url":                "redis://localhost:6379/0",
   "ttl_seconds":              604800,
-  "dedup_threshold":          0.95,
   "half_life_days":           3,
   "bm25_min_threshold":       0.1,
   "search_result_limit":      20,
-  "context_char_limit":       3000,
   "min_score":                0.2,
+  "vector_min_cos":           0.85,
+  "relative_min_score_ratio": 0.6,
+  "version_order_enabled":    true,
+  "version_sim_threshold":    0.98,
+  "version_min_chars":        100,
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
@@ -496,6 +499,10 @@ On first run, `config.json` is auto-generated with random UUIDs for
 
 - `redis_url` — connection URL; `N3MC_REDIS_URL` env var takes precedence.
 - `ttl_seconds` — TTL on every new memory and sha-guard (default 7 d).
+- `vector_min_cos` — how close (cosine) a record must be to the query to become a vector candidate (default `0.85`). Lower it (e.g. 0.80–0.83) to recall records even when the wording differs, at the cost of more loosely related rows; raise it (e.g. 0.88) for shorter results, at the cost of dropping related rows more easily. A sensible range is 0.80–0.88; 0.85 was measured with `multilingual-e5-base`, so re-measure it if you change `embedding_model`.
+- `relative_min_score_ratio` — drop results scoring below this ratio × the top score (default `0.6`; `0.0` disables).
+- `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — when an updated version of a document or long entry is saved, both versions are kept; results whose content is ≥ 0.98 similar are treated as versions and listed newest first. Each hit shows its `saved=` time.
+- Settings take effect when the MCP server restarts (restart your MCP client). If `config.json` has a typo and cannot be read, it is left untouched and the server runs on defaults; the first `search_memory` result says so. Write numbers without quotes.
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (chars). Bodies longer than the threshold trigger the parent-document + chunks path for verbatim recall.
 - `access_count_*` — access-frequency auto-importance; top-K search hits receive a capped boost on future queries.
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
@@ -609,7 +616,7 @@ sits elsewhere:
 | **Search internals** | Black box | **Hybrid BM25 + e5 vectors + CJK bigram + time decay + lightweight reranker, all parameters visible and tunable** |
 | **Inspect / control** | UI only | **`list_memories` / `delete_memory` / `delete_memories_by_session` operate on raw records** |
 | **Persistence** | Tied to the vendor's service lifetime | **In-memory Redis with 7-day TTL** — short-lived by design, but you own the container; pair with any persistent memory backend for long-term storage |
-| **Tunability** | Fixed | `half_life_days`, `chunk_threshold`, `dedup_threshold`, rerank weights — all editable |
+| **Tunability** | Fixed | `half_life_days`, `chunk_threshold`, `vector_min_cos`, rerank weights — all editable |
 
 So the value of running N3MemoryCore Lite is **not** "more reliable
 auto-save" — it is **owning a transparent, multi-client working-memory
@@ -680,9 +687,11 @@ Behavioral notes:
 - **Claude can never accidentally skip a save** — the harness fires the
   hook regardless of what the LLM does.
 - No MCP round-trip overhead; the hook talks to Redis directly.
-- As a session grows, the per-turn transcripts collide via near-duplicate
-  detection (`dedup_threshold`), so the DB stays close to **one entry per
-  session** instead of one per turn.
+- Each turn's transcript is saved as a new entry (only exact repeats are
+  rejected — near-duplicates are kept since v1.10.0, so no update is lost).
+  `search_memory` lists the newest version first and shows `saved=` times;
+  if the DB grows too fast, save only the latest exchange instead of the
+  whole transcript.
 - Transcripts shorter than ~200 chars are skipped as noise.
 - Pros: deterministic / independent of model behavior / no save anxiety.
 - Cons: Claude Code only (Cursor / Windsurf need a different approach) /
@@ -714,10 +723,11 @@ and run it freely. The fork-and-run path is:
 ```bash
 git clone https://github.com/<YOU>/n3mcmcp-lite
 cd n3mcmcp-lite
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+# Tests FLUSHDB their Redis: use a DEDICATED test container, never your memory Redis
+docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest tests/ -q                                      # 105 tests, ~30s warm
+N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
 CI runs the same matrix on every push and PR — see

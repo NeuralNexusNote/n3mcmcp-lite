@@ -36,7 +36,11 @@ This is a one-time cost.
 ## 2. Run the test suite
 
 ```bash
-# All 105 tests (requires Redis Stack on localhost:6379):
+# Tests FLUSHDB their Redis, so they run ONLY against a dedicated test
+# Redis named by N3MC_REDIS_TEST_URL (there is no default; the live
+# redis_url is refused):
+docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
+export N3MC_REDIS_TEST_URL=redis://localhost:6390/0
 pytest tests/ -q
 
 # A single layer:
@@ -47,8 +51,6 @@ pytest tests/test_server.py -v
 # Skip the slow embedding tests:
 pytest tests/ -q -k "not TestEmbedding"
 
-# With a non-default test Redis:
-N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
 > **⚠️ Destructive test DB warning**: tests `FLUSHDB` index 0 before and
@@ -150,7 +152,10 @@ pip install -e ".[dev]"
 ### 2. テスト実行
 
 ```bash
-# 全 105 テスト：
+# テストは使う Redis を FLUSHDB するので、N3MC_REDIS_TEST_URL で指定した
+# テスト専用の Redis でだけ動く（既定値はなく、記憶用の redis_url は拒否する）：
+docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
+export N3MC_REDIS_TEST_URL=redis://localhost:6390/0
 pytest tests/ -q
 
 # 個別レイヤ：

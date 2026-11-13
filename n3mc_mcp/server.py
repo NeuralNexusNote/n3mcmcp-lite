@@ -10,7 +10,8 @@ Spec §4.3.1 Retrieval Extensions:
             save_memory   += turn_id
             recall_thread (new 7th tool)
 Spec §3.9  startup: load_config → connect → enforce_ephemeral → ensure_index
-                    → preload embedding model (fd-level redirect)
+                    → stdio loop starts → embedding model loads in background
+Spec §3.14 search_memory output: notices, version sentence, saved= local time
 Spec §11   every tool response ends with a short auto-save reminder
 """
 import sys
@@ -29,20 +30,104 @@ import asyncio
 import json
 import os
 import uuid
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from . import __version__
 from .config import load_config
 from .database import Database, _DOCKER_HINT
 from .instructions import INSTRUCTIONS
-from .processor import get_model, purify, set_model_name
+from .processor import get_model, import_backend, purify, set_model_name
 
 _db: Database = None
 
-app = Server("n3mc-workingmemory")
+# §4.2: serverInfo.version = package __version__; instructions advertised.
+app = Server("n3mc-workingmemory", version=__version__, instructions=INSTRUCTIONS)
+
+# §6 notices are prepended to the FIRST successful search_memory output only.
+_notices_shown = False
+
+_VERSION_SENTENCE = (
+    "_If several versions of the same content appear, the one with the "
+    "newest `saved` time is the current one._"
+)
+
+
+# ── §3.14 search_memory rendering ────────────────────────────────────────────
+
+def _fmt_saved(timestamp: str, timestamp_epoch: Optional[float] = None) -> str:
+    """Stored UTC time → server-local time with its offset (spec §3.14).
+
+    "2026-11-13T01:34:00+00:00" → "2026-11-13 10:34 (UTC+0900)" on a JST host.
+    Falls back to `timestamp_epoch`, then to the raw string, then "?".
+    """
+    dt = None
+    if timestamp:
+        try:
+            dt = datetime.fromisoformat(timestamp.strip().replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            dt = None
+    if dt is None and timestamp_epoch:
+        try:
+            dt = datetime.fromtimestamp(float(timestamp_epoch), tz=timezone.utc)
+        except Exception:
+            dt = None
+    if dt is None:
+        return (timestamp or "")[:19] or "?"
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M (UTC%z)")
+
+
+def _render_search(results: list[dict], notices: Optional[list[str]] = None) -> str:
+    """Build the search_memory markdown (spec §3.14 output format).
+
+        > ⚠️ N3MC notice: <message>        (one line per pending notice)
+
+        _If several versions ..._           (once, when there is >= 1 hit)
+
+        ### [doc×N] [<id>] turn=<turn_id> score=0.812 saved=<local> (UTC±hhmm)
+        <content>
+
+    `turn=` is omitted when the row has no turn_id; `[doc×N]` only for
+    parent documents. Hits are separated by `---`.
+    """
+    parts: list[str] = []
+    if notices:
+        parts.append("\n".join(f"> ⚠️ N3MC notice: {n}" for n in notices))
+    if not results:
+        parts.append("_No memories found._")
+        return "\n\n".join(parts)
+    parts.append(_VERSION_SENTENCE)
+    hits: list[str] = []
+    for r in results:
+        tag     = r.get("_tag", "")
+        tag_str = f"{tag} " if tag else ""
+        tid     = r.get("turn_id", "")
+        tid_str = f" turn={tid}" if tid else ""
+        score   = float(r.get("score", 0.0))
+        saved   = _fmt_saved(r.get("timestamp", ""), r.get("timestamp_epoch"))
+        hits.append(
+            f"### {tag_str}[{r.get('id', '')}]{tid_str} score={score:.3f} "
+            f"saved={saved}\n{purify(r.get('content', ''))}"
+        )
+    parts.append("\n\n---\n\n".join(hits))
+    return "\n\n".join(parts)
+
+
+def _take_notices() -> list[str]:
+    """Pending config notices (cfg["_notices"]), returned once per process (§6)."""
+    global _notices_shown
+    if _notices_shown:
+        return []
+    _notices_shown = True
+    if _db is None:
+        return []
+    return list(_db.cfg.get("_notices") or [])
 
 # ── §11 turn-end nudges ──────────────────────────────────────────────────────
 
@@ -58,8 +143,8 @@ _NUDGE_AFTER_SAVE = (
     "\n\n---\n_Reminder: if this turn produced multiple distinct facts or a "
     "long verbatim artifact, make sure each was saved — one "
     "`save_memory` call per fact, or one full-text call for verbatim "
-    "long content (>400 chars). Duplicates are auto-rejected, so err "
-    "on the side of saving._"
+    "long content (>400 chars). Exact duplicates are auto-rejected, so "
+    "err on the side of saving._"
 )
 _NUDGE_GENERIC = (
     "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
@@ -79,6 +164,9 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Hybrid (vector + BM25) search over stored memories. "
                 "Call this at the start of every user turn. "
+                "Each hit shows its saved= time; when several versions of the "
+                "same content appear, the newest is listed first and is the "
+                "current one. "
                 "NOTE: Lite memories expire 7d after they were saved."
             ),
             inputSchema={
@@ -131,7 +219,9 @@ async def list_tools() -> list[Tool]:
             name="save_memory",
             description=(
                 "Save a memory entry (Lite: 7-day TTL). "
-                "Auto-deduplicates exact and near-duplicate content. "
+                "Rejects exact duplicates only; an updated fact or a re-made "
+                "document is saved as a new entry (search_memory lists the "
+                "newest version first). "
                 "Long content (>chunk_threshold chars) is chunked with a "
                 "parent-document for verbatim recall."
             ),
@@ -290,22 +380,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 arguments.get("since", ""),
                 arguments.get("until", ""),
             )
-            if not results:
-                text = "_No memories found._"
-            else:
-                lines: list[str] = []
-                for r in results:
-                    tag     = r.get("_tag", "")
-                    tag_str = f"{tag} " if tag else ""
-                    score   = r.get("score", 0.0)
-                    mem_id  = r.get("id", "")
-                    ts      = r.get("timestamp", "")[:19]
-                    tid     = r.get("turn_id", "")
-                    tid_str = f" turn={tid}" if tid else ""
-                    lines.append(
-                        f"### {tag_str}[{mem_id}]{tid_str} score={score:.3f} {ts}\n{purify(r['content'])}"
-                    )
-                text = "\n\n---\n\n".join(lines)
+            text = _render_search(results, _take_notices())
             return [TextContent(type="text", text=text + _NUDGE_AFTER_SEARCH)]
 
         elif name == "save_memory":
@@ -434,21 +509,41 @@ async def _main() -> None:
     except AttributeError:
         pass
 
-    # Spec §3.9 step 4: preload embedding model BEFORE entering the stdio_server
-    # context to prevent stray stdout bytes from corrupting the JSON-RPC channel.
+    # Spec §3.9 step 4, part 1: import the embedding library synchronously
+    # BEFORE stdio starts (child processes spawned during the import would
+    # deadlock on Windows once the stdin pipe has a pending read). fd 1 is
+    # pointed at stderr meanwhile so stray library output cannot reach the
+    # JSON-RPC channel, which is not open yet.
     try:
         saved_fd = os.dup(1)
         try:
             os.dup2(2, 1)
-            get_model()
+            import_backend()
         finally:
             os.dup2(saved_fd, 1)
             os.close(saved_fd)
     except Exception as e:
-        print(f"[n3mc] model preload failed (will lazy-retry): {e}", file=sys.stderr)
+        print(f"[n3mc] embedding library import failed: {e}", file=sys.stderr)
 
     async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, init_opts)
+        # Spec §3.9 step 4: load the embedding model in the BACKGROUND after
+        # stdio starts listening, so the initialize handshake is answered
+        # right away (a synchronous ~30-40 s load times the client out).
+        # get_model() uses double-checked locking and a Python-level stdout
+        # redirect; the JSON-RPC writer holds its own handle on stdout.buffer.
+        loop = asyncio.get_running_loop()
+        preload = loop.run_in_executor(None, _preload_model)
+        try:
+            await app.run(read_stream, write_stream, init_opts)
+        finally:
+            preload.cancel()
+
+
+def _preload_model() -> None:
+    try:
+        get_model()
+    except Exception as e:
+        print(f"[n3mc] model preload failed (will lazy-retry): {e}", file=sys.stderr)
 
 
 def run() -> None:

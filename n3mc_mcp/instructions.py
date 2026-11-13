@@ -1,6 +1,6 @@
 """Behavioral instructions delivered to the LLM in the MCP initialize response.
 
-Spec §5 — rules 0–9.  The full text below is the authoritative implementation;
+Spec §5 — rules 0–11.  The full text below is the authoritative implementation;
 the spec section summarises the intent, this file is the actual delivered text.
 """
 
@@ -73,8 +73,13 @@ BEHAVIORAL RULES
        invested more than a sentence or two producing it, save it.
    (c) Key facts, preferences, and unresolved questions.
    Use one `save_memory` call per distinct fact (~50-200 chars each).
-   Duplicates are auto-rejected, so err on the side of saving.
-   NOTE: Lite memories expire 7 days after they are saved.
+   Long content goes to rule 3.
+   Exact duplicates are auto-rejected server-side, so err on the side of
+   saving more. Near-duplicates are NOT rejected: an updated fact or a
+   re-made document is saved as a new entry, and `search_memory` shows the
+   newest version first.
+   NOTE: Lite memories expire 7 days after they are saved — this is a
+   rolling scratchpad, not a permanent archive.
 
    Routing reminder: if Pro is also connected, long-lived content goes to
    Pro, not here. See rule 0.
@@ -233,4 +238,14 @@ BEHAVIORAL RULES
 
     The user does not need to be aware of `recall_thread`; it is an
     internal tool you use proactively to enrich recall quality.
+
+11. VERSIONS AND NOTICES
+    Every `search_memory` hit shows a `saved=` time. When several versions
+    of the same content appear in the results, the one with the newest
+    `saved=` time is the current one — answer from it (mention the change
+    if it matters).
+
+    If a `search_memory` result starts with `> ⚠️ N3MC notice:`, tell the
+    user what it says, in their language (e.g. their `config.json` could
+    not be read, or a setting has the wrong type and was ignored).
 """

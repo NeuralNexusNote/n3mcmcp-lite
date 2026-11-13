@@ -23,7 +23,7 @@ import os
 from pathlib import Path
 
 import pytest
-from tests.conftest import requires_redis
+from tests.conftest import requires_redis, REDIS_TEST_URL, REDIS_SKIP_REASON
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -36,7 +36,6 @@ def _make_cfg(redis_url: str, owner_id: str, session_id: str) -> dict:
         "local_id":               str(uuid.uuid4()),
         "_session_id":            session_id,
         "ttl_seconds":            604800,
-        "dedup_threshold":        0.95,
         "half_life_days":         3,
         "bm25_min_threshold":     0.1,
         "search_result_limit":    20,
@@ -70,7 +69,7 @@ class TestCrossSessionDatabaseLayer:
     """Simulate MCP server restart by constructing a fresh Database instance
     with a different _session_id pointing at the same Redis DB."""
 
-    REDIS_URL = "redis://localhost:6379/0"
+    REDIS_URL = REDIS_TEST_URL  # dedicated test Redis only (spec §9)
 
     def _pair(self) -> tuple:
         """Return (db1, db2) sharing owner_id but having different _session_id."""
@@ -227,13 +226,7 @@ WORKTREE = Path(__file__).parent.parent  # …/adoring-moser-cffb55
 
 
 def _is_redis_available() -> bool:
-    try:
-        import redis
-        r = redis.Redis.from_url("redis://localhost:6379/0", decode_responses=False)
-        r.ping()
-        return True
-    except Exception:
-        return False
+    return not REDIS_SKIP_REASON
 
 
 def _is_mcp_client_available() -> bool:
@@ -259,7 +252,7 @@ class TestCrossSessionMCPSubprocess:
     @pytest.fixture(autouse=True)
     def _flush(self):
         import redis as redis_lib
-        r = redis_lib.Redis.from_url("redis://localhost:6379/0", decode_responses=False)
+        r = redis_lib.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
         r.flushdb()
         yield
         r.flushdb()
@@ -280,6 +273,11 @@ class TestCrossSessionMCPSubprocess:
         env = {**os.environ}
         # No N3MC_SESSION_ID → each process gets a fresh UUID (simulates restart)
         env.pop("N3MC_SESSION_ID", None)
+        # Point the server processes at the dedicated test Redis and an
+        # isolated data dir — never the user's live config / Redis.
+        env["N3MC_REDIS_URL"] = REDIS_TEST_URL
+        import tempfile
+        env["N3MC_DATA_DIR"] = tempfile.mkdtemp(prefix="n3mc-test-")
 
         server_params = StdioServerParameters(
             command=sys.executable,

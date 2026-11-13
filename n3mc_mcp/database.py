@@ -22,16 +22,20 @@ from typing import Optional
 import redis as redis_lib
 
 from .processor import (
+    apply_vector_floor,
     b_local,
-    cjk_bigram_expand,
     chunk_text,
+    content_ngram,
     cosine_sim_from_distance,
+    drop_lone_cjk_tokens,
     embed,
     final_score,
     keyword_relevance,
     lexical_rerank,
     normalize_text,
+    order_versions_newest_first,
     prepare_query,
+    relative_cut,
     sanitize_surrogates,
     time_decay,
 )
@@ -143,6 +147,24 @@ def _epoch_from_iso(ts: str, is_until: bool = False) -> float:
         return 0.0
 
 
+def _time_filter_clause(since: str = "", until: str = "") -> str:
+    """§4.3.1 since/until → RediSearch NUMERIC pre-filter.
+
+    Returns `@timestamp_epoch:[<since> <until>]` with `-inf` / `+inf` for an
+    open bound, or "" when neither bound is given (or neither parses).
+    Used inside the KNN query (`<clause>=>[KNN ...]`) and the BM25 query
+    (`(<text>) <clause>`). NUMERIC filters do not hit the UUID TAG problem
+    of §3.12.
+    """
+    lo = _epoch_from_iso(since, is_until=False) if since else 0.0
+    hi = _epoch_from_iso(until, is_until=True) if until else 0.0
+    if not lo and not hi:
+        return ""
+    lo_s = repr(float(lo)) if lo else "-inf"
+    hi_s = repr(float(hi)) if hi else "+inf"
+    return f"@timestamp_epoch:[{lo_s} {hi_s}]"
+
+
 # ── main class ───────────────────────────────────────────────────────────────
 
 class Database:
@@ -232,38 +254,6 @@ class Database:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    # ── §3.8 duplicate detection ─────────────────────────────────────────────
-
-    def _near_dedup(self, vec_bytes: bytes, owner_id: str) -> Optional[float]:
-        """KNN=5 near-duplicate check; owner_id filtered in Python (spec §3.12)."""
-        threshold = self.cfg.get("dedup_threshold", 0.95)
-        try:
-            res = self._client.execute_command(
-                "FT.SEARCH", INDEX_NAME,
-                "*=>[KNN 5 @embedding $vec AS __dist]",
-                "PARAMS", "2", "vec", vec_bytes,
-                "RETURN", "2", "__dist", "owner_id",
-                "SORTBY", "__dist",
-                "LIMIT", "0", "5",
-                "DIALECT", "2",
-            )
-            res = self._unwrap_search_response(res)
-            if res and res[0] > 0:
-                i = 1
-                while i + 1 < len(res):
-                    fdict = _parse_fields(res[i + 1])
-                    if fdict.get("owner_id") != owner_id:
-                        i += 2
-                        continue
-                    dist = _to_float(fdict.get("__dist", "1.0"))
-                    sim = cosine_sim_from_distance(dist)
-                    if sim >= threshold:
-                        return sim
-                    i += 2
-        except Exception:
-            pass
-        return None
-
     # ── §3.8 / §3.11 save ───────────────────────────────────────────────────
 
     def save_memory(
@@ -317,7 +307,12 @@ class Database:
         session_id: str,
         turn_id: str = "",
     ) -> dict:
-        """§3.8 (A): exact SHA dedup → near-dedup → HSET+EXPIRE+sha-guard pipeline."""
+        """§3.8 (A): exact SHA dedup → HSET+EXPIRE+sha-guard pipeline.
+
+        v1.7.0: no near-duplicate (similarity) rejection — an updated fact
+        with a new value is saved as a new entry; search_memory puts the
+        newest version first (§3.14).
+        """
         sha = _sha1(content)
         sha_key = f"mem:sha:{sha}"
 
@@ -328,13 +323,9 @@ class Database:
         # half/full-width and other compat differences. The `content` field
         # below still stores the raw input verbatim for §3.11 recall.
         vec_bytes = embed(normalize_text(content), is_query=False)
-        if vec_bytes:
-            near = self._near_dedup(vec_bytes, owner_id)
-            if near is not None:
-                return {"status": "near_duplicate", "saved": False, "similarity": near}
 
         mem_id = _new_id()
-        ngram = cjk_bigram_expand(content)
+        ngram = content_ngram(content)
         now_iso = _now_iso()
         now_epoch = _now_epoch()
         ttl = self.cfg["ttl_seconds"]
@@ -380,7 +371,11 @@ class Database:
         session_id: str,
         turn_id: str = "",
     ) -> dict:
-        """§3.8 (B) + §3.11: parent-level dedup → doc: parent → chunk pipeline."""
+        """§3.8 (B) + §3.11: parent-level exact dedup → doc: parent → chunk pipeline.
+
+        v1.7.0: no parent-level near-duplicate rejection (a re-made document
+        with a few changes is saved as a new version).
+        """
         sha = _sha1(content)
         docsha_key = f"docsha:{sha}"
 
@@ -388,14 +383,6 @@ class Database:
             existing = self._client.get(docsha_key)
             parent_id = existing.decode() if isinstance(existing, bytes) else str(existing)
             return {"status": "duplicate", "saved": False, "parent_id": parent_id}
-
-        # Parent-level near-dedup: embed NFKC-normalized full body, KNN
-        # against chunk index.
-        full_vec = embed(normalize_text(content), is_query=False)
-        if full_vec:
-            near = self._near_dedup(full_vec, owner_id)
-            if near is not None:
-                return {"status": "near_duplicate", "saved": False, "similarity": near}
 
         threshold = self.cfg.get("chunk_threshold", 400)
         overlap   = self.cfg.get("chunk_overlap", 100)
@@ -437,11 +424,11 @@ class Database:
         pipe.execute()
 
         # Write all chunks in a single pipeline (spec §3.11).
-        # No per-chunk SHA guards and no per-chunk near-dedup (spec §3.8):
-        # parent-level dedup above already handles near-duplicate full documents.
+        # No per-chunk SHA guards (spec §3.8): sliding-window chunks overlap
+        # by design and would otherwise reject each other.
         chunk_pipe = self._client.pipeline()
         for chunk, chunk_id in zip(chunks, chunk_ids):
-            ngram     = cjk_bigram_expand(chunk)
+            ngram     = content_ngram(chunk)
             vec_bytes = embed(normalize_text(chunk), is_query=False)
             fields: dict = {
                 b"id":              chunk_id.encode(),
@@ -474,7 +461,7 @@ class Database:
             "ttl_seconds": ttl,
         }
 
-    # ── §3.6 / §3.11 search ─────────────────────────────────────────────────
+    # ── §3.6 / §3.11 / §3.14 search ─────────────────────────────────────────
 
     def search_memory(
         self,
@@ -484,6 +471,13 @@ class Database:
         since: str = "",
         until: str = "",
     ) -> list[dict]:
+        """Hybrid search + v1.7.0 result shaping (spec §3.6, §3.11, §3.14).
+
+        Order: time-window pre-filter (inside both queries) → vector floor →
+        fusion → parent resolution → lexical rerank → min_score →
+        newest version first → relative cut → TTL refresh / access_count
+        (top-K) → truncate to `limit`.
+        """
         if not self._ok:
             return []
 
@@ -500,20 +494,30 @@ class Database:
         bm25_thr      = self.cfg.get("bm25_min_threshold", 0.1)
 
         # b_session resolution (spec §3.6): per-call arg → env var (in cfg) → process UUID
-        effective_session = session_id.strip() or self.cfg.get("_session_id", "")
+        effective_session = (session_id or "").strip() or self.cfg.get("_session_id", "")
         b_sess_match    = self.cfg.get("b_session_match", 1.0)
         b_sess_mismatch = self.cfg.get("b_session_mismatch", 0.6)
 
-        vec_results  = self._vector_search(query, owner_id, limit)
-        bm25_results = self._bm25_search(query, owner_id, limit)
+        # §4.3.1 / §3.14 step 1: since/until are PRE-filters inside both queries.
+        time_filter = _time_filter_clause(since, until)
+
+        vec_results = self._vector_search(query, owner_id, limit, time_filter)
+        # §3.14 step 2: vector floor. A dropped row can still enter via BM25
+        # (with cos_sim = 0.0).
+        vec_results = apply_vector_floor(
+            vec_results, self.cfg.get("vector_min_cos", 0.85)
+        )
+        # §3.7: a BM25 failure never fails search_memory.
+        try:
+            bm25_results = self._bm25_search(query, owner_id, limit, time_filter)
+        except Exception as e:
+            print(f"[n3mc] BM25 search skipped: {e}", file=sys.stderr)
+            bm25_results = {}
 
         all_keys = set(vec_results) | set(bm25_results)
         max_bm25 = max(
             (v["bm25_score"] for v in bm25_results.values()), default=1.0
         )
-
-        since_epoch = _epoch_from_iso(since, is_until=False) if since else 0.0
-        until_epoch = _epoch_from_iso(until, is_until=True) if until else 0.0
 
         candidates: list[dict] = []
         for key in all_keys:
@@ -546,12 +550,8 @@ class Database:
             )
             score = final_score(cos, kw, dec, b, b_sess)
 
-            # Change B (spec §6 min_score): do NOT prune by min_score here.
-            # The lexical reranker (coverage + phrase bonus, run after parent
-            # resolution on the full verbatim body) can lift a fused score that
-            # is just below the threshold above it. Filtering at fusion time
-            # would discard those before rerank could rescue them, so the
-            # min_score cut is deferred until AFTER rerank (see below).
+            # min_score is NOT applied here: the lexical reranker can lift a
+            # fused score that is just below the threshold (spec §3.6).
             candidates.append({
                 "key":             key,
                 "id":              mem_id,
@@ -591,15 +591,24 @@ class Database:
                     c["id"]           = pid
                     c["_tag"]         = f"[doc×{chunk_count}]"
                     c["_parent_key"]  = f"doc:{pid}"
-                    # Change A (spec §3.5 chunk_ids / §3.11): collect EVERY
-                    # sibling chunk key so the TTL refresh below can extend the
-                    # whole document's chunks together, not just the one that
-                    # happened to win the ranking. Older parent docs saved
-                    # without chunk_ids gracefully fall back to single-chunk
-                    # refresh (field absent → empty list).
+                    doc_turn = doc_data.get(b"turn_id", b"")
+                    if doc_turn:
+                        c["turn_id"] = doc_turn.decode()
+                    doc_ts = doc_data.get(b"timestamp", b"")
+                    if doc_ts:
+                        c["timestamp"] = doc_ts.decode()
+                    doc_ep = doc_data.get(b"timestamp_epoch", b"")
+                    if doc_ep:
+                        c["timestamp_epoch"] = _to_float(doc_ep.decode(), c["timestamp_epoch"])
+                    # Every sibling chunk key, so the TTL refresh below extends
+                    # the whole document's chunks together (spec §3.11). Older
+                    # docs without chunk_ids fall back to single-chunk refresh.
                     cids_raw = doc_data.get(b"chunk_ids", b"")
                     cids = cids_raw.decode().split() if cids_raw else []
                     c["_sibling_keys"] = [f"mem:{cid}" for cid in cids if cid]
+                    # §3.14: a parent's representative embedding is its FIRST
+                    # chunk's (chunk_ids[0]). No chunk_ids → no representative.
+                    c["_rep_key"] = f"mem:{cids[0]}" if cids else ""
                 # else: parent expired — orphan chunk surfaces as its own hit
                 # (graceful degrade, spec §3.11). Do NOT mark seen_parents so
                 # sibling orphan chunks each get their own listing.
@@ -617,32 +626,24 @@ class Database:
         else:
             candidates.sort(key=lambda x: x["score"], reverse=True)
 
-        # Change B (spec §6 min_score): apply the score floor AFTER rerank so a
-        # phrase/coverage boost can rescue candidates that were just under the
-        # threshold at fusion time. Filtering here (not at fusion) is the whole
-        # point of deferring it.
+        # min_score floor AFTER rerank (spec §3.6 / §6).
         if min_score_val > 0:
             candidates = [c for c in candidates if c["score"] >= min_score_val]
 
-        # §4.3.1 since/until time filter — applied post-rerank so ranking is
-        # unaffected; only results outside the window are dropped.
-        if since_epoch or until_epoch:
-            filtered: list[dict] = []
-            for c in candidates:
-                ts_ep = c.get("timestamp_epoch") or _epoch_from_iso(c.get("timestamp", ""))
-                if since_epoch and ts_ep < since_epoch:
-                    continue
-                if until_epoch and ts_ep > until_epoch:
-                    continue
-                filtered.append(c)
-            candidates = filtered
+        # §3.14 step 4: newest version first.
+        if self.cfg.get("version_order_enabled", True) and len(candidates) > 1:
+            rep_vectors, rep_texts = self._fetch_representatives(candidates)
+            candidates = order_versions_newest_first(
+                candidates, rep_vectors, self.cfg, rep_texts
+            )
 
-        # TTL refresh on top-K hits (spec §3.11, §3.4 design exception).
-        # Single pipeline so chunk, ALL sibling chunks, and parent doc are
-        # refreshed simultaneously (spec: "チャンクと親が同時にリフレッシュされる").
-        # Change A: extend every sibling chunk of a hit parent — not just the
-        # winning chunk — so the document's chunks age together and search
-        # recall via any chunk's content is preserved for the whole window.
+        # §3.14 step 5: relative cut (spares `_version_group` rows).
+        candidates = relative_cut(
+            candidates, self.cfg.get("relative_min_score_ratio", 0.6)
+        )
+
+        # §3.14 step 6 / §3.11: TTL refresh on top-K hits, one pipeline so the
+        # chunk, ALL sibling chunks and the parent doc are refreshed together.
         if self.cfg.get("ttl_refresh_on_search", True):
             ttl   = self.cfg["ttl_seconds"]
             top_k = self.cfg.get("ttl_refresh_top_k", 5)
@@ -654,12 +655,10 @@ class Database:
                 parent_key = c.get("_parent_key")
                 if parent_key:
                     refresh_pipe.expire(parent_key, ttl)
-                    # Refresh all sibling chunks (includes c["key"] itself).
                     sib_keys = c.get("_sibling_keys") or [c["key"]]
                     for sk in sib_keys:
                         refresh_pipe.expire(sk, ttl)
                 else:
-                    # Standalone memory (no parent): refresh just itself.
                     refresh_pipe.expire(c["key"], ttl)
             try:
                 refresh_pipe.execute()
@@ -670,9 +669,52 @@ class Database:
         for c in candidates[:limit]:
             c.pop("_parent_key", None)
             c.pop("_sibling_keys", None)
+            c.pop("_rep_key", None)
             c.pop("key", None)
             final.append(c)
         return final
+
+    def _fetch_representatives(self, rows: list[dict]) -> tuple[list, list]:
+        """Fetch each row's representative embedding + text (spec §3.14 step 4).
+
+        Standalone row (or orphan chunk) → its own `mem:` hash (`row["key"]`).
+        Parent document → its first chunk `mem:<chunk_ids[0]>` (`row["_rep_key"]`).
+        Returns (vectors, texts), aligned with *rows*; vectors are raw FLOAT32
+        bytes or None, texts are str ("" when unavailable). One pipeline.
+        """
+        keys: list[str] = []
+        for r in rows:
+            if r.get("_parent_key"):
+                keys.append(r.get("_rep_key", ""))
+            else:
+                keys.append(r.get("key", ""))
+        vectors: list = [None] * len(rows)
+        texts:   list = [""] * len(rows)
+        try:
+            pipe = self._client.pipeline()
+            fetch_idx: list[int] = []
+            for i, k in enumerate(keys):
+                if k:
+                    pipe.hmget(k, b"embedding", b"content")
+                    fetch_idx.append(i)
+            if not fetch_idx:
+                return vectors, texts
+            replies = pipe.execute()
+        except Exception as e:
+            print(f"[n3mc] version ordering skipped: {e}", file=sys.stderr)
+            return vectors, texts
+        for i, reply in zip(fetch_idx, replies):
+            try:
+                emb, content = reply
+            except Exception:
+                continue
+            vectors[i] = emb or None
+            if content:
+                texts[i] = (
+                    content.decode("utf-8", errors="replace")
+                    if isinstance(content, bytes) else str(content)
+                )
+        return vectors, texts
 
     @staticmethod
     def _unwrap_search_response(res) -> list:
@@ -712,16 +754,23 @@ class Database:
         except TypeError:
             return [0]
 
-    def _vector_search(self, query: str, owner_id: str, limit: int) -> dict[str, dict]:
-        """KNN search — no owner_id TAG filter (UUID hyphen issue §3.12)."""
-        vec_bytes = embed(query, is_query=True)
+    def _vector_search(
+        self, query: str, owner_id: str, limit: int, time_filter: str = ""
+    ) -> dict[str, dict]:
+        """KNN search — no owner_id TAG filter (UUID hyphen issue §3.12).
+
+        *time_filter* (`@timestamp_epoch:[a b]`, §4.3.1) is a PRE-filter:
+        `@timestamp_epoch:[a b]=>[KNN N @embedding $vec AS __dist]`.
+        """
+        vec_bytes = embed(normalize_text(query), is_query=True)
         if not vec_bytes:
             return {}
         knn_limit = min(limit * 5, 100)
+        base = time_filter or "*"
         try:
             res = self._client.execute_command(
                 "FT.SEARCH", INDEX_NAME,
-                f"*=>[KNN {knn_limit} @embedding $vec AS __dist]",
+                f"{base}=>[KNN {knn_limit} @embedding $vec AS __dist]",
                 "PARAMS", "2", "vec", vec_bytes,
                 "RETURN", "11",
                 "__dist", "owner_id", "content", "timestamp", "timestamp_epoch",
@@ -762,29 +811,51 @@ class Database:
             i += 2
         return out
 
-    def _bm25_search(self, query: str, owner_id: str, limit: int) -> dict[str, dict]:
-        """BM25 FTS search — no owner_id TAG filter (spec §3.12)."""
-        fts_q = prepare_query(query)
+    def _bm25_search(
+        self, query: str, owner_id: str, limit: int, time_filter: str = ""
+    ) -> dict[str, dict]:
+        """BM25 FTS search — no owner_id TAG filter (spec §3.12).
+
+        The query is cleaned with `prepare_query` (§3.7); an empty cleaned
+        query skips BM25 (vector only). *time_filter* is appended as a
+        PRE-filter: `(<text query>) @timestamp_epoch:[a b]` (§4.3.1).
+        Scorer fallback BM25 → BM25STD → default (§3.6). Any failure returns
+        {} so search_memory continues with vector results.
+        """
+        try:
+            fts_q = drop_lone_cjk_tokens(prepare_query(query))
+        except Exception as e:
+            print(f"[n3mc] BM25 query cleaning: {e}", file=sys.stderr)
+            return {}
         if not fts_q:
             return {}
         bm25_limit = min(limit * 5, 100)
         fts_query  = f"(@content:({fts_q}) | @content_ngram:({fts_q}))"
-        try:
-            res = self._client.execute_command(
-                "FT.SEARCH", INDEX_NAME,
-                fts_query,
-                "SCORER", "BM25",
-                "WITHSCORES",
-                "RETURN", "10",
-                "owner_id", "content", "timestamp", "timestamp_epoch",
-                "importance", "access_count", "parent_id", "id", "session_id", "turn_id",
-                "LIMIT", "0", str(bm25_limit),
-                "DIALECT", "2",
-            )
-            res = self._unwrap_search_response(res)
-        except Exception as e:
-            print(f"[n3mc] BM25 search: {e}", file=sys.stderr)
-            return {}
+        if time_filter:
+            fts_query = f"{fts_query} {time_filter}"
+
+        res = None
+        for scorer in ("BM25", "BM25STD", None):
+            scorer_args = ["SCORER", scorer] if scorer else []
+            try:
+                res = self._client.execute_command(
+                    "FT.SEARCH", INDEX_NAME,
+                    fts_query,
+                    *scorer_args,
+                    "WITHSCORES",
+                    "RETURN", "10",
+                    "owner_id", "content", "timestamp", "timestamp_epoch",
+                    "importance", "access_count", "parent_id", "id", "session_id", "turn_id",
+                    "LIMIT", "0", str(bm25_limit),
+                    "DIALECT", "2",
+                )
+                res = self._unwrap_search_response(res)
+                break
+            except Exception as e:
+                if scorer and "scor" in str(e).lower():
+                    continue  # unknown scorer on this Redis version → next
+                print(f"[n3mc] BM25 search: {e}", file=sys.stderr)
+                return {}
 
         if not res or res[0] == 0:
             return {}

@@ -11,6 +11,54 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.10.0] — 2026-11-14
+
+Spec v1.6.0 → v1.7.0 (JP/EN). Fixes found while running the Pro edition
+(2026-11-12 memo), applied to Lite through the specification; code
+regenerated from the EN spec.
+
+### Fixed
+- **Updated facts were silently dropped**: `save_memory` rejected a new
+  entry as `near_duplicate` when an existing one had cosine ≥ 0.95. With
+  `multilingual-e5` that also hits a fact re-saved with a new value or a
+  setting sheet re-made with a few changes, so the user's latest decision
+  never reached memory. Only exact duplicates are rejected now (short
+  entries and whole documents); `dedup_threshold` is removed.
+- **BM25 leg lost on Japanese questions**: CJK punctuation (`「」`, `？`, …)
+  was not stripped from the query, so bigrams such as `「記` were ANDed into
+  the RediSearch query and `「記憶装置」は？` returned 0 keyword hits.
+  Control characters made `FT.SEARCH` fail with a syntax error. Both are
+  stripped now, and a BM25 failure never fails the search.
+- **`since` / `until` missed in-range entries**: the time window was applied
+  after ranking the global top-N. It is now a pre-filter inside the KNN and
+  BM25 queries (`@timestamp_epoch:[…]`).
+- **Mistyped `config.json` was overwritten**: an unreadable file was reset to
+  defaults. It is now left untouched; wrongly typed items are ignored one by
+  one, and a notice is shown on the first `search_memory`.
+- **Tests could wipe the live working memory**: the suite FLUSHes DB 0 and
+  defaulted to `redis://localhost:6379/0` (the MCP server's own Redis);
+  `test_cross_session.py` hard-coded it and its subprocess servers used the
+  user's real config. Tests now need `N3MC_REDIS_TEST_URL`, refuse the live
+  `redis_url`, and run the subprocess servers against the test Redis and a
+  temp data dir. CI uses a sidecar on port 6390.
+
+- **Startup model load split in two** (spec §3.9): the embedding library is
+  imported synchronously before stdio starts, and only the model is built in
+  the background. Importing it in the background after stdio starts (as the
+  spec's v1.6 note suggested) deadlocked on Windows — child processes spawned
+  during the import block on the stdin pipe that the MCP reader is reading.
+  `initialize` answers in ~10 s warm.
+
+### Changed
+- **Search result shaping**: vector candidates below `vector_min_cos`
+  (0.85) are dropped; results below 0.6 × the top score are cut; versions of
+  the same content (≥ 0.98 similar) are listed newest first. Each hit shows
+  `saved=` in local time, with a note that the newest version is current.
+- `serverInfo.version` follows the package version.
+- New config keys: `vector_min_cos`, `relative_min_score_ratio`,
+  `version_order_enabled`, `version_sim_threshold`, `version_min_chars`.
+  Removed: `dedup_threshold`, `context_char_limit` (ignored if present).
+
 ## [1.9.1] — 2026-05-31
 
 ### Docs
