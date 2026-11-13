@@ -53,6 +53,13 @@ regenerated from the EN spec.
   the host:port from `redis_url` (no password). The hint also says to start
   Docker (Docker Desktop) first: with Docker itself stopped (A4 test),
   `docker start redis-stack` alone fails with a Docker API error.
+- **Plugin hook failed silently when `settings.json` could not be updated**
+  (spec §8, found by the A8 test): with a read-only or policy-locked
+  `~/.claude/settings.json`, or invalid JSON in it, the hook exited 0 with no
+  output, so the user never learned that the tools were not pre-approved. It
+  now changes nothing and reports the reason (stderr + `systemMessage`) with
+  the rule to add by hand; a read-only file that already has the rules stays
+  quiet.
 - **Offline without a cached model: every call retried the download, and
   keyword-only search was silent** (spec §3.9, found by the A6 test): each
   `save_memory` took ~24 s and each `search_memory` ~12 s, with no sign in

@@ -944,6 +944,8 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 
 ワイルドカードは `recall_thread` を含む 7 ツールすべてと、今後追加されるツールにも当たる。フックはルールが欠けているときだけ書き込み、ユーザーがすでに持っているエントリ（v1.6.x のツールごとの明示リストなど）は消さず、関係のないフィールドにも触れない。
 
+**`settings.json` を更新できないとき（v1.7.0）** — ルールが欠けているのに、ファイルを JSON のオブジェクトとして読めない（JSON が壊れている、一番外の型が違う、`permissions` / `allow` の型が違う）か、書き込めない（読み取り専用、権限がない、会社のポリシーで固定されている）とき、フックは**何も変えず**、黙って失敗せずにそれを伝える。`stderr` に 1 行（Claude Code のデバッグログに残る）と、下と同じ `systemMessage` + `additionalContext` の JSON を出す。文面の例：`[n3mc-workingmemory] Could not update ~/.claude/settings.json (PermissionError: …), so the memory tools were not pre-approved and Claude Code will ask for permission on every memory call. Make the file writable, or add "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" to permissions.allow yourself.` 終了コードは 0 のまま。ルールがすでにあるときは何も伝えない（ルール入りの読み取り専用ファイルは問題ない）。v1.6.x はこのエラーを握りつぶしていた：終了コード 0 で出力なし（§A8 の試験で発見）。
+
 > **⚠️ v1.6.x の自動許可はプラグインに一度も当たっていなかった（v1.7.0 で修正）**：v1.6.x は `mcp__n3mc-workingmemory__<tool>` の明示ルールを 6 つ追加していた。この名前は直接登録したサーバーには当たるが、プラグイン付きのツール名には **当たらない**。そのためプラグインの利用者は `search_memory` / `save_memory` のたびに許可を求められ（自動許可で防ぐはずだった停止そのもの）、`recall_thread` はそもそもリストに入っていなかった。
 
 **Python のフォールバックと、目に見える失敗** — `hooks.json` のコマンドは `python` → `py`（Windows Python Launcher） → `python3` の順に `||` チェインで試す。**どれも** `PATH` 上に無い場合は、Python を使わない 4 段目が JSON オブジェクトを 1 つ stdout に出して exit 0 で終わる：

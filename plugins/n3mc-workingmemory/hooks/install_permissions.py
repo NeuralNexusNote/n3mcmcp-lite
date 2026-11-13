@@ -19,6 +19,9 @@ Safe behavior:
 - Always exits 0 (must never block session startup).
 - Writes settings.json only if a rule is missing; never removes entries;
   preserves unknown fields; 2-space indent, UTF-8, trailing newline.
+- If a rule is missing but settings.json cannot be parsed or written
+  (read-only, no permission, policy-locked), changes nothing and reports it
+  (stderr + systemMessage) instead of failing silently (spec §8).
 - Messages the user must act on (missing `uvx`) are printed as ONE JSON
   object on stdout with `systemMessage` (shown to the user) and
   `hookSpecificOutput.additionalContext` (seen by the LLM). A plain stderr
@@ -37,36 +40,50 @@ DIRECT_RULE = "mcp__n3mc-workingmemory__*"
 RULES = [PLUGIN_RULE, DIRECT_RULE]
 
 
+class SettingsUpdateError(Exception):
+    """settings.json needs a rule but cannot be read or written (spec §8)."""
+
+
 def _patch(settings_path: Path) -> list[str]:
-    """Add missing RULES. Returns the rules that were added ([] = no write)."""
+    """Add missing RULES. Returns the rules that were added ([] = no write).
+
+    Raises SettingsUpdateError when a rule is missing but the file cannot be
+    parsed as a JSON object or cannot be written (read-only, no permission,
+    policy-locked). Nothing is changed in that case.
+    """
     if settings_path.exists():
         try:
             data = json.loads(settings_path.read_text(encoding="utf-8"))
-        except Exception:
-            return []
+        except Exception as e:
+            raise SettingsUpdateError(f"cannot read it as JSON: {type(e).__name__}: {e}")
     else:
         data = {}
     if not isinstance(data, dict):
-        return []
+        raise SettingsUpdateError("the top level is not a JSON object")
 
-    perms = data.setdefault("permissions", {})
+    perms = data.get("permissions", {})
     if not isinstance(perms, dict):
-        return []
-    allow = perms.setdefault("allow", [])
+        raise SettingsUpdateError("\"permissions\" is not an object")
+    allow = perms.get("allow", [])
     if not isinstance(allow, list):
-        return []
+        raise SettingsUpdateError("\"permissions.allow\" is not a list")
 
     existing = {e for e in allow if isinstance(e, str)}
     added = [r for r in RULES if r not in existing]
     if not added:
         return []
 
-    allow.extend(added)
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    allow = allow + added
+    perms = dict(perms, allow=allow)
+    data = dict(data, permissions=perms)
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as e:
+        raise SettingsUpdateError(f"{type(e).__name__}: {e}")
     return added
 
 
@@ -100,8 +117,17 @@ def main() -> int:
                 "~/.claude/settings.json permissions.allow (auto-approve, so "
                 "the AI never blocks on a permission prompt).\n"
             )
-    except Exception:
-        pass
+    except SettingsUpdateError as e:
+        msg = (
+            f"[n3mc-workingmemory] Could not update ~/.claude/settings.json ({e}), "
+            "so the memory tools were not pre-approved and Claude Code will ask "
+            "for permission on every memory call. Make the file writable, or add "
+            f"\"{PLUGIN_RULE}\" to permissions.allow yourself."
+        )
+        sys.stderr.write(msg + "\n")
+        notices.append(msg)
+    except Exception as e:  # never block session startup
+        sys.stderr.write(f"[n3mc-workingmemory] permission install skipped: {e}\n")
     warning = _uvx_warning()
     if warning:
         notices.append(warning)

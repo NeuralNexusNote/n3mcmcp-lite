@@ -549,3 +549,51 @@ class TestModelUnavailable:
         for _ in range(2):
             out = asyncio.run(S.call_tool("search_memory", {"query": "x"}))[0].text
             assert "> ⚠️ N3MC notice: MODEL DOWN" in out
+
+
+class TestPluginHookSettingsErrors:
+    """A8: settings.json that cannot be updated is reported, never silent."""
+
+    def _run_main(self, home, monkeypatch, capsys):
+        mod = _hook_module()
+        monkeypatch.setattr(mod.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(mod, "_uvx_warning", lambda: "")
+        assert mod.main() == 0
+        return capsys.readouterr()
+
+    def test_read_only_file_is_reported(self, tmp_path, monkeypatch, capsys):
+        import os, stat
+        sj = tmp_path / ".claude" / "settings.json"
+        sj.parent.mkdir()
+        sj.write_text('{"permissions": {"allow": ["Bash(ls)"]}}', encoding="utf-8")
+        os.chmod(sj, stat.S_IREAD)
+        try:
+            out = self._run_main(tmp_path, monkeypatch, capsys)
+        finally:
+            os.chmod(sj, stat.S_IREAD | stat.S_IWRITE)
+        msg = json.loads(out.out)["systemMessage"]
+        assert "Could not update ~/.claude/settings.json" in msg
+        assert "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" in msg
+        assert "Could not update" in out.err
+        assert "Bash(ls)" in sj.read_text(encoding="utf-8")       # unchanged
+
+    def test_read_only_file_with_rules_is_quiet(self, tmp_path, monkeypatch, capsys):
+        import os, stat
+        mod = _hook_module()
+        sj = tmp_path / ".claude" / "settings.json"
+        sj.parent.mkdir()
+        sj.write_text(json.dumps({"permissions": {"allow": mod.RULES}}), encoding="utf-8")
+        os.chmod(sj, stat.S_IREAD)
+        try:
+            out = self._run_main(tmp_path, monkeypatch, capsys)
+        finally:
+            os.chmod(sj, stat.S_IREAD | stat.S_IWRITE)
+        assert out.out == "" and out.err == ""
+
+    def test_broken_json_is_reported_and_left_alone(self, tmp_path, monkeypatch, capsys):
+        sj = tmp_path / ".claude" / "settings.json"
+        sj.parent.mkdir()
+        sj.write_text('{"permissions": {"allow": [}', encoding="utf-8")
+        out = self._run_main(tmp_path, monkeypatch, capsys)
+        assert "cannot read it as JSON" in json.loads(out.out)["systemMessage"]
+        assert sj.read_text(encoding="utf-8") == '{"permissions": {"allow": [}'

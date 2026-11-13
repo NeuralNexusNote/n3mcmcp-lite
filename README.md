@@ -413,7 +413,9 @@ which idempotently adds two wildcard rules to `permissions.allow` in
   server (`claude mcp add`, `.mcp.json`)
 
 The wildcards cover all seven tools, including `recall_thread`. The hook
-only writes when a rule is missing and never touches other entries.
+only writes when a rule is missing and never touches other entries. If
+`settings.json` is read-only, locked by policy or not valid JSON, the hook
+changes nothing and shows a warning with the rule to add yourself.
 (Up to v1.9.x the hook added plain `mcp__n3mc-workingmemory__<tool>` names,
 which do not match the plugin's tool names, so plugin users were asked for
 permission on every call.)
