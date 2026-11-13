@@ -204,6 +204,7 @@ n3memorycore-mcp-lite/
 > | 14 | 設定を `%LOCALAPPDATA%` に置く | ストア（MSIX）版 Claude デスクトップアプリは MCP サーバーの `%LOCALAPPDATA%` を振り替える → `config.json` と `owner_id` が 2 つになり、デスクトップアプリで保存した記憶がターミナルの `claude` から見えない（逆も） | 設定は `~/.n3mc-workingmemory/`（振り替えの対象外）に置き、1 回だけ引き継ぐ | [§7](#7-データ保存先) |
 > | 15 | プラグインの自動許可ルールにサーバー名をそのまま使う／フックの失敗が exit 非ゼロだけ | プラグインの利用者は記憶の呼び出しのたびに許可を求められる／Python が無いときの手がかりは `SessionStart hook error … python: command not found` だけ | `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（+ `mcp__n3mc-workingmemory__*`）を許可する。Python を使わないフォールバックが `systemMessage` の JSON を出して exit 0 | [§8](#ツール自動許可claude-code-固有) |
 > | 16 | `mcp` に上限がない | 新しく入れると（`uvx`・`pip`・プラグイン）`mcp` 2.x が入り、import の時点で落ちる：`AttributeError: 'Server' object has no attribute 'list_tools'`。`/mcp` には `Connection closed` としか出ない | サーバーを 2.x の API に移すまで、`pyproject.toml` で `mcp>=1.0.0,<2.0.0` に固定する | [セットアップ](#前提条件) |
+> | 17 | モデルの取得を呼び出しのたびにやり直す／劣化した検索を伝えない | オフラインの初回：`save_memory` は毎回約 24 秒、`search_memory` は約 12 秒。キーワードだけの結果が普段と同じに見える | 再試行は 1 分に 1 回まで。劣化中は毎回の `search_memory` に知らせ、`save_memory` に `detail` | [§3.9](#39-起動シーケンスと自己回復) |
 
 ### 3.1 ID 階層
 
@@ -482,7 +483,10 @@ def drop_lone_cjk_tokens(q: str) -> str:
 
 4. **埋め込みモデル事前ロード**（`get_model()`）：
    - `intfloat/multilingual-e5-base` をメモリにロードし、初回ツール呼び出しが一度だけのモデルロードで遅くならないようにする。
-   - **非致命的**：ロード失敗（オフライン・HF キャッシュ未生成等）時は警告を出して続行。初回 `save_memory` / `search_memory` で遅延リトライする。
+   - **非致命的**：ロード失敗（オフライン・HF キャッシュ未生成等）時は警告を出して続行。あとの `save_memory` / `search_memory` で遅延リトライするが、**再試行は 60 秒に 1 回まで**（`MODEL_RETRY_SECONDS`）。その間は `embed()` が取得を試みずにすぐ `None` を返す。
+   - **劣化中の知らせ（v1.7.0）**：モデルが使えない間は、黙って劣化せずにそう伝える。`processor.model_status()` は最後の読み込みエラーを返す。`search_memory` は出力の先頭に `> ⚠️ N3MC notice: <model_unavailable_message>` を付け（最初の 1 回だけでなく、劣化中は毎回）、`save_memory` は `"warning": "embedding_unavailable"` の横に `"detail": "<model_unavailable_message>"` を付ける。文面（英語）：`The embedding model (<embedding_model>) could not be loaded (<error>), so search is keyword-only (BM25) and new entries are saved without vectors. The first start downloads the model (~440 MB) from Hugging Face: check the network or proxy, or pre-download it. The server retries automatically.` `stderr` には、失敗した試行ごとに 1 行（多くても 1 分に 1 回）出す。
+
+     > **⚠️ 理由（v1.7.0、§A6 のオフラインの試験）**：ネットワークがなくモデルも未取得のとき、v1.6.x はツールの呼び出しのたびにダウンロードをやり直し、`save_memory` は 1 回約 24 秒、`search_memory` は約 12 秒かかった。`search_memory` にはベクトル検索が止まっている印がなく、ログも `Cannot send a request, as the client has been closed.` だけだった。
 
 > **⚠️ 実装注意（モデルロードは stdio ループ起動「後」にバックグラウンドで）**：`SentenceTransformer` の初期化は HF キャッシュ済みでも PyTorch 初期化のため **~30〜40 秒** かかる（実測 39s）。これを stdio ループ起動「前」に同期実行すると、**MCP `initialize` ハンドシェイクがタイムアウトしてクライアント（Claude Code 等）が接続失敗**する。手順 4 は **`stdio_server()` が listening を開始した後**に `ThreadPoolExecutor` 等でバックグラウンド起動すること。これにより手順 1〜3（実測 ~2s）の完了直後に initialize 応答を返せ、モデルは最初のツール呼び出しが来るまでに準備が整う。
 >
@@ -678,7 +682,7 @@ v1.6.x は KNN の候補をすべて順位付けしていた。`multilingual-e5`
 **出力形式**（`search_memory` の markdown、v1.7.0）：
 
 ```markdown
-> ⚠️ N3MC notice: <only if a notice is pending, §6>
+> ⚠️ N3MC notice: <only if a notice is pending, §6, or the embedding model is unavailable, §3.9>
 
 _If several versions of the same content appear, the one with the newest `saved` time is the current one._
 

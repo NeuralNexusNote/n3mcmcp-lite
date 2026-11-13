@@ -53,6 +53,13 @@ regenerated from the EN spec.
   the host:port from `redis_url` (no password). The hint also says to start
   Docker (Docker Desktop) first: with Docker itself stopped (A4 test),
   `docker start redis-stack` alone fails with a Docker API error.
+- **Offline without a cached model: every call retried the download, and
+  keyword-only search was silent** (spec §3.9, found by the A6 test): each
+  `save_memory` took ~24 s and each `search_memory` ~12 s, with no sign in
+  the search output that the vector leg was off. A failed model load is now
+  retried at most once every 60 s, `search_memory` carries a notice on every
+  degraded call, and `save_memory` adds a `detail` explaining the
+  `embedding_unavailable` warning.
 - **Fresh installs crashed on start with `mcp` 2.x** (found while running the
   A3 abnormal-case test): `pyproject.toml` required `mcp>=1.0.0` with no upper
   bound, so `uvx` / `pip` / the plugin now install `mcp` 2.3.0, which removed

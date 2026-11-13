@@ -41,7 +41,9 @@ from . import __version__
 from .config import load_config
 from .database import Database, _CONN_ERRORS
 from .instructions import INSTRUCTIONS
-from .processor import get_model, import_backend, purify, set_model_name
+from .processor import (
+    get_model, import_backend, model_unavailable_message, purify, set_model_name,
+)
 
 _db: Database = None
 
@@ -404,7 +406,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 arguments.get("since", ""),
                 arguments.get("until", ""),
             )
-            text = _render_search(results, _take_notices())
+            notices = _take_notices()
+            degraded = model_unavailable_message()  # spec §3.9: every degraded call
+            if degraded:
+                notices = notices + [degraded]
+            text = _render_search(results, notices)
             return [TextContent(type="text", text=text + _NUDGE_AFTER_SEARCH)]
 
         elif name == "save_memory":

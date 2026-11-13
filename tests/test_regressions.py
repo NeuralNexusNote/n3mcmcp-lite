@@ -488,3 +488,64 @@ class TestPluginHook:
                             capture_output=True, text=True, encoding="utf-8")
         assert r.returncode == 0, r.stderr
         assert "Python was not found" in json.loads(r.stdout)["systemMessage"]
+
+
+# ── §3.9 model unavailable: retry throttle + degraded notice (A6 fixes) ──────
+
+import types as _types
+
+
+@pytest.fixture
+def failing_model(monkeypatch):
+    """sentence_transformers.SentenceTransformer that always fails; counts calls."""
+    calls = {"n": 0}
+
+    class Boom:
+        def __init__(self, *a, **k):
+            calls["n"] += 1
+            raise OSError("We couldn't connect to 'https://huggingface.co' (offline)")
+
+    fake = _types.ModuleType("sentence_transformers")
+    fake.SentenceTransformer = Boom
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    monkeypatch.setattr(P, "_model", None)
+    monkeypatch.setattr(P, "_model_error", None)
+    monkeypatch.setattr(P, "_model_failed_at", 0.0)
+    return calls
+
+
+import sys  # noqa: E402  (used by the fixture above)
+
+
+class TestModelUnavailable:
+    def test_failed_load_is_not_retried_within_window(self, failing_model, monkeypatch):
+        assert P.get_model() is None and failing_model["n"] == 1
+        assert P.embed("x") is None and P.get_model() is None
+        assert failing_model["n"] == 1                       # no retry inside the window
+        monkeypatch.setattr(P, "_model_failed_at", P._model_failed_at - P.MODEL_RETRY_SECONDS - 1)
+        P.get_model()
+        assert failing_model["n"] == 2                       # retried after the window
+
+    def test_message_names_model_and_error(self, failing_model):
+        assert P.model_unavailable_message() is None         # not tried yet
+        P.get_model()
+        msg = P.model_unavailable_message()
+        assert "keyword-only" in msg and "huggingface" in msg.lower()
+        assert P._model_name in msg
+
+    def test_search_output_carries_notice_every_time(self, monkeypatch):
+        import asyncio
+        import n3mc_mcp.server as S
+
+        class FakeDb:
+            cfg = {}
+            def ensure_connected(self):
+                return True
+            def search_memory(self, *a, **k):
+                return []
+        monkeypatch.setattr(S, "_db", FakeDb())
+        monkeypatch.setattr(S, "_notices_shown", True)
+        monkeypatch.setattr(S, "model_unavailable_message", lambda: "MODEL DOWN")
+        for _ in range(2):
+            out = asyncio.run(S.call_tool("search_memory", {"query": "x"}))[0].text
+            assert "> ⚠️ N3MC notice: MODEL DOWN" in out

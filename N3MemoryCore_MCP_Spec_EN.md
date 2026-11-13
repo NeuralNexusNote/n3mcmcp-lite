@@ -205,6 +205,7 @@ n3memorycore-mcp-lite/
 > | 14 | Config in `%LOCALAPPDATA%` | The Store (MSIX) Claude desktop app redirects its MCP servers' `%LOCALAPPDATA%` → two `config.json`, two `owner_id`s; memories saved from the desktop app are invisible to terminal `claude` and vice versa | Keep the config in `~/.n3mc-workingmemory/` (not redirected); migrate once | [§7](#7-data-location) |
 > | 15 | Plugin auto-approve rules use the plain server name / hook failure only exits non-zero | Plugin users are prompted on every memory call; with no Python the only sign is `SessionStart hook error … python: command not found` | Allow `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` (+ `mcp__n3mc-workingmemory__*`); Python-free fallback prints `systemMessage` JSON and exits 0 | [§8](#auto-approve-tool-calls-claude-code-only) |
 > | 16 | `mcp` without an upper bound | A fresh install (`uvx`, `pip`, plugin) gets `mcp` 2.x and the server dies on import: `AttributeError: 'Server' object has no attribute 'list_tools'` — `/mcp` shows only `Connection closed` | Pin `mcp>=1.0.0,<2.0.0` in `pyproject.toml` until the server is ported to the 2.x API | [Setup](#prerequisites) |
+> | 17 | Model download retried on every call / degraded search not reported | Offline first run: each `save_memory` ~24 s, each `search_memory` ~12 s; keyword-only results look normal | Retry at most once a minute; notice on every degraded `search_memory`, `detail` on `save_memory` | [§3.9](#39-startup-sequence--self-recovery) |
 
 ### 3.1 ID Hierarchy
 
@@ -485,7 +486,10 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 4. **Preload embedding model** (`get_model()`):
    - Load `intfloat/multilingual-e5-base` into memory so the first tool call is not slowed by the one-time model load.
-   - **Non-fatal**: if the model fails to load (e.g. offline, HF cache absent), log a warning and continue. The model will be retried lazily on first `save_memory` / `search_memory`.
+   - **Non-fatal**: if the model fails to load (e.g. offline, HF cache absent), log a warning and continue. The model is retried lazily by later `save_memory` / `search_memory` calls, **but at most once every 60 seconds** (`MODEL_RETRY_SECONDS`): within that window `embed()` returns `None` immediately instead of attempting the download again.
+   - **Degraded-mode notice (v1.7.0)**: while the model is unavailable, the server says so instead of degrading silently. `processor.model_status()` returns the last load error. `search_memory` prepends `> ⚠️ N3MC notice: <model_unavailable_message>` to its output (every call while degraded, not only the first), and `save_memory` adds `"detail": "<model_unavailable_message>"` next to `"warning": "embedding_unavailable"`. The message (English): `The embedding model (<embedding_model>) could not be loaded (<error>), so search is keyword-only (BM25) and new entries are saved without vectors. The first start downloads the model (~440 MB) from Hugging Face: check the network or proxy, or pre-download it. The server retries automatically.` `stderr` gets one line per failed attempt (at most once a minute).
+
+     > **⚠️ Why (v1.7.0, A6 offline test)**: with no network and no cached model, v1.6.x retried the download inside every tool call — `save_memory` took ~24 s and `search_memory` ~12 s each — and `search_memory` gave no sign that the vector leg was off; the only log line was `Cannot send a request, as the client has been closed.`
 
 > **⚠️ Implementation note (load the model in the background, *after* the stdio loop starts)**: Initializing `SentenceTransformer` takes **~30–40 seconds** even with the HF cache present, because of PyTorch init (measured 39s). Running it synchronously *before* the stdio loop starts makes the **MCP `initialize` handshake time out, so the client (e.g. Claude Code) fails to connect**. Start step 4 in the background (e.g. via `ThreadPoolExecutor`) **after `stdio_server()` begins listening**. That lets you return the initialize response right after steps 1–3 (measured ~2s), while the model becomes ready before the first tool call arrives.
 >
@@ -687,7 +691,7 @@ v1.6.x ranked every KNN candidate. With `multilingual-e5`, even unrelated record
 **Output format** (`search_memory` markdown, v1.7.0):
 
 ```markdown
-> ⚠️ N3MC notice: <only if a notice is pending, §6>
+> ⚠️ N3MC notice: <only if a notice is pending, §6, or the embedding model is unavailable, §3.9>
 
 _If several versions of the same content appear, the one with the newest `saved` time is the current one._
 

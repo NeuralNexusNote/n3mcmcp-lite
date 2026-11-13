@@ -30,6 +30,7 @@ from .processor import (
     cosine_sim_from_distance,
     drop_lone_cjk_tokens,
     embed,
+    model_unavailable_message,
     final_score,
     keyword_relevance,
     lexical_rerank,
@@ -415,6 +416,9 @@ class Database:
             # Embedding model was unavailable at save time.  The record is stored
             # and BM25-searchable but will NOT appear in vector (KNN) search results.
             result["warning"] = "embedding_unavailable"
+            detail = model_unavailable_message()
+            if detail:
+                result["detail"] = detail
         return result
 
     def _save_parent_chunks(

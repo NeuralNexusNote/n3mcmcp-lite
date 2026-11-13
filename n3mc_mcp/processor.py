@@ -14,6 +14,7 @@ import re
 import struct
 import sys
 import threading
+import time
 import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
@@ -175,20 +176,56 @@ def import_backend() -> None:
         print(f"[n3mc] embedding library import failed: {e}", file=sys.stderr)
 
 
+# Spec §3.9 step 4 (v1.7.0): after a failed load, retry at most once every
+# MODEL_RETRY_SECONDS. Without this, an offline first run retried the
+# Hugging Face download inside every tool call (~12-24 s per call).
+MODEL_RETRY_SECONDS = 60
+_model_error: Optional[str] = None
+_model_failed_at: float = 0.0
+
+
 def get_model():
-    global _model
+    global _model, _model_error, _model_failed_at
     if _model is not None:
         return _model
+    if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
+        return None
     with _model_lock:
         if _model is None:
+            if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
+                return None
             try:
                 with _silenced_stdout():
                     from sentence_transformers import SentenceTransformer
                     _model = SentenceTransformer(_model_name)
+                _model_error = None
             except Exception as e:
-                print(f"[n3mc] embedding model load failed ({_model_name}): {e}",
-                      file=sys.stderr)
+                _model_error = f"{type(e).__name__}: {e}"
+                _model_failed_at = time.monotonic()
+                print(f"[n3mc] embedding model load failed ({_model_name}): {e} "
+                      f"- retrying in {MODEL_RETRY_SECONDS}s. "
+                      "Check the network / proxy (the first start downloads it "
+                      "from Hugging Face).", file=sys.stderr)
     return _model
+
+
+def model_status() -> tuple[bool, Optional[str]]:
+    """(loaded, last load error). Spec §3.9 degraded-mode notice."""
+    return _model is not None, (None if _model is not None else _model_error)
+
+
+def model_unavailable_message() -> Optional[str]:
+    """Degraded-mode text (English) or None when the model is fine / not yet tried."""
+    loaded, error = model_status()
+    if loaded or not error:
+        return None
+    return (
+        f"The embedding model ({_model_name}) could not be loaded ({error}), so "
+        "search is keyword-only (BM25) and new entries are saved without "
+        "vectors. The first start downloads the model (~440 MB) from Hugging "
+        "Face: check the network or proxy, or pre-download it. The server "
+        "retries automatically."
+    )
 
 
 # ── embeddings ───────────────────────────────────────────────────────────────
