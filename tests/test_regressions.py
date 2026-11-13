@@ -301,6 +301,7 @@ class TestRedisAvailability:
         h = backend_hint("redis://user:s3cret@myhost:6390/0")
         assert "myhost:6390" in h and "s3cret" not in h and "user" not in h
         assert "docker start redis-stack" in h and "no restart needed" in h
+        assert "Docker Desktop" in h  # A4: Docker itself may be stopped
         assert not any("\u3040" <= ch <= "\u9fff" for ch in h)  # no Japanese
 
     def test_down_at_startup_every_tool_returns_hint(self, cfg, monkeypatch):

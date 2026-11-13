@@ -57,7 +57,8 @@ def backend_hint(redis_url: str = "redis://localhost:6379/0") -> str:
     except Exception:
         where = "the configured redis_url"
     return (
-        f"Redis Stack is not reachable at {where}. Start it with: "
+        f"Redis Stack is not reachable at {where}. If Docker itself is not "
+        "running, start Docker (Docker Desktop) first. Then run: "
         "docker start redis-stack (first time: docker run -d --name redis-stack "
         "-p 6379:6379 redis/redis-stack-server:latest). The MCP server "
         "reconnects automatically \u2014 no restart needed; just retry."

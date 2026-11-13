@@ -55,7 +55,7 @@ classifiers = [
     "Natural Language :: Korean",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2.0.0",  # mcp 2.x removed the low-level Server decorators (spec §2)
     "redis>=5.0.0,<8.0.0",
     "sentence-transformers>=2.7.0",
     "uuid-utils>=0.6.0",

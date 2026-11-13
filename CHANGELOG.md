@@ -50,7 +50,16 @@ regenerated from the EN spec.
   and `save_memory` a raw `Error 10061` without a hint. Every tool call now
   PINGs / reconnects first (`ensure_connected()`), connection errors inside a
   tool are reported as the backend error, and the hint is English and shows
-  the host:port from `redis_url` (no password).
+  the host:port from `redis_url` (no password). The hint also says to start
+  Docker (Docker Desktop) first: with Docker itself stopped (A4 test),
+  `docker start redis-stack` alone fails with a Docker API error.
+- **Fresh installs crashed on start with `mcp` 2.x** (found while running the
+  A3 abnormal-case test): `pyproject.toml` required `mcp>=1.0.0` with no upper
+  bound, so `uvx` / `pip` / the plugin now install `mcp` 2.3.0, which removed
+  the low-level `Server.list_tools()` decorator API — the server died on import
+  (`AttributeError: 'Server' object has no attribute 'list_tools'`) and `/mcp`
+  showed only `Connection closed`. This also affects the published 1.9.1.
+  Pinned to `mcp>=1.0.0,<2.0.0` until the server is ported to the 2.x API.
 - **Plugin auto-approve never matched, and failed silently without Python**
   (spec §8, found by the A2 abnormal-case test): the SessionStart hook added
   plain `mcp__n3mc-workingmemory__<tool>` rules, but Claude Code names a

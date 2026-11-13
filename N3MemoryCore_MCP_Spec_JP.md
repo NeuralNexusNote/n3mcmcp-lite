@@ -61,7 +61,7 @@
 | Python                    | 3.10 以上                                                                   |
 | MCP 対応クライアント      | Claude Desktop、Claude Code、その他 MCP クライアント                        |
 | Redis Stack               | `localhost:6379` で稼働（`N3MC_REDIS_URL` で変更可能）                      |
-| pip パッケージ（自動導入） | `mcp` `redis` `sentence-transformers` `uuid-utils` `platformdirs` `numpy`   |
+| pip パッケージ（自動導入） | `mcp`（**`>=1.0.0,<2.0.0`**）`redis`（`<8.0.0`）`sentence-transformers` `uuid-utils` `platformdirs` `numpy` |
 
 ### クイックスタート
 
@@ -203,6 +203,7 @@ n3memorycore-mcp-lite/
 > | 13 | Redis を起動時にしか確かめない／接続エラーを握りつぶす | `docker start redis-stack` のあとも Redis が止まっていると言い続ける／あとから止まった Redis で `_No memories found._` | 毎回のツールの前に `ensure_connected()`（PING／つなぎ直し）、`ConnectionError` / `TimeoutError` は送り出す | [§3.9](#39-起動シーケンスと自己回復) |
 > | 14 | 設定を `%LOCALAPPDATA%` に置く | ストア（MSIX）版 Claude デスクトップアプリは MCP サーバーの `%LOCALAPPDATA%` を振り替える → `config.json` と `owner_id` が 2 つになり、デスクトップアプリで保存した記憶がターミナルの `claude` から見えない（逆も） | 設定は `~/.n3mc-workingmemory/`（振り替えの対象外）に置き、1 回だけ引き継ぐ | [§7](#7-データ保存先) |
 > | 15 | プラグインの自動許可ルールにサーバー名をそのまま使う／フックの失敗が exit 非ゼロだけ | プラグインの利用者は記憶の呼び出しのたびに許可を求められる／Python が無いときの手がかりは `SessionStart hook error … python: command not found` だけ | `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（+ `mcp__n3mc-workingmemory__*`）を許可する。Python を使わないフォールバックが `systemMessage` の JSON を出して exit 0 | [§8](#ツール自動許可claude-code-固有) |
+> | 16 | `mcp` に上限がない | 新しく入れると（`uvx`・`pip`・プラグイン）`mcp` 2.x が入り、import の時点で落ちる：`AttributeError: 'Server' object has no attribute 'list_tools'`。`/mcp` には `Connection closed` としか出ない | サーバーを 2.x の API に移すまで、`pyproject.toml` で `mcp>=1.0.0,<2.0.0` に固定する | [セットアップ](#前提条件) |
 
 ### 3.1 ID 階層
 
@@ -470,9 +471,9 @@ def drop_lone_cjk_tokens(q: str) -> str:
    1. ディスパッチャは、どのツールを実行する前にも `Database.ensure_connected()` を呼ぶ。つながっていれば `PING` を送り、つながっていない（または `PING` が失敗した）ときは `redis_url` からクライアントを作り直して、もう一度 `PING` する。接続が戻ったら `enforce_ephemeral()` と `ensure_index()` をやり直す（新しいコンテナにはインデックスがない）。`stderr` には、状態が変わったとき（切れた／戻った）に 1 行だけ出す。呼び出しごとには出さない。
    2. Redis に届かないときはツールを実行せず、**復旧の案内付きのバックエンドエラー**を返す：`search_memory` / `list_memories` / `recall_thread` → `Error: memory backend unreachable. <案内>` で始まる `TextContent`、`save_memory` → `{"status": "error", "saved": false, "reason": "<案内>"}`、`delete_memory` / `delete_memories_by_session` → `{"status": "error", "reason": "<案内>"}`、`repair_memory` → `{"status": "error", "message": "<案内>"}`。
    3. ツールの**途中で**接続が切れた（`redis.ConnectionError` / `redis.TimeoutError`）ときは、未接続の状態にして、そのツールにも同じバックエンドエラーを返す。ベクトル検索・BM25 の補助関数は、この 2 つの例外を握りつぶさずに**送り出す**こと — 握りつぶすと、止まった Redis が `_No memories found._` になり、LLM には「何も保存されていない」と見える。それ以外の `FT.SEARCH` のエラー（クエリの構文エラーなど）は従来どおり捕まえ、その経路だけを飛ばす。
-   4. **案内の文**（`backend_hint(redis_url)`。このサーバーは世界中で使われるので英語）：`Redis Stack is not reachable at <host>:<port>. Start it with: docker start redis-stack (first time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest). The MCP server reconnects automatically — no restart needed; just retry.` `<host>:<port>` は `redis_url` から取り、**ユーザー名とパスワードは出さない**。
+   4. **案内の文**（`backend_hint(redis_url)`。このサーバーは世界中で使われるので英語）：`Redis Stack is not reachable at <host>:<port>. If Docker itself is not running, start Docker (Docker Desktop) first. Then run: docker start redis-stack (first time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest). The MCP server reconnects automatically — no restart needed; just retry.` `<host>:<port>` は `redis_url` から取り、**ユーザー名とパスワードは出さない**。
 
-   > **⚠️ 理由（v1.7.0）**：v1.6.x は Redis を起動時にしか確かめなかった。Redis が止まった状態で起動したサーバーは、ユーザーが `docker start redis-stack` を実行したあとも「Redis Stack が起動していません」と答え続け（`repair_memory` でもつなぎ直さない）、MCP クライアントを再起動するまで使えなかった。あとから Redis が止まったサーバーは、`search_memory` が `_No memories found._` を返し、`save_memory` は案内のない生の `Error 10061 connecting to localhost:6379` を返した。案内も日本語だけだった。
+   > **⚠️ 理由（v1.7.0）**：v1.6.x は Redis を起動時にしか確かめなかった。Redis が止まった状態で起動したサーバーは、ユーザーが `docker start redis-stack` を実行したあとも「Redis Stack が起動していません」と答え続け（`repair_memory` でもつなぎ直さない）、MCP クライアントを再起動するまで使えなかった。あとから Redis が止まったサーバーは、`search_memory` が `_No memories found._` を返し、`save_memory` は案内のない生の `Error 10061 connecting to localhost:6379` を返した。案内も日本語だけだった。（v1.7.0 の §A4 の試験：Docker Desktop 自体が止まっていると `docker start redis-stack` は Docker の API のエラーになるので、案内に「先に Docker を起動する」を入れた。）
 
 3. **RediSearch インデックスの確保**（`ensure_index()`）：
    - [§3.5](#35-データレイアウト) の通り `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...`。
