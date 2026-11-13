@@ -390,39 +390,41 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 
 **プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote`
 でインストールすると、`SessionStart` フック [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
-が `~/.claude/settings.json` の `permissions.allow` に 6 つの
-`mcp__n3mc-workingmemory__*` ツールを冪等追加します。手動編集不要。
-1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは
-温存します。`hooks.json` は `python` → `py`（Windows Python Launcher） →
-`python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか
-1 つが `PATH` 上にあれば動作します。3 つすべて不在の場合のみ exit 非ゼロ
-で失敗し、Claude Code の `/plugins` Errors タブに表示されます（silent fail
-を回避）。
+が `~/.claude/settings.json` の `permissions.allow` にワイルドカードの
+ルールを 2 つ冪等追加します：
 
-同フックは **`uvx` 事前チェック** も併せて行います — プラグイン manifest が
-MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動
-するため、`uvx` が `PATH` に無いと MCP launcher 側では不透明な `ENOENT`
-で失敗します。フックが `shutil.which("uvx")` を確認し、見つからない場合
-は **stderr に日英両言語のインストール手順**（`pipx install uv` ／
-`curl -LsSf https://astral.sh/uv/install.sh \| sh` 等）を出力するので、
-`/plugins` Errors タブに actionable なメッセージが残ります（フックの
-exit code は常に 0 — パーミッション追加自体は成功しているため）。
+- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — プラグインが
+  提供する形のツール（Claude Code はプラグインの MCP ツールを
+  `mcp__plugin_<plugin>_<server>__<tool>` と名付け、パーミッションのルールも
+  この形で書く必要があります）
+- `mcp__n3mc-workingmemory__*` — サーバーを直接登録した場合
+  （`claude mcp add`、`.mcp.json`）の同じツール
 
-**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` /
-Python 完全不在）の場合は、下記ブロックを `~/.claude/settings.json`（ユーザー
-グローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）
-に手動追記してください：
+ワイルドカードは `recall_thread` を含む 7 ツールすべてに当たります。フックは
+ルールが欠けているときだけ書き込み、ほかのエントリには触れません。
+（v1.9.x までのフックは `mcp__n3mc-workingmemory__<tool>` という素の名前を
+追加していました。これはプラグインのツール名に当たらないため、プラグインの
+利用者は呼び出しのたびに許可を求められていました。）
+
+`hooks.json` のコマンドは `python` → `py`（Windows Python Launcher） →
+`python3` の順に試します。どれも `PATH` 上に無い場合は、Python を使わない
+最後の段が警告（`systemMessage`）を出し、ツールを事前許可できなかったことと
+追加すべきルールを知らせます。`uvx` が無い場合（プラグインは MCP サーバを
+`uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動します）も同じ
+方法で、インストールコマンド（`pipx install uv`、
+`curl -LsSf https://astral.sh/uv/install.sh \| sh`）付きで知らせます。
+
+**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json`）の
+場合は、下記のルールを `~/.claude/settings.json`（ユーザーグローバル — 推奨）
+または `.claude/settings.json`（プロジェクトスコープ）に追記してください。
+プラグインでインストールしたが Python が無い場合は、代わりに
+`mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` を使います：
 
 ```json
 {
   "permissions": {
     "allow": [
-      "mcp__n3mc-workingmemory__search_memory",
-      "mcp__n3mc-workingmemory__save_memory",
-      "mcp__n3mc-workingmemory__list_memories",
-      "mcp__n3mc-workingmemory__delete_memory",
-      "mcp__n3mc-workingmemory__delete_memories_by_session",
-      "mcp__n3mc-workingmemory__repair_memory"
+      "mcp__n3mc-workingmemory__*"
     ]
   }
 }

@@ -401,42 +401,42 @@ fully automatic memory loop — so the connected AI never blocks on an
 
 **Plugin install auto-configures this** — when you install via
 `/plugin install n3mc-workingmemory@neuralnexusnote`, a `SessionStart`
-hook runs [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
-which idempotently adds the six `mcp__n3mc-workingmemory__*` tools to
-`~/.claude/settings.json`. No manual editing needed. The hook only
-writes if at least one entry is missing and never touches unrelated
-fields. The `hooks.json` command tries `python` → `py` (Windows Python
-Launcher) → `python3` in a `||` fallback chain, so the hook works as
-long as any one of these is on `PATH`. It only exits non-zero —
-surfacing in Claude Code's `/plugins` Errors tab — when **all three**
-are missing, avoiding silent failure.
+hook runs [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py),
+which idempotently adds two wildcard rules to `permissions.allow` in
+`~/.claude/settings.json`:
 
-The same hook also performs a **`uvx` pre-flight check** — the plugin
-manifest launches the MCP server via
-`uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so a missing
-`uvx` would otherwise surface only as an opaque `ENOENT` in the MCP
-launcher. The hook calls `shutil.which("uvx")` and, if not found,
-writes a bilingual install hint to stderr (`pipx install uv`,
-`curl -LsSf https://astral.sh/uv/install.sh | sh`, plus the docs URL)
-so the user sees an actionable message in the `/plugins` Errors tab.
-The hook still exits 0 because the permission install itself
-succeeded.
+- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — the tools as the
+  plugin provides them (Claude Code names plugin MCP tools
+  `mcp__plugin_<plugin>_<server>__<tool>`, and permission rules must use that
+  form)
+- `mcp__n3mc-workingmemory__*` — the same tools for a directly registered
+  server (`claude mcp add`, `.mcp.json`)
 
-**If you installed without the plugin** (e.g. `claude mcp add` or a
-manual `.mcp.json`), or no Python interpreter is available at all, add
-the block below manually to `~/.claude/settings.json` (user-global,
-recommended) or `.claude/settings.json` (per-project):
+The wildcards cover all seven tools, including `recall_thread`. The hook
+only writes when a rule is missing and never touches other entries.
+(Up to v1.9.x the hook added plain `mcp__n3mc-workingmemory__<tool>` names,
+which do not match the plugin's tool names, so plugin users were asked for
+permission on every call.)
+
+The `hooks.json` command tries `python` → `py` (Windows Python Launcher) →
+`python3`. If none is on `PATH`, a Python-free last step shows a warning
+(`systemMessage`) telling you that the tools could not be pre-approved and
+what to add. A missing `uvx` (the plugin launches the MCP server via
+`uvx --from n3memorycore-mcp-lite n3mc-workingmemory`) is reported the same
+way, with install commands (`pipx install uv`,
+`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+
+**If you installed without the plugin** (e.g. `claude mcp add` or a manual
+`.mcp.json`), add the rule below to `~/.claude/settings.json` (user-global,
+recommended) or `.claude/settings.json` (per-project). If you installed the
+plugin but have no Python, use `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`
+instead:
 
 ```json
 {
   "permissions": {
     "allow": [
-      "mcp__n3mc-workingmemory__search_memory",
-      "mcp__n3mc-workingmemory__save_memory",
-      "mcp__n3mc-workingmemory__list_memories",
-      "mcp__n3mc-workingmemory__delete_memory",
-      "mcp__n3mc-workingmemory__delete_memories_by_session",
-      "mcp__n3mc-workingmemory__repair_memory"
+      "mcp__n3mc-workingmemory__*"
     ]
   }
 }

@@ -51,6 +51,17 @@ regenerated from the EN spec.
   PINGs / reconnects first (`ensure_connected()`), connection errors inside a
   tool are reported as the backend error, and the hint is English and shows
   the host:port from `redis_url` (no password).
+- **Plugin auto-approve never matched, and failed silently without Python**
+  (spec §8, found by the A2 abnormal-case test): the SessionStart hook added
+  plain `mcp__n3mc-workingmemory__<tool>` rules, but Claude Code names a
+  plugin's MCP tools `mcp__plugin_<plugin>_<server>__<tool>`, so plugin users
+  were prompted on every memory call; `recall_thread` was also missing. The
+  hook now adds `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` and
+  `mcp__n3mc-workingmemory__*`. When no Python is on PATH, a Python-free last
+  step prints a `systemMessage` warning (what breaks, what to add) and exits
+  0 — a non-zero exit only produced a one-line `python: command not found`
+  transcript notice, not an entry in the `/plugin` Errors tab as the spec
+  claimed. The missing-`uvx` hint uses the same `systemMessage` JSON.
 - **Memories split by launcher on Windows** (spec §7): the config lived in
   `%LOCALAPPDATA%`, which the Microsoft Store (MSIX) Claude desktop app
   redirects for the MCP servers it starts. One PC had two `config.json`

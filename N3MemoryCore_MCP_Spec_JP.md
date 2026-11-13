@@ -202,6 +202,7 @@ n3memorycore-mcp-lite/
 > | 12 | BM25 クエリに制御文字・CJK 句読点が残る | `Syntax error`（BM25 が黙って抜ける）／`「記憶装置」は？` で BM25 ヒット 0 件 | 制御文字 → 空白、CJK・全角句読点も除去 | [§3.7](#37-トークナイズと句読点処理) |
 > | 13 | Redis を起動時にしか確かめない／接続エラーを握りつぶす | `docker start redis-stack` のあとも Redis が止まっていると言い続ける／あとから止まった Redis で `_No memories found._` | 毎回のツールの前に `ensure_connected()`（PING／つなぎ直し）、`ConnectionError` / `TimeoutError` は送り出す | [§3.9](#39-起動シーケンスと自己回復) |
 > | 14 | 設定を `%LOCALAPPDATA%` に置く | ストア（MSIX）版 Claude デスクトップアプリは MCP サーバーの `%LOCALAPPDATA%` を振り替える → `config.json` と `owner_id` が 2 つになり、デスクトップアプリで保存した記憶がターミナルの `claude` から見えない（逆も） | 設定は `~/.n3mc-workingmemory/`（振り替えの対象外）に置き、1 回だけ引き継ぐ | [§7](#7-データ保存先) |
+> | 15 | プラグインの自動許可ルールにサーバー名をそのまま使う／フックの失敗が exit 非ゼロだけ | プラグインの利用者は記憶の呼び出しのたびに許可を求められる／Python が無いときの手がかりは `SessionStart hook error … python: command not found` だけ | `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（+ `mcp__n3mc-workingmemory__*`）を許可する。Python を使わないフォールバックが `systemMessage` の JSON を出して exit 0 | [§8](#ツール自動許可claude-code-固有) |
 
 ### 3.1 ID 階層
 
@@ -931,11 +932,26 @@ Redis 状態は Redis コンテナが置く場所（既定では無名 Docker �
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
 
-**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 7 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`hooks.json` は `python` → `py`（Windows Python Launcher） → `python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか 1 つが `PATH` 上にあれば動作する。3 つすべて不在の場合のみ exit 非ゼロで失敗し、Claude Code の `/plugins` Errors タブに表示される（silent fail を回避）。
+**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に **ワイルドカードのルールを 2 つ** 冪等追加する：
 
-同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が `PATH` 上に無いと MCP launcher 側では不透明な `ENOENT` で失敗する。フックが事前に `shutil.which("uvx")` を確認し、見つからない場合は **stderr に日英両言語のインストール手順**（`pipx install uv` ／ `curl -LsSf https://astral.sh/uv/install.sh | sh` 等）を出力して `/plugins` Errors タブに actionable なメッセージを残す。フックの exit code は常に 0（パーミッション追加自体は成功しているため）。
+- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — **プラグインが提供する形** のツール。Claude Code はプラグインの MCP ツールを `mcp__plugin_<plugin-name>_<server-name>__<tool>` と名付け、パーミッションのルールもこのプラグイン付きの形で書く必要がある（[permissions docs](https://code.claude.com/docs/en/permissions.md)、"Servers that a plugin provides"）。
+- `mcp__n3mc-workingmemory__*` — サーバーを直接登録した場合（`claude mcp add`、`.mcp.json`）の同じツール。
 
-**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 完全不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
+ワイルドカードは `recall_thread` を含む 7 ツールすべてと、今後追加されるツールにも当たる。フックはルールが欠けているときだけ書き込み、ユーザーがすでに持っているエントリ（v1.6.x のツールごとの明示リストなど）は消さず、関係のないフィールドにも触れない。
+
+> **⚠️ v1.6.x の自動許可はプラグインに一度も当たっていなかった（v1.7.0 で修正）**：v1.6.x は `mcp__n3mc-workingmemory__<tool>` の明示ルールを 6 つ追加していた。この名前は直接登録したサーバーには当たるが、プラグイン付きのツール名には **当たらない**。そのためプラグインの利用者は `search_memory` / `save_memory` のたびに許可を求められ（自動許可で防ぐはずだった停止そのもの）、`recall_thread` はそもそもリストに入っていなかった。
+
+**Python のフォールバックと、目に見える失敗** — `hooks.json` のコマンドは `python` → `py`（Windows Python Launcher） → `python3` の順に `||` チェインで試す。**どれも** `PATH` 上に無い場合は、Python を使わない 4 段目が JSON オブジェクトを 1 つ stdout に出して exit 0 で終わる：
+
+```json
+{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), so the memory tools could not be pre-approved and Claude Code will ask for permission on every memory call. Install Python 3, or add \"mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
+```
+
+`systemMessage` はユーザーに警告として表示され、`additionalContext` によって接続中の LLM がその内容を説明できる。単に exit 非ゼロで終わるだけでは **足りない**：Claude Code は失敗した `SessionStart` フックを、stderr の最初の行（`python: command not found`）を載せた `SessionStart hook error` の通知としてトランスクリプトに出すだけで、何が壊れるのかも直し方も伝わらない。また `/plugin` の Errors タブに出るのはプラグインの *読み込み* エラー（不正な `hooks.json`、誤ったパス）で、フックの *実行時* の失敗ではない（[hooks docs](https://code.claude.com/docs/en/hooks.md)、[plugin troubleshooting](https://code.claude.com/docs/en/plugins/troubleshooting.md)）。v1.6.x は Errors タブ頼みで、実質的に無言だった。
+
+同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が無いと MCP launcher 側で不透明な `ENOENT` としてしか現れない。フックは `shutil.which("uvx")` を確認し、見つからない場合は同じ形の JSON（`systemMessage` + `additionalContext`）で日英両言語のインストール手順（`pipx install uv`、`curl -LsSf https://astral.sh/uv/install.sh | sh`、ドキュメントの URL）を出して exit 0 で終わる。両方に当てはまるときは、メッセージを 1 つの JSON オブジェクトにまとめる（フックの stdout は単一の JSON オブジェクトでなければならない）。
+
+**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json`）では、下記ブロックを手動で追記する（ワイルドカードの形なら `mcp__n3mc-workingmemory__*`）。**プラグインでインストールしたが Python が無い場合** は、代わりに `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（プラグイン付きの名前）を追加する。追記先は `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）：
 
 ```json
 {

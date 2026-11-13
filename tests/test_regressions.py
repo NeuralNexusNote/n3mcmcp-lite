@@ -412,3 +412,78 @@ class TestConfigLocation:
         legacy.write_text('{"owner_id": "legacy-owner", "local_id": "l"}', encoding="utf-8")
         monkeypatch.setenv("N3MC_DATA_DIR", str(tmp_path / "override"))
         assert C.load_config()["owner_id"] != "legacy-owner"
+
+
+# ── §8 plugin SessionStart hook (A2 fixes) ───────────────────────────────────
+
+import importlib.util
+import shutil as _shutil
+import subprocess as _subprocess
+from pathlib import Path as _Path
+
+_PLUGIN = _Path(__file__).resolve().parent.parent / "plugins" / "n3mc-workingmemory"
+
+
+def _hook_module():
+    spec = importlib.util.spec_from_file_location(
+        "install_permissions", _PLUGIN / "hooks" / "install_permissions.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _hook_command() -> str:
+    data = json.loads((_PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    return data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+
+def _hook_bash():
+    """The shell Claude Code uses for hooks: Git Bash on Windows (never the
+    WSL launcher in System32), plain bash elsewhere."""
+    import os
+    if os.name == "nt":
+        for c in (r"C:\Program Files\Git\bin\bash.exe",
+                  r"C:\Program Files\Git\usr\bin\bash.exe"):
+            if os.path.exists(c):
+                return c
+        return None
+    return _shutil.which("bash")
+
+
+class TestPluginHook:
+    def test_rules_cover_plugin_scoped_names(self):
+        mod = _hook_module()
+        assert "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" in mod.RULES
+        assert "mcp__n3mc-workingmemory__*" in mod.RULES
+
+    def test_patch_is_idempotent_and_keeps_other_entries(self, tmp_path):
+        mod = _hook_module()
+        p = tmp_path / "settings.json"
+        p.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "theme": "dark"}),
+                     encoding="utf-8")
+        assert len(mod._patch(p)) == 2
+        assert mod._patch(p) == []
+        data = json.loads(p.read_text(encoding="utf-8"))
+        assert data["theme"] == "dark" and data["permissions"]["allow"][0] == "Bash(ls)"
+
+    def test_python_free_fallback_prints_valid_json(self):
+        cmd = _hook_command()
+        last = cmd.split("||")[-1].strip()
+        assert last.startswith("echo '") and last.endswith("'")
+        payload = json.loads(last[len("echo '"):-1])
+        assert "Python was not found" in payload["systemMessage"]
+        assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" in payload["systemMessage"]
+
+    @pytest.mark.skipif(_hook_bash() is None, reason="Git Bash / bash not available")
+    def test_fallback_runs_when_no_python(self, tmp_path):
+        """Run the real command with a PATH that has bash builtins only."""
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        env = {"PATH": str(empty), "CLAUDE_PLUGIN_ROOT": str(_PLUGIN).replace("\\", "/"),
+               "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+        bash = _hook_bash()
+        r = _subprocess.run([bash, "-c", _hook_command()], env=env,
+                            capture_output=True, text=True, encoding="utf-8")
+        assert r.returncode == 0, r.stderr
+        assert "Python was not found" in json.loads(r.stdout)["systemMessage"]
