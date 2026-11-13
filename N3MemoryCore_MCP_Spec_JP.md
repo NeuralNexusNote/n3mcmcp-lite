@@ -200,6 +200,7 @@ n3memorycore-mcp-lite/
 > | 10 | 「定常 0.5s」を MCP 往復で計測 | 5〜10s に見え誤判定 | 0.5s は純サーバー側目標と理解 | [§10](#10-自律評価evidence-report) |
 > | 11 | テストをライブの Redis に向ける | `FLUSHDB` がユーザーのワーキングメモリを消す | テストは `N3MC_REDIS_TEST_URL` にのみ接続し、既定値は持たない | [§9](#9-テストpytest) |
 > | 12 | BM25 クエリに制御文字・CJK 句読点が残る | `Syntax error`（BM25 が黙って抜ける）／`「記憶装置」は？` で BM25 ヒット 0 件 | 制御文字 → 空白、CJK・全角句読点も除去 | [§3.7](#37-トークナイズと句読点処理) |
+> | 13 | Redis を起動時にしか確かめない／接続エラーを握りつぶす | `docker start redis-stack` のあとも Redis が止まっていると言い続ける／あとから止まった Redis で `_No memories found._` | 毎回のツールの前に `ensure_connected()`（PING／つなぎ直し）、`ConnectionError` / `TimeoutError` は送り出す | [§3.9](#39-起動シーケンスと自己回復) |
 
 ### 3.1 ID 階層
 
@@ -458,7 +459,17 @@ def drop_lone_cjk_tokens(q: str) -> str:
 
 2. **Redis 接続と ping**：
    - `redis_url` からクライアントを構築。
-   - `PING`。**失敗時**は `stderr` にヒント（初回：`docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest` ／ 再起動：`docker start redis-stack`）を出し、非機能クライアントのまま続行。以降のツール呼び出しはすべて**明示的なエラー**で応答する — `save_memory` / `delete_memory` / `repair_memory` は `{"status": "error", ...}` の JSON を返し、`search_memory` / `list_memories` は `Error:` プレフィックスと復旧ヒントを含む `TextContent` を返す。これにより [§5](#5-行動指示自動保存戦略) に記した「バックエンド故障は黙って『該当なし』で済ませず、必ず AI 側でユーザーに報告する」という契約が成立する。サーバー自体は生存し続け、ユーザーは MCP を再起動せずに Redis をホットフィックスできる。
+   - `PING`。**失敗時**は `stderr` に復旧の案内（下記）を出し、接続のないまま続行する。サーバー自体は生存し続け、ユーザーは MCP を再起動せずに Redis を起動できる（下記「ツール呼び出しごとの Redis の確認」）。
+   - クライアントは `socket_connect_timeout=2` で作る。止まっている Redis へのつなぎ直しが、ツール呼び出しを固めずに数秒で失敗するように。
+
+   **ツール呼び出しごとの Redis の確認（v1.7.0）** — 接続は起動時だけでなく、呼び出しのたびに確かめる：
+
+   1. ディスパッチャは、どのツールを実行する前にも `Database.ensure_connected()` を呼ぶ。つながっていれば `PING` を送り、つながっていない（または `PING` が失敗した）ときは `redis_url` からクライアントを作り直して、もう一度 `PING` する。接続が戻ったら `enforce_ephemeral()` と `ensure_index()` をやり直す（新しいコンテナにはインデックスがない）。`stderr` には、状態が変わったとき（切れた／戻った）に 1 行だけ出す。呼び出しごとには出さない。
+   2. Redis に届かないときはツールを実行せず、**復旧の案内付きのバックエンドエラー**を返す：`search_memory` / `list_memories` / `recall_thread` → `Error: memory backend unreachable. <案内>` で始まる `TextContent`、`save_memory` → `{"status": "error", "saved": false, "reason": "<案内>"}`、`delete_memory` / `delete_memories_by_session` → `{"status": "error", "reason": "<案内>"}`、`repair_memory` → `{"status": "error", "message": "<案内>"}`。
+   3. ツールの**途中で**接続が切れた（`redis.ConnectionError` / `redis.TimeoutError`）ときは、未接続の状態にして、そのツールにも同じバックエンドエラーを返す。ベクトル検索・BM25 の補助関数は、この 2 つの例外を握りつぶさずに**送り出す**こと — 握りつぶすと、止まった Redis が `_No memories found._` になり、LLM には「何も保存されていない」と見える。それ以外の `FT.SEARCH` のエラー（クエリの構文エラーなど）は従来どおり捕まえ、その経路だけを飛ばす。
+   4. **案内の文**（`backend_hint(redis_url)`。このサーバーは世界中で使われるので英語）：`Redis Stack is not reachable at <host>:<port>. Start it with: docker start redis-stack (first time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest). The MCP server reconnects automatically — no restart needed; just retry.` `<host>:<port>` は `redis_url` から取り、**ユーザー名とパスワードは出さない**。
+
+   > **⚠️ 理由（v1.7.0）**：v1.6.x は Redis を起動時にしか確かめなかった。Redis が止まった状態で起動したサーバーは、ユーザーが `docker start redis-stack` を実行したあとも「Redis Stack が起動していません」と答え続け（`repair_memory` でもつなぎ直さない）、MCP クライアントを再起動するまで使えなかった。あとから Redis が止まったサーバーは、`search_memory` が `_No memories found._` を返し、`save_memory` は案内のない生の `Error 10061 connecting to localhost:6379` を返した。案内も日本語だけだった。
 
 3. **RediSearch インデックスの確保**（`ensure_index()`）：
    - [§3.5](#35-データレイアウト) の通り `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...`。
@@ -735,7 +746,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 ### 4.4 エラー処理
 
-ツール例外はディスパッチ層で捕捉し、先頭 `"Error: "` を付けた `TextContent` で返す。ツールレベル例外で stdio ループがクラッシュすることはない。ツール呼び出し時に Redis 到達不可な場合、ディスパッチャはツール実行を行わず「Redis Stack を起動してください」のヒントを返す。
+ツール例外はディスパッチ層で捕捉し、先頭 `"Error: "` を付けた `TextContent` で返す。ツールレベル例外で stdio ループがクラッシュすることはない。Redis の状態は呼び出しのたびに確かめ、切れた接続は自動でつなぎ直す。Redis に届かない間は、ディスパッチャはツールを実行せず、復旧の案内付きのバックエンドエラーを返す（[§3.9](#39-起動シーケンスと自己回復)「ツール呼び出しごとの Redis の確認」）。そのため Redis が止まっていても、MCP クライアントにはサーバーが**接続済み**と表示される。これは設計どおり：指示文とツールが届いているので、LLM がユーザーにすべきことを伝えられる（§5 ルール 4）。
 
 ---
 

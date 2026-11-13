@@ -201,6 +201,7 @@ n3memorycore-mcp-lite/
 > | 10 | Measuring "0.5s steady state" over the MCP round-trip | Looks like 5–10s, false negative | 0.5s is a pure server-side target | [§10](#10-self-evaluation-evidence-report) |
 > | 11 | Tests pointed at the live Redis | `FLUSHDB` wipes the user's working memory | Tests run only against `N3MC_REDIS_TEST_URL`; there is no default | [§9](#9-testing-pytest) |
 > | 12 | Control characters / CJK punctuation left in the BM25 query | `Syntax error` (BM25 silently skipped) / 0 BM25 hits for `「記憶装置」は？` | Control chars → space; strip CJK and full-width punctuation too | [§3.7](#37-text-tokenization--punctuation-handling) |
+> | 13 | Redis checked only at startup / connection errors swallowed | After `docker start redis-stack` the server still says Redis is down; a Redis that stops later yields `_No memories found._` | `ensure_connected()` (PING / reconnect) before every tool; re-raise `ConnectionError` / `TimeoutError` | [§3.9](#39-startup-sequence--self-recovery) |
 
 ### 3.1 ID Hierarchy
 
@@ -461,7 +462,17 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 2. **Redis connect & ping**:
    - Build a client from `redis_url`.
-   - `PING`. **If it fails**: log a warning to `stderr` with both startup hints (first-time: `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`; restart: `docker start redis-stack`) and continue with a non-functional client. Every subsequent tool call returns an **explicit error** with the same hints — `save_memory`, `delete_memory`, and `repair_memory` return `{"status": "error", ...}` JSON; `search_memory` and `list_memories` surface a `TextContent` starting with `Error:` that includes the recovery hint. This matches the [§5](#5-behavioral-instructions-auto-save-strategy) contract that tells the AI client to announce backend failures instead of silently falling back to "no memory found". The server stays up — the client can hot-fix Redis without restarting the MCP.
+   - `PING`. **If it fails**: log a warning to `stderr` with the recovery hint (below) and continue without a working connection. The server stays up — the user can start Redis without restarting the MCP server (see "Redis availability on every tool call").
+   - Build the client with `socket_connect_timeout=2` so a reconnect attempt against a stopped Redis fails within seconds instead of hanging a tool call.
+
+   **Redis availability on every tool call (v1.7.0)** — the connection is checked per call, not only at startup:
+
+   1. Before running any tool, the dispatcher calls `Database.ensure_connected()`: if the server is connected it sends `PING`; if it is not connected (or the `PING` fails) it rebuilds the client from `redis_url` and tries `PING` again. When a connection comes back, it re-runs `enforce_ephemeral()` and `ensure_index()` (the index may be missing on a fresh container). `stderr` gets one line when the state changes (lost / restored), not one per call.
+   2. If Redis is unreachable, the tool is not run and the response is the **backend error with the recovery hint**: `search_memory` / `list_memories` / `recall_thread` → a `TextContent` starting with `Error: memory backend unreachable. <hint>`; `save_memory` → `{"status": "error", "saved": false, "reason": "<hint>"}`; `delete_memory` / `delete_memories_by_session` → `{"status": "error", "reason": "<hint>"}`; `repair_memory` → `{"status": "error", "message": "<hint>"}`.
+   3. If the connection drops **during** a tool (`redis.ConnectionError` / `redis.TimeoutError`), the server marks itself disconnected and returns the same backend error for that tool. The vector / BM25 helpers must **re-raise** these two exceptions instead of swallowing them — swallowing turned a stopped Redis into `_No memories found._`, which the LLM reads as "nothing was saved". Other `FT.SEARCH` errors (e.g. a query syntax error) are still caught and only that leg is skipped.
+   4. **Hint text** (`backend_hint(redis_url)`, English, because this server is used worldwide): `Redis Stack is not reachable at <host>:<port>. Start it with: docker start redis-stack (first time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest). The MCP server reconnects automatically — no restart needed; just retry.` `<host>:<port>` comes from `redis_url` **without the password or user name**.
+
+   > **⚠️ Why (v1.7.0)**: v1.6.x checked Redis only at startup. A server started while Redis was stopped kept answering "Redis Stack is not running" after the user ran `docker start redis-stack` — even `repair_memory` did not reconnect — until the MCP client was restarted. A server whose Redis stopped later returned `_No memories found._` from `search_memory` and a raw `Error 10061 connecting to localhost:6379` from `save_memory`, with no hint. The hint was also Japanese only.
 
 3. **Ensure RediSearch index** (`ensure_index()`):
    - `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...` as per [§3.5](#35-data-layout).
@@ -744,7 +755,7 @@ Either bound may be specified alone. These do not alter the ranking formula. The
 
 ### 4.4 Error Handling
 
-Tool exceptions are caught in the dispatch layer and returned as `TextContent` with a leading `"Error: "` prefix. The server never crashes the stdio loop due to a tool-level exception. If Redis is unreachable when a tool is called, the dispatcher returns a "start Redis Stack" hint instead of invoking the tool.
+Tool exceptions are caught in the dispatch layer and returned as `TextContent` with a leading `"Error: "` prefix. The server never crashes the stdio loop due to a tool-level exception. Redis availability is checked on every call and lost connections are re-established automatically; while Redis is unreachable the dispatcher returns the backend error with the recovery hint instead of invoking the tool (see [§3.9](#39-startup-sequence--self-recovery) "Redis availability on every tool call"). An MCP client therefore shows the server as **connected** even while Redis is down — by design: the instructions and tools stay available, so the LLM can tell the user what to do (§5 rule 4).
 
 ---
 

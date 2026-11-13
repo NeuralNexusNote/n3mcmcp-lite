@@ -42,6 +42,15 @@ regenerated from the EN spec.
   `redis_url`, and run the subprocess servers against the test Redis and a
   temp data dir. CI uses a sidecar on port 6390.
 
+- **Redis outages were not recoverable / were silent** (spec §3.9, found by
+  the A1 abnormal-case test): Redis was checked only at startup, so a server
+  started while Redis was stopped kept saying "Redis Stack is not running"
+  after `docker start redis-stack` until the MCP client was restarted; and a
+  Redis that stopped later made `search_memory` return `_No memories found._`
+  and `save_memory` a raw `Error 10061` without a hint. Every tool call now
+  PINGs / reconnects first (`ensure_connected()`), connection errors inside a
+  tool are reported as the backend error, and the hint is English and shows
+  the host:port from `redis_url` (no password).
 - **Startup model load split in two** (spec §3.9): the embedding library is
   imported synchronously before stdio starts, and only the model is built in
   the background. Importing it in the background after stdio starts (as the

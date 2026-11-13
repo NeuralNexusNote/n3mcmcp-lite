@@ -282,3 +282,83 @@ class TestTestSafety:
     def test_current_test_url_is_not_live(self):
         if REDIS_TEST_URL:
             assert _norm_url(REDIS_TEST_URL) not in _live_redis_urls()
+
+
+# ── §3.9 Redis availability on every tool call (A1 fixes) ────────────────────
+
+BAD_URL = "redis://127.0.0.1:1/0"  # nothing listens here
+
+
+def _call(name, args):
+    import asyncio
+    from n3mc_mcp.server import call_tool
+    return asyncio.run(call_tool(name, args))[0].text
+
+
+class TestRedisAvailability:
+    def test_hint_is_english_without_password(self):
+        from n3mc_mcp.database import backend_hint
+        h = backend_hint("redis://user:s3cret@myhost:6390/0")
+        assert "myhost:6390" in h and "s3cret" not in h and "user" not in h
+        assert "docker start redis-stack" in h and "no restart needed" in h
+        assert not any("\u3040" <= ch <= "\u9fff" for ch in h)  # no Japanese
+
+    def test_down_at_startup_every_tool_returns_hint(self, cfg, monkeypatch):
+        from n3mc_mcp.database import Database
+        import n3mc_mcp.server as S
+        cfg = dict(cfg, redis_url=BAD_URL)
+        d = Database(cfg)
+        assert d.connect(quiet=True) is False
+        monkeypatch.setattr(S, "_db", d)
+        assert _call("search_memory", {"query": "x"}).startswith("Error: memory backend unreachable.")
+        assert _call("list_memories", {}).startswith("Error: memory backend unreachable.")
+        assert _call("recall_thread", {"turn_id": "t"}).startswith("Error: memory backend unreachable.")
+        save = _parse_first_json(_call("save_memory", {"content": "x"}))
+        assert save["status"] == "error" and save["saved"] is False and "127.0.0.1:1" in save["reason"]
+        assert _parse_first_json(_call("repair_memory", {}))["status"] == "error"
+        assert _parse_first_json(_call("delete_memory", {"id": "x"}))["status"] == "error"
+
+
+def _parse_first_json(text):
+    return json.JSONDecoder().raw_decode(text)[0]
+
+
+@requires_redis
+class TestRedisAvailabilityLive:
+    def test_started_down_then_redis_comes_up(self, cfg, redis_client, fake_embed, monkeypatch):
+        """Server started while Redis was down recovers WITHOUT a restart."""
+        from n3mc_mcp.database import Database
+        import n3mc_mcp.server as S
+        d = Database(dict(cfg, redis_url=BAD_URL))
+        assert d.connect(quiet=True) is False
+        monkeypatch.setattr(S, "_db", d)
+        assert _call("search_memory", {"query": "x"}).startswith("Error:")
+        d.cfg["redis_url"] = REDIS_TEST_URL          # "docker start redis-stack"
+        save = _parse_first_json(_call("save_memory", {"content": "after recovery"}))
+        assert save["saved"] is True                 # reconnected + index re-created
+        assert "after recovery" in _call("search_memory", {"query": "after recovery"})
+
+    def test_redis_lost_while_running_is_an_error_not_empty(self, db, fake_embed, monkeypatch):
+        import redis
+        import n3mc_mcp.server as S
+        monkeypatch.setattr(S, "_db", db)
+        db.save_memory("saved before the outage")
+        db.cfg["redis_url"] = BAD_URL                # Redis stops
+        db._client = redis.Redis.from_url(BAD_URL, socket_connect_timeout=1)
+        out = _call("search_memory", {"query": "saved before the outage"})
+        assert out.startswith("Error: memory backend unreachable."), out
+        assert "_No memories found._" not in out
+        save = _parse_first_json(_call("save_memory", {"content": "during outage"}))
+        assert save["status"] == "error" and "docker start redis-stack" in save["reason"]
+
+    def test_connection_error_inside_search_is_not_swallowed(self, db, fake_embed, monkeypatch):
+        import redis
+        import n3mc_mcp.server as S
+        monkeypatch.setattr(S, "_db", db)
+        monkeypatch.setattr(db, "ensure_connected", lambda: True)   # pass the pre-check
+        def boom(*a, **k):
+            raise redis.ConnectionError("Error 10061 connecting to localhost:6379")
+        monkeypatch.setattr(db._client, "execute_command", boom)
+        out = _call("search_memory", {"query": "anything"})
+        assert out.startswith("Error: memory backend unreachable."), out
+        assert db._ok is False

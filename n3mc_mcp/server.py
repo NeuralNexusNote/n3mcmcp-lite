@@ -39,7 +39,7 @@ from mcp.types import TextContent, Tool
 
 from . import __version__
 from .config import load_config
-from .database import Database, _DOCKER_HINT
+from .database import Database, _CONN_ERRORS
 from .instructions import INSTRUCTIONS
 from .processor import get_model, import_backend, purify, set_model_name
 
@@ -367,12 +367,36 @@ async def list_tools() -> list[Tool]:
 
 # ── tool dispatch (spec §4.3 / §4.4) ────────────────────────────────────────
 
+_TOOL_NAMES = {
+    "search_memory", "save_memory", "list_memories", "delete_memory",
+    "delete_memories_by_session", "repair_memory", "recall_thread",
+}
+
+
+def _backend_error(name: str) -> list[TextContent]:
+    """Spec §3.9: the backend error with the recovery hint, per tool shape."""
+    hint = _db.hint()
+    if name == "save_memory":
+        body = {"status": "error", "saved": False, "reason": hint}
+    elif name in ("delete_memory", "delete_memories_by_session"):
+        body = {"status": "error", "reason": hint}
+    elif name == "repair_memory":
+        body = {"status": "error", "message": hint}
+    else:  # search_memory / list_memories / recall_thread
+        return [TextContent(type="text",
+                            text=f"Error: memory backend unreachable. {hint}")]
+    return [TextContent(type="text",
+                        text=json.dumps(body, ensure_ascii=False) + _NUDGE_GENERIC)]
+
+
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    # Spec §3.9 "Redis availability on every tool call": PING / reconnect
+    # before running the tool; a stopped Redis never reaches the tool body.
+    if name in _TOOL_NAMES and not _db.ensure_connected():
+        return _backend_error(name)
     try:
         if name == "search_memory":
-            if not _db._ok:
-                raise RuntimeError(f"memory backend unreachable. {_DOCKER_HINT}")
             results = _db.search_memory(
                 arguments.get("query", ""),
                 arguments.get("limit"),
@@ -410,8 +434,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )]
 
         elif name == "list_memories":
-            if not _db._ok:
-                raise RuntimeError(f"memory backend unreachable. {_DOCKER_HINT}")
             limit_raw = arguments.get("limit", 20)
             memories  = _db.list_memories(int(limit_raw) if limit_raw else 20)
             if not memories:
@@ -448,8 +470,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )]
 
         elif name == "recall_thread":
-            if not _db._ok:
-                raise RuntimeError(f"memory backend unreachable. {_DOCKER_HINT}")
             turn_id = arguments.get("turn_id", "").strip()
             if not turn_id:
                 return [TextContent(
@@ -479,6 +499,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         else:
             return [TextContent(type="text", text=f"Error: unknown tool '{name}'")]
 
+    except _CONN_ERRORS:
+        # Lost during the tool: report it as the backend error, never as
+        # "no results" (spec §3.9).
+        _db.mark_disconnected()
+        return _backend_error(name)
     except Exception as e:
         return [TextContent(type="text", text=f"Error: {e}")]
 

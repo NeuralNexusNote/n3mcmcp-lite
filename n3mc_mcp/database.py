@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from urllib.parse import urlparse
 import redis as redis_lib
 
 from .processor import (
@@ -42,12 +43,29 @@ from .processor import (
 
 INDEX_NAME = "n3mc_idx"
 
-_DOCKER_HINT = (
-    "Redis Stack が起動していません。"
-    "docker start redis-stack または "
-    "docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest "
-    "を実行してください。"
-)
+_CONN_ERRORS = (redis_lib.ConnectionError, redis_lib.TimeoutError)
+
+
+def backend_hint(redis_url: str = "redis://localhost:6379/0") -> str:
+    """Recovery hint for an unreachable Redis (spec §3.9, English).
+
+    Shows host:port from *redis_url* WITHOUT the user name or password.
+    """
+    try:
+        u = urlparse(redis_url or "")
+        where = f"{u.hostname or 'localhost'}:{u.port or 6379}"
+    except Exception:
+        where = "the configured redis_url"
+    return (
+        f"Redis Stack is not reachable at {where}. Start it with: "
+        "docker start redis-stack (first time: docker run -d --name redis-stack "
+        "-p 6379:6379 redis/redis-stack-server:latest). The MCP server "
+        "reconnects automatically \u2014 no restart needed; just retry."
+    )
+
+
+# Backward-compatible constant (default URL).
+_DOCKER_HINT = backend_hint()
 
 _CODE_FENCE_RE = re.compile(r"```")
 
@@ -175,20 +193,56 @@ class Database:
 
     # ── §3.9 connection ──────────────────────────────────────────────────────
 
-    def connect(self) -> bool:
+    def connect(self, quiet: bool = False) -> bool:
         """Spec §3.9 step 2: connect + PING.  On failure stay up with _ok=False."""
         try:
             self._client = redis_lib.Redis.from_url(
-                self.cfg["redis_url"], decode_responses=False
+                self.cfg["redis_url"], decode_responses=False,
+                socket_connect_timeout=2,
             )
             self._client.ping()
             self._ok = True
             return True
         except Exception as e:
-            print(f"[n3mc] Redis connect failed: {e}", file=sys.stderr)
-            print(f"[n3mc] Hint: {_DOCKER_HINT}", file=sys.stderr)
+            if not quiet:
+                print(f"[n3mc] Redis connect failed: {e}", file=sys.stderr)
+                print(f"[n3mc] Hint: {self.hint()}", file=sys.stderr)
             self._ok = False
             return False
+
+    def hint(self) -> str:
+        return backend_hint(self.cfg.get("redis_url", ""))
+
+    def mark_disconnected(self) -> None:
+        if self._ok:
+            print(f"[n3mc] Redis connection lost. {self.hint()}", file=sys.stderr)
+        self._ok = False
+
+    def ensure_connected(self) -> bool:
+        """Spec §3.9 "Redis availability on every tool call".
+
+        Connected → PING. Not connected or PING failed → rebuild the client
+        and PING again. On reconnection re-run enforce_ephemeral() and
+        ensure_index(). stderr gets one line per state change only.
+        """
+        if self._ok and self._client is not None:
+            try:
+                self._client.ping()
+                return True
+            except Exception:
+                self.mark_disconnected()
+        if self.connect(quiet=True):
+            print("[n3mc] Redis connection restored.", file=sys.stderr)
+            try:
+                self.enforce_ephemeral()
+                self.ensure_index()
+            except _CONN_ERRORS:
+                self.mark_disconnected()
+                return False
+            except Exception as e:
+                print(f"[n3mc] reconnect setup: {e}", file=sys.stderr)
+            return True
+        return False
 
     # ── §3.4 ephemerality ────────────────────────────────────────────────────
 
@@ -247,7 +301,7 @@ class Database:
         Existing Redis records are already indexed; expired ones are simply gone.
         """
         if not self._ok:
-            return {"status": "error", "message": _DOCKER_HINT}
+            return {"status": "error", "message": self.hint()}
         try:
             self.ensure_index()
             return {"status": "ok", "message": "index ensured"}
@@ -266,7 +320,7 @@ class Database:
         turn_id: str = "",
     ) -> dict:
         if not self._ok:
-            return {"status": "error", "saved": False, "reason": _DOCKER_HINT}
+            return {"status": "error", "saved": False, "reason": self.hint()}
 
         # Encoding safety — strip lone UTF-16 surrogates BEFORE strip()
         # so a payload that is all-surrogates (degenerate Windows stdin
@@ -510,6 +564,8 @@ class Database:
         # §3.7: a BM25 failure never fails search_memory.
         try:
             bm25_results = self._bm25_search(query, owner_id, limit, time_filter)
+        except _CONN_ERRORS:
+            raise  # §3.9: a lost connection is a backend error, not "no results"
         except Exception as e:
             print(f"[n3mc] BM25 search skipped: {e}", file=sys.stderr)
             bm25_results = {}
@@ -581,6 +637,8 @@ class Database:
                     continue  # lower-scoring duplicate; already emitted
                 try:
                     doc_data = self._client.hgetall(f"doc:{pid}")
+                except _CONN_ERRORS:
+                    raise  # §3.9: a lost connection is a backend error, not "no results"
                 except Exception:
                     doc_data = None
                 if doc_data:
@@ -662,6 +720,8 @@ class Database:
                     refresh_pipe.expire(c["key"], ttl)
             try:
                 refresh_pipe.execute()
+            except _CONN_ERRORS:
+                raise  # §3.9: a lost connection is a backend error, not "no results"
             except Exception:
                 pass
 
@@ -700,6 +760,8 @@ class Database:
             if not fetch_idx:
                 return vectors, texts
             replies = pipe.execute()
+        except _CONN_ERRORS:
+            raise  # §3.9: a lost connection is a backend error, not "no results"
         except Exception as e:
             print(f"[n3mc] version ordering skipped: {e}", file=sys.stderr)
             return vectors, texts
@@ -780,6 +842,8 @@ class Database:
                 "DIALECT", "2",
             )
             res = self._unwrap_search_response(res)
+        except _CONN_ERRORS:
+            raise  # §3.9: a lost connection is a backend error, not "no results"
         except Exception as e:
             print(f"[n3mc] vector search: {e}", file=sys.stderr)
             return {}
@@ -851,6 +915,8 @@ class Database:
                 )
                 res = self._unwrap_search_response(res)
                 break
+            except _CONN_ERRORS:
+                raise  # §3.9: a lost connection is a backend error, not "no results"
             except Exception as e:
                 if scorer and "scor" in str(e).lower():
                     continue  # unknown scorer on this Redis version → next
@@ -928,6 +994,8 @@ class Database:
                         "tag":       "",
                     })
                     i += 2
+        except _CONN_ERRORS:
+            raise  # §3.9: a lost connection is a backend error, not "no results"
         except Exception as e:
             print(f"[n3mc] list_memories FTS: {e}", file=sys.stderr)
 
@@ -956,6 +1024,8 @@ class Database:
                 if cursor == 0:
                     break
             results.extend(parents)
+        except _CONN_ERRORS:
+            raise  # §3.9: a lost connection is a backend error, not "no results"
         except Exception as e:
             print(f"[n3mc] list_memories parent scan: {e}", file=sys.stderr)
 
@@ -972,7 +1042,7 @@ class Database:
           no  → delete mem:<mem_id> and its mem:sha: guard
         """
         if not self._ok:
-            return {"status": "error", "reason": _DOCKER_HINT}
+            return {"status": "error", "reason": self.hint()}
 
         doc_key = f"doc:{mem_id}"
         if self._client.exists(doc_key):
@@ -1074,7 +1144,7 @@ class Database:
         Scoped to the configured owner_id.
         """
         if not self._ok:
-            return {"status": "error", "reason": _DOCKER_HINT}
+            return {"status": "error", "reason": self.hint()}
         session_id = session_id.strip()
         if not session_id:
             return {"status": "error", "reason": "session_id required"}
