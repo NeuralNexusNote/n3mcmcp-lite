@@ -205,6 +205,7 @@ n3memorycore-mcp-lite/
 > | 15 | プラグインの自動許可ルールにサーバー名をそのまま使う／フックの失敗が exit 非ゼロだけ | プラグインの利用者は記憶の呼び出しのたびに許可を求められる／Python が無いときの手がかりは `SessionStart hook error … python: command not found` だけ | `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（+ `mcp__n3mc-workingmemory__*`）を許可する。Python を使わないフォールバックが `systemMessage` の JSON を出して exit 0 | [§8](#ツール自動許可claude-code-固有) |
 > | 16 | `mcp` に上限がない | 新しく入れると（`uvx`・`pip`・プラグイン）`mcp` 2.x が入り、import の時点で落ちる：`AttributeError: 'Server' object has no attribute 'list_tools'`。`/mcp` には `Connection closed` としか出ない | サーバーを 2.x の API に移すまで、`pyproject.toml` で `mcp>=1.0.0,<2.0.0` に固定する | [セットアップ](#前提条件) |
 > | 17 | モデルの取得を呼び出しのたびにやり直す／劣化した検索を伝えない | オフラインの初回：`save_memory` は毎回約 24 秒、`search_memory` は約 12 秒。キーワードだけの結果が普段と同じに見える | 再試行は 1 分に 1 回まで。劣化中は毎回の `search_memory` に知らせ、`save_memory` に `detail` | [§3.9](#39-起動シーケンスと自己回復) |
+> | 18 | 「空」の判定を `strip()` だけで行う | `\x00`、単独の `U+200B` や `U+FEFF` が、何も表示されない記録として保存される | 見える文字のない本文を拒否する（`has_visible_text`）。それ以外はすべて verbatim に保存する | [§3.13](#313-エンコーディング安全策) |
 
 ### 3.1 ID 階層
 
@@ -637,13 +638,29 @@ def sanitize_surrogates(text):
 決定論的な失敗モードであり、呼び出し側はエンコード起因のサイレントクラッシュ
 ではなく明示的な拒否応答を受け取る。
 
+**見える文字のない入力の契約（v1.7.0）**：`save_memory` は、**見える文字を 1 つも
+含まない**本文も拒否する。すべての文字が、空白、制御文字・書式文字（Unicode の
+カテゴリ `Cc` / `Cf`。例：`U+0000`、`U+001B`、`U+200B`、`U+FEFF`）、区切り文字
+（`Zs` / `Zl` / `Zp`）、異体字セレクタ（`U+FE00`–`U+FE0F`、`U+E0100`–`U+E01EF`）
+のいずれかである場合だ。応答は `{"status":"error","saved":false,"reason":"empty
+content (no visible characters)"}`。判定は `processor.has_visible_text()` で行う。
+この判定は保存する *かどうか* だけを決め、保存する内容は変えない — 見える文字を
+1 つでも含む本文（例：`A\x00B`、単独の結合文字 `U+309A`）は下記のとおり verbatim
+に保存する。空白だけの入力の理由は、これまでどおり `empty content` のまま。
+
+> **⚠️ 理由（v1.7.0、A10 エンコーディング試験）**：`str.strip()` は空白を落とすが
+> `U+0000` や `U+200B` は落とさない。そのため `\x00` や単独のゼロ幅スペースが、
+> 何も表示されない記録として保存されていた。`list_memories` で見分けがつかず、
+> 検索のノイズになるだけだった。
+
 **サニタイズ対象に含まれないもの（意図的）** — 以下は **保存・取り出しを通じて
 verbatim に保持される**（§3.11 の親ドキュメント verbatim 契約と整合）。表示・
 グラフ可逆性・異体字情報・後方互換のため、変換を行わない:
 
 - **`U+0000`（NUL）等の C0 制御文字** — Redis HSET / RediSearch HASH はバイナリ
   セーフのため、NUL を含む文字列もそのまま round-trip する。`A\x00B` のような
-  入力は 3 文字として保存される（empty-content 拒否経路には進まない）。
+  入力は 3 文字として保存される（empty-content 拒否経路には進まない）。こうした
+  文字 **だけ** でできた本文は拒否する（上の「見える文字のない入力の契約」）。
 - **ゼロ幅スペース・結合用スペーサ**（`U+200B`、`U+200C`、`U+200D`、`U+FEFF` 等） —
   検索時のトークナイズには影響しうるが（RediSearch 側の挙動）、保存本文には残る。
 - **異体字セレクタ**（`U+E0100`–`U+E01EF`、`U+FE00`–`U+FE0F`） — `神󠄀` のような
@@ -1116,7 +1133,7 @@ pytest tests/ -v -k "not TestEmbedding"
    - 2 文字の文字列（例: `はい`）を `save_memory` に渡し、**レコードが保存される**こと。
    - 定型語（例: `ok`、`yes`、`thanks`）を `save_memory` に渡し、**レコードが保存される**こと（ただし完全重複は server-side で拒否されうる — その場合は別文字列で再試行）。
    - 更新した事実（例: `The project budget is 100 dollars.` の後に `The project budget is 120 dollars.`）が**新しいエントリとして保存され**（`near_duplicate` にならない）、それを `search_memory` で検索すると両方が `saved=` 時刻付きで並ぶこと。
-   - 空文字列・空白のみの入力は `empty content` で拒否されることを確認。
+   - 空文字列・空白のみの入力は `empty content` で拒否されることを確認。見える文字のない入力（例：`\x00`、単独の `U+200B`）は `empty content (no visible characters)` で拒否されることを確認（§3.13）。
 
 6. **session_id 一括削除テスト（`delete_memories_by_session`）**: 不要になったプロジェクト／タスクのワーキングメモリを TTL を待たずに整理できることを確認せよ。
    1. 一意な `session_id`（例: `eval-cleanup-YYYY-MM-DD`）を決め、その session_id を渡しながら **複数の異なる形態**のレコードを `save_memory` する：

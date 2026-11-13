@@ -60,6 +60,12 @@ regenerated from the EN spec.
   now changes nothing and reports the reason (stderr + `systemMessage`) with
   the rule to add by hand; a read-only file that already has the rules stays
   quiet.
+- **Blank memories from invisible-only input** (spec §3.13, found by the A10
+  encoding test): `strip()` keeps `U+0000`, `U+200B` and `U+FEFF`, so a
+  payload such as `\x00` or a lone zero-width space was saved as a memory
+  that shows as nothing. `save_memory` now rejects content with no visible
+  character (`empty content (no visible characters)`); anything with a
+  visible character is still stored verbatim, NUL included.
 - **Offline without a cached model: every call retried the download, and
   keyword-only search was silent** (spec §3.9, found by the A6 test): each
   `save_memory` took ~24 s and each `search_memory` ~12 s, with no sign in

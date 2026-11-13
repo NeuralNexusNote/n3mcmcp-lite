@@ -30,6 +30,7 @@ from .processor import (
     cosine_sim_from_distance,
     drop_lone_cjk_tokens,
     embed,
+    has_visible_text,
     model_unavailable_message,
     final_score,
     keyword_relevance,
@@ -331,6 +332,11 @@ class Database:
         content = sanitize_surrogates(content).strip()
         if not content:
             return {"status": "error", "saved": False, "reason": "empty content"}
+        # §3.13 invisible-only contract: strip() keeps NUL / U+200B / U+FEFF,
+        # so a payload made only of those would be saved as a blank memory.
+        if not has_visible_text(content):
+            return {"status": "error", "saved": False,
+                    "reason": "empty content (no visible characters)"}
 
         # owner_id validation (spec §4.3 save_memory)
         cfg_owner = self.cfg["owner_id"]

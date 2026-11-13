@@ -130,6 +130,31 @@ def sanitize_surrogates(text):
     return text
 
 
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
+
+
+def _is_variation_selector(ch: str) -> bool:
+    cp = ord(ch)
+    return 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF
+
+
+def has_visible_text(text: str) -> bool:
+    """True if `text` has at least one visible character (spec §3.13).
+
+    Invisible = whitespace, control / format characters (Cc / Cf, e.g.
+    U+0000, U+001B, U+200B, U+FEFF), separators (Zs / Zl / Zp) and variation
+    selectors. Only decides whether save_memory accepts the content; the
+    stored content is never changed by this check.
+    """
+    for ch in text:
+        if ch.isspace() or _is_variation_selector(ch):
+            continue
+        if unicodedata.category(ch) in _INVISIBLE_CATEGORIES:
+            continue
+        return True
+    return False
+
+
 def fold_diacritics(text: str) -> str:
     """Strip combining marks for Latin/Greek/Cyrillic cross-match.
 

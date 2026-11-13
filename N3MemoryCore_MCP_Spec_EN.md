@@ -206,6 +206,7 @@ n3memorycore-mcp-lite/
 > | 15 | Plugin auto-approve rules use the plain server name / hook failure only exits non-zero | Plugin users are prompted on every memory call; with no Python the only sign is `SessionStart hook error … python: command not found` | Allow `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` (+ `mcp__n3mc-workingmemory__*`); Python-free fallback prints `systemMessage` JSON and exits 0 | [§8](#auto-approve-tool-calls-claude-code-only) |
 > | 16 | `mcp` without an upper bound | A fresh install (`uvx`, `pip`, plugin) gets `mcp` 2.x and the server dies on import: `AttributeError: 'Server' object has no attribute 'list_tools'` — `/mcp` shows only `Connection closed` | Pin `mcp>=1.0.0,<2.0.0` in `pyproject.toml` until the server is ported to the 2.x API | [Setup](#prerequisites) |
 > | 17 | Model download retried on every call / degraded search not reported | Offline first run: each `save_memory` ~24 s, each `search_memory` ~12 s; keyword-only results look normal | Retry at most once a minute; notice on every degraded `search_memory`, `detail` on `save_memory` | [§3.9](#39-startup-sequence--self-recovery) |
+> | 18 | Only `strip()` decides "empty" | `\x00`, a lone `U+200B` or `U+FEFF` is saved as a memory that shows as nothing | Reject content with no visible character (`has_visible_text`); store everything else verbatim | [§3.13](#313-encoding-safety) |
 
 ### 3.1 ID Hierarchy
 
@@ -639,6 +640,23 @@ empty-content rejection path applies — `{"status":"error","saved":false,
 "reason":"empty content"}`. This is a deterministic failure mode; the caller
 sees an explicit refusal rather than a silent encoding crash.
 
+**Invisible-only input contract (v1.7.0)**: `save_memory` also rejects
+content that has **no visible character** — every character is whitespace,
+a control or format character (Unicode category `Cc` / `Cf`, e.g. `U+0000`,
+`U+001B`, `U+200B`, `U+FEFF`), a separator (`Zs` / `Zl` / `Zp`) or a
+variation selector (`U+FE00`–`U+FE0F`, `U+E0100`–`U+E01EF`). The reply is
+`{"status":"error","saved":false,"reason":"empty content (no visible
+characters)"}`. The check is `processor.has_visible_text()`; it only decides
+*whether* to save and never changes what is saved — content with at least one
+visible character (e.g. `A\x00B`, a lone combining mark `U+309A`) is stored
+verbatim as below. Whitespace-only input keeps the plain `empty content`
+reason.
+
+> **⚠️ Why (v1.7.0, A10 encoding test)**: `str.strip()` removes whitespace but
+> not `U+0000` or `U+200B`, so a payload such as `\x00` or a lone zero-width
+> space was saved as a memory that displays as nothing, cannot be told apart
+> in `list_memories`, and only adds noise to search.
+
 **What is NOT sanitized (intentionally)** — the following code points
 **round-trip verbatim** through save and recall (consistent with the §3.11
 parent-document verbatim contract). They are preserved for display fidelity,
@@ -648,7 +666,8 @@ compatibility:
 - **C0 control characters including `U+0000` (NUL)** — Redis HSET / RediSearch
   HASH are binary-safe, so strings containing NUL round-trip unchanged. Input
   like `A\x00B` is stored as 3 characters (it does not collapse into the
-  empty-content rejection path).
+  empty-content rejection path). Content made **only** of such characters is
+  rejected (invisible-only contract above).
 - **Zero-width joiners and spacers** (`U+200B`, `U+200C`, `U+200D`, `U+FEFF`,
   …) — they may affect search-time tokenization (RediSearch behavior) but
   are kept in the stored body.
@@ -1122,7 +1141,7 @@ pytest tests/ -v -k "not TestEmbedding"
    - A 2-character string (e.g. `はい` / `ok`) passed to `save_memory` **is saved**.
    - Stock replies (`ok`, `yes`, `thanks`) passed to `save_memory` **are saved** (exact duplicates may be rejected server-side — if so, retry with a different string).
    - An updated fact (e.g. `The project budget is 100 dollars.` then `The project budget is 120 dollars.`) **is saved as a new entry** (no `near_duplicate`), and `search_memory` for it lists both with `saved=` times.
-   - Empty or whitespace-only input is rejected with `empty content`.
+   - Empty or whitespace-only input is rejected with `empty content`; input with no visible character (e.g. `\x00`, a lone `U+200B`) is rejected with `empty content (no visible characters)` (§3.13).
 
 6. **Bulk-delete-by-session test (`delete_memories_by_session`)**: Confirm that working memory belonging to a finished project/task can be wiped without waiting for the 7-day TTL.
    1. Pick a unique `session_id` (e.g. `eval-cleanup-YYYY-MM-DD`) and call `save_memory` several times under that session_id, covering **multiple shapes**:

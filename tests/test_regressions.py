@@ -597,3 +597,42 @@ class TestPluginHookSettingsErrors:
         out = self._run_main(tmp_path, monkeypatch, capsys)
         assert "cannot read it as JSON" in json.loads(out.out)["systemMessage"]
         assert sj.read_text(encoding="utf-8") == '{"permissions": {"allow": [}'
+
+
+# ── §3.13 invisible-only content (A10) ───────────────────────────────────────
+
+INVISIBLE_ONLY = ["\x00", "\x00\x00 \x1b", "\u200b", "\ufeff", "\u200b\u200d\u2060",
+                  "\ufe0f", "\U000E0100", "\u3000\x00"]
+VISIBLE = ["A\x00B", "ABC\u200bDEF", "\u309a", "\u309c", "\u30ab\u3099",
+           "\u795e\U000E0100 \u9ad9", "\u2764\ufe0f", "A\x1b[31mB\x7fC", "\uff8a\uff9f"]
+
+
+class TestHasVisibleText:
+    @pytest.mark.parametrize("text", INVISIBLE_ONLY + ["", "   \n\t"])
+    def test_invisible(self, text):
+        assert P.has_visible_text(text) is False
+
+    @pytest.mark.parametrize("text", VISIBLE)
+    def test_visible(self, text):
+        assert P.has_visible_text(text) is True
+
+
+@requires_redis
+class TestInvisibleOnlyRejected:
+    @pytest.mark.parametrize("text", INVISIBLE_ONLY)
+    def test_rejected_and_nothing_written(self, db, redis_client, fake_embed, text):
+        before = redis_client.dbsize()
+        res = db.save_memory(text)
+        assert res == {"status": "error", "saved": False,
+                       "reason": "empty content (no visible characters)"}
+        assert redis_client.dbsize() == before
+
+    def test_whitespace_only_keeps_plain_reason(self, db, fake_embed):
+        assert db.save_memory("  \n ")["reason"] == "empty content"
+
+    @pytest.mark.parametrize("text", VISIBLE)
+    def test_visible_content_stored_verbatim(self, db, redis_client, fake_embed, text):
+        res = db.save_memory(text)
+        assert res["saved"] is True
+        stored = redis_client.hget(f"mem:{res['id']}", "content").decode("utf-8")
+        assert stored == text

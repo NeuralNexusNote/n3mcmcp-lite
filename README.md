@@ -553,6 +553,10 @@ Same guards as the Free build, ported one-to-one:
 If a save payload consists entirely of surrogates, sanitization collapses
 it to the empty string and the regular empty-content rejection path
 applies — `{"status":"error","saved":false,"reason":"empty content"}`.
+Content with no visible character (only whitespace, control / format
+characters such as `\x00` or `U+200B`, separators or variation selectors) is
+rejected with `empty content (no visible characters)`. Everything else is
+stored verbatim, including NUL and zero-width characters inside visible text.
 
 ## Ranking formula
 
