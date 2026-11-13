@@ -23,7 +23,9 @@ import os
 from pathlib import Path
 
 import pytest
-from tests.conftest import requires_redis, REDIS_TEST_URL, REDIS_SKIP_REASON
+from tests.conftest import (
+    requires_redis, REDIS_TEST_URL, REDIS_SKIP_REASON, safe_flushdb, UNMARKED_REASON,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -94,9 +96,10 @@ class TestCrossSessionDatabaseLayer:
         """Flush DB 0 before and after every test in this class."""
         import redis as redis_lib
         r = redis_lib.Redis.from_url(self.REDIS_URL, decode_responses=False)
-        r.flushdb()
+        if not safe_flushdb(r):
+            pytest.skip(UNMARKED_REASON)
         yield
-        r.flushdb()
+        safe_flushdb(r)
 
     # ── tests ────────────────────────────────────────────────────────────────
 
@@ -253,9 +256,10 @@ class TestCrossSessionMCPSubprocess:
     def _flush(self):
         import redis as redis_lib
         r = redis_lib.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
-        r.flushdb()
+        if not safe_flushdb(r):
+            pytest.skip(UNMARKED_REASON)
         yield
-        r.flushdb()
+        safe_flushdb(r)
 
     def _run(self, coro):
         return asyncio.run(coro)

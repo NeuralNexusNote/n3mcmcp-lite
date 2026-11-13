@@ -127,6 +127,14 @@ This server does **not** run out of the box — you must prepare two things firs
    > persistence between sessions, it is reverted on the next Lite run.
    > The plain `docker run` above is sufficient — the server is the
    > source of truth for the ephemerality guarantee.
+   >
+   > **Use a dedicated Redis.** The server changes these settings only
+   > when the Redis holds nothing but N3MC keys. If it finds other data
+   > (a Redis you already use for something else), it leaves the
+   > persistence settings alone and shows a `shared_redis` notice — so it
+   > never makes another program lose data on the next Redis restart.
+   > N3MC Lite also needs **Redis Stack** (RediSearch); with plain Redis
+   > every tool answers with a hint to start Redis Stack.
 2. **[`uv`](https://docs.astral.sh/uv/) on your `PATH`** — required only for the Claude Code plugin / `uvx` install path. Not needed if you install from source.
 
 The server refuses to start if Redis is unreachable, and the Claude Code plugin will fail to launch without `uv`. Install both before running `/plugin install` or any client-side config.

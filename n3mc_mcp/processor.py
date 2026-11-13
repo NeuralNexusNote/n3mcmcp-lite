@@ -131,6 +131,9 @@ def sanitize_surrogates(text):
 
 
 _INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
+# v1.7.1 (Lite review LL5): letters with category Lo / So that render as
+# nothing — Hangul fillers and the braille blank.
+_BLANK_LETTERS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀"})
 
 
 def _is_variation_selector(ch: str) -> bool:
@@ -143,11 +146,12 @@ def has_visible_text(text: str) -> bool:
 
     Invisible = whitespace, control / format characters (Cc / Cf, e.g.
     U+0000, U+001B, U+200B, U+FEFF), separators (Zs / Zl / Zp) and variation
-    selectors. Only decides whether save_memory accepts the content; the
+    selectors, plus the blank-looking letters U+115F, U+1160, U+3164, U+FFA0
+    (Hangul fillers) and U+2800 (braille blank) (v1.7.1). Only decides whether save_memory accepts the content; the
     stored content is never changed by this check.
     """
     for ch in text:
-        if ch.isspace() or _is_variation_selector(ch):
+        if ch.isspace() or _is_variation_selector(ch) or ch in _BLANK_LETTERS:
             continue
         if unicodedata.category(ch) in _INVISIBLE_CATEGORIES:
             continue
@@ -205,19 +209,43 @@ def import_backend() -> None:
 # MODEL_RETRY_SECONDS. Without this, an offline first run retried the
 # Hugging Face download inside every tool call (~12-24 s per call).
 MODEL_RETRY_SECONDS = 60
+# Spec §3.9 step 4 (v1.7.1, decision LD4): a tool call waits at most this
+# long for the model lock while the background load holds it; after that it
+# continues keyword-only with the "still loading" notice.
+MODEL_WAIT_SECONDS = 20
 _model_error: Optional[str] = None
 _model_failed_at: float = 0.0
+# True while the last call gave up waiting for the background load.
+_model_still_loading: bool = False
+
+_DEFAULT_WAIT = object()
 
 
-def get_model():
-    global _model, _model_error, _model_failed_at
+def get_model(wait=_DEFAULT_WAIT):
+    """Return the model, or None when it is unavailable.
+
+    *wait*: seconds to wait for the model lock (default: MODEL_WAIT_SECONDS,
+    read at call time). None waits without limit (the background preload).
+    """
+    global _model, _model_error, _model_failed_at, _model_still_loading
     if _model is not None:
         return _model
     if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
         return None
-    with _model_lock:
+    if wait is _DEFAULT_WAIT:
+        wait = MODEL_WAIT_SECONDS
+    if wait is None:
+        acquired = _model_lock.acquire()
+    else:
+        acquired = _model_lock.acquire(timeout=max(0.0, float(wait)))
+    if not acquired:
+        # The background load still holds the lock (e.g. first-run download).
+        _model_still_loading = True
+        return None
+    try:
         if _model is None:
             if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
+                _model_still_loading = False
                 return None
             try:
                 with _silenced_stdout():
@@ -231,6 +259,9 @@ def get_model():
                       f"- retrying in {MODEL_RETRY_SECONDS}s. "
                       "Check the network / proxy (the first start downloads it "
                       "from Hugging Face).", file=sys.stderr)
+        _model_still_loading = False
+    finally:
+        _model_lock.release()
     return _model
 
 
@@ -239,8 +270,25 @@ def model_status() -> tuple[bool, Optional[str]]:
     return _model is not None, (None if _model is not None else _model_error)
 
 
+def model_still_loading_message() -> str:
+    """Spec §3.9 step 4 (v1.7.1): text when a call gave up waiting for the load."""
+    return (
+        f"The embedding model ({_model_name}) is still loading (the first start "
+        "downloads ~440 MB), so this search used keywords only and new entries "
+        "are saved without vectors. Retry in a minute."
+    )
+
+
 def model_unavailable_message() -> Optional[str]:
-    """Degraded-mode text (English) or None when the model is fine / not yet tried."""
+    """Degraded-mode text (English) or None when the model is fine / not yet tried.
+
+    v1.7.1: while the last call gave up waiting for the background load
+    (MODEL_WAIT_SECONDS), the "still loading" text is returned.
+    """
+    if _model is not None:
+        return None
+    if _model_still_loading:
+        return model_still_loading_message()
     loaded, error = model_status()
     if loaded or not error:
         return None
@@ -377,10 +425,10 @@ def prepare_query(text: str) -> str:
 def drop_lone_cjk_tokens(fts_query: str) -> str:
     """Drop single-character space-less-script tokens from a cleaned query.
 
-    RediSearch ANDs query terms. After punctuation stripping, a one-character
-    CJK run such as the particle `は` in `「記憶装置」は？` stays a lone token
-    (`記憶 憶装 装置 は`); it only matches a document whose content_ngram has
-    that character standing alone, so it zeroes the whole BM25 leg. Lone
+    After punctuation stripping, a one-character CJK run such as the particle
+    `は` in `「記憶装置」は？` stays a lone token (`記憶 憶装 装置 は`). With
+    the terms ORed (v1.7.1) such a particle would match almost every Japanese
+    record (before v1.7.1, ANDed, it zeroed the whole BM25 leg). Lone
     tokens are dropped when at least one other token remains (a query that
     is a single character is kept as is). Applied by Database._bm25_search
     on top of `prepare_query`, whose output stays exactly as in spec §3.7.
@@ -463,11 +511,12 @@ def chunk_text(text: str, threshold: int, overlap: int) -> list[str]:
         if cut != -1:
             # Soft cut: clean semantic boundary — start fresh after it.
             chunks.append(text[start:cut])
-            start = cut
+            start = max(start + 1, cut)
         else:
             # Hard cut: no break found — overlap next window for context.
             chunks.append(text[start:end])
-            start = end - overlap
+            # v1.7.1 (LM2): always advance, even if overlap >= threshold.
+            start = max(start + 1, end - overlap)
     return chunks
 
 
@@ -535,7 +584,23 @@ def final_score(
     return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b_local * b_session
 
 
+def filter_score(cos_sim: float, kw_rel: float, b_local: float) -> float:
+    """What the floors judge (spec §3.6 `filter_score`, v1.7.1 decision LD1).
+
+    filter_score = (cos_sim × 0.7 + kw_rel × 0.3) × b_local  (+ rerank boost)
+    No time_decay and no b_session: they decide the order, not whether a
+    record is shown. Used by min_score and the relative cut (§3.14 step 5).
+    """
+    return (cos_sim * 0.7 + kw_rel * 0.3) * b_local
+
+
 # ── lexical reranker (spec §3.6) ─────────────────────────────────────────────
+
+def rerank_tokens(text: str) -> set:
+    """Token set for the lexical rerank (spec §3.6, v1.7.1): `prepare_query`
+    tokens, lower-cased. Same function for the query and the content."""
+    return set(prepare_query(text).lower().split())
+
 
 def lexical_rerank(
     results: list[dict],
@@ -549,30 +614,31 @@ def lexical_rerank(
       coverage × weight         (fraction of query tokens present in content)
       phrase_weight             (added when the full query string is a substring)
 
-    CJK bigram tokens are added to both token sets so Japanese/Chinese queries
-    contribute a real coverage signal rather than degenerating to a binary match.
+    v1.7.1 (LM8): the query and the content are both tokenized with
+    `prepare_query` (§3.7) — NFKC, control characters and punctuation to
+    spaces, CJK bigrams, lower-cased — so `note,` counts as `note`.
+    v1.7.1 (LD1): the boost is added to `score` and, when present, to
+    `filter_score`.
     """
     if not query.strip() or not results:
         return results
 
-    # NFKC + lowercase the query once. cjk_bigram_expand normalizes again
-    # internally; the redundant pass costs nothing and keeps both sides
-    # symmetric when the query has compat-form characters.
     query_lower = normalize_text(query).lower()
-    query_tokens = set(query_lower.split())
-    query_tokens |= set(cjk_bigram_expand(query_lower).split())
+    query_tokens = rerank_tokens(query_lower)
 
     for r in results:
         content_lower = normalize_text(r.get("content", "")).lower()
-        content_tokens = set(content_lower.split())
-        content_tokens |= set(cjk_bigram_expand(content_lower).split())
+        content_tokens = rerank_tokens(content_lower)
         coverage = len(query_tokens & content_tokens) / max(1, len(query_tokens))
         phrase_bonus = phrase_weight if query_lower in content_lower else 0.0
         # Short-document dampening: docs shorter than 50 chars receive a
         # proportional fraction of the lexical boost to reduce false-positive
         # promotion of tiny snippets that happen to contain all query tokens.
         length_factor = min(1.0, len(content_lower) / 50) if len(content_lower) < 50 else 1.0
-        r["score"] = r.get("score", 0.0) + (coverage * weight + phrase_bonus) * length_factor
+        boost = (coverage * weight + phrase_bonus) * length_factor
+        r["score"] = r.get("score", 0.0) + boost
+        if r.get("filter_score") is not None:
+            r["filter_score"] = r["filter_score"] + boost
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
 
@@ -711,28 +777,45 @@ def order_versions_newest_first(
         group_no += 1
         positions = sorted(members)
         slot_scores = [rows[p].get("score", 0.0) for p in positions]
+        # v1.7.1: filter_score moves with the position, like score.
+        slot_filters = [rows[p].get("filter_score") for p in positions]
         newest_first = sorted(
             (rows[p] for p in positions), key=_row_sort_key, reverse=True
         )
-        for pos, score, row in zip(positions, slot_scores, newest_first):
+        for pos, score, fscore, row in zip(positions, slot_scores, slot_filters,
+                                           newest_first):
             moved = dict(row)
             moved["score"] = score
+            if fscore is not None:
+                moved["filter_score"] = fscore
+            else:
+                moved.pop("filter_score", None)
             moved["_version_group"] = group_no
             out[pos] = moved
     return out
 
 
+def judged_score(row: dict) -> float:
+    """The value the floors judge: `filter_score`, or `score` when absent."""
+    v = row.get("filter_score")
+    if v is None:
+        v = row.get("score", 0.0)
+    return float(v)
+
+
 def relative_cut(rows: list[dict], ratio: float) -> list[dict]:
-    """Drop rows scoring below `ratio × top score` (spec §3.14 step 5).
+    """Drop rows whose `filter_score` is below `ratio × the highest
+    filter_score` (spec §3.14 step 5, v1.7.1). Rows without `filter_score`
+    are judged on `score`.
 
     Rows marked `_version_group` are always kept (old versions stay visible
     next to the new one). `ratio <= 0` disables the cut. Order is preserved.
     """
     if not rows or not ratio or ratio <= 0:
         return list(rows)
-    top = max(float(r.get("score", 0.0)) for r in rows)
+    top = max(judged_score(r) for r in rows)
     floor = ratio * top
     return [
         r for r in rows
-        if r.get("_version_group") or float(r.get("score", 0.0)) >= floor
+        if r.get("_version_group") or judged_score(r) >= floor
     ]

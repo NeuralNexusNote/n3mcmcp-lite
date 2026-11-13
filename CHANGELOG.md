@@ -15,7 +15,50 @@ _Nothing yet._
 
 Spec v1.6.0 → v1.7.0 (JP/EN). Fixes found while running the Pro edition
 (2026-11-12 memo), applied to Lite through the specification; code
-regenerated from the EN spec.
+regenerated from the EN spec. Then spec v1.7.0 → v1.7.1: fixes from the
+2026-11-13 code review of this release (decisions LD1–LD5), still
+unreleased, so the package version stays 1.10.0.
+
+### Fixed (spec v1.7.1, code review)
+- **Older records disappeared from search**: `min_score` and the relative
+  cut compared the final score, which includes `time_decay` (3-day
+  half-life) and `b_session` (0.6). A record about two days older than the
+  top hit, and every record saved before the MCP server restarted, was cut.
+  Both floors now use the score without those two factors; the order is
+  unchanged.
+- **A paused Redis froze the server**: only a connect timeout was set, so a
+  Redis that accepted the connection but never answered blocked every tool
+  call. Reads and writes now time out after 5 s and are handled like a lost
+  connection.
+- **Two servers starting together got different `owner_id`s**, and the
+  memories saved by one of them were invisible afterwards. `config.json` is
+  created exclusively and every write is atomic.
+- **A long save that failed half-way left an unsearchable document** that
+  blocked re-saving for 7 days. All chunk embeddings are computed first and
+  parent, guard and chunks are written in one pipeline.
+- **Numeric config values were not range-checked**: `chunk_overlap >=
+  chunk_threshold` looped forever, `ttl_seconds: 604800.5` broke every save,
+  `embedding_dim: 768.0` stopped the server. Out-of-range values are now
+  ignored with a `config_type` notice, and chunking always advances.
+- **A Redis without RediSearch ended the process at start**. The server now
+  stays up and every tool explains that Redis Stack is required.
+- **Persistence was turned off on any Redis it connected to**. Only an empty
+  or N3MC-only Redis is changed now; otherwise a `shared_redis` notice.
+- **Tool calls waited for the first-run model download**. They wait at most
+  20 s, then continue keyword-only with a notice.
+- **`list_memories` missed standalone memories after a long document**,
+  **dedup guards expired while their record lived on**, **sentence-like
+  queries had no keyword hits** (terms are ORed now), **unreadable
+  `since` / `until` were ignored** (they are errors now; offset-less values
+  are local time).
+- **Smaller fixes**: `repair_memory` adds missing vectors; `delete_memory`
+  checks the owner; no ghost keys from `access_count`; Hangul fillers count
+  as invisible; tests refuse to flush a DB with data and no test marker;
+  plugin hook writes `settings.json` atomically and its fallback text also
+  names a failed script; `index_dim_mismatch` notice; a warning on saves
+  while `config.json` is unreadable; atomic dedup guard (`SET NX`); a notice
+  added later in the process (e.g. `shared_redis` after a reconnect) is shown
+  on the next search instead of never.
 
 ### Fixed
 - **Updated facts were silently dropped**: `save_memory` rejected a new

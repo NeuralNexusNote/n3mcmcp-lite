@@ -1,9 +1,11 @@
 """Shared fixtures (spec §9).
 
-SAFETY (v1.7.0): the suite FLUSHDBs DB 0 of the Redis it uses. There is no
+SAFETY (v1.7.0 / v1.7.1): the suite FLUSHDBs DB 0 of the Redis it uses. There is no
 default test URL — Redis tests run only against the dedicated instance named
 by N3MC_REDIS_TEST_URL, and never against the live `redis_url` of the user's
-config.json / N3MC_REDIS_URL. v1.6.x defaulted to redis://localhost:6379/0,
+config.json / N3MC_REDIS_URL. v1.7.1: before EVERY flush the DB must be
+empty or carry the marker key `__n3mc_test_db__` (set right after each
+flush); an unmarked DB with data is never flushed. v1.6.x defaulted to redis://localhost:6379/0,
 the same Redis the MCP server uses, so a plain `pytest` wiped working memory.
 """
 import json
@@ -35,12 +37,34 @@ def _live_redis_urls() -> set:
         from n3mc_mcp.paths import get_config_path
         path = get_config_path()
         if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig like the server (v1.7.1): a BOM must not hide redis_url.
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict) and isinstance(data.get("redis_url"), str):
                 urls.add(data["redis_url"])
     except Exception:
         pass
     return {_norm_url(u) for u in urls}
+
+
+# v1.7.1 (Lite review LL6): second guard — the DB itself. Flush only an empty
+# DB or one carrying this marker; set the marker right after every flush.
+TEST_DB_MARKER = "__n3mc_test_db__"
+UNMARKED_REASON = ("N3MC_REDIS_TEST_URL points at a Redis that holds data and "
+                   "is not marked as a test DB")
+
+
+def is_flushable(r) -> bool:
+    return r.dbsize() == 0 or bool(r.exists(TEST_DB_MARKER))
+
+
+def safe_flushdb(r) -> bool:
+    """FLUSHDB only if the DB is empty or marked; then set the marker.
+    Returns False (and flushes nothing) for an unmarked DB with data."""
+    if not is_flushable(r):
+        return False
+    r.flushdb()
+    r.set(TEST_DB_MARKER, b"1")
+    return True
 
 
 def _skip_reason() -> str:
@@ -53,6 +77,8 @@ def _skip_reason() -> str:
     try:
         r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
         r.ping()
+        if not is_flushable(r):
+            return UNMARKED_REASON
     except Exception as e:
         return f"Redis Stack not reachable at N3MC_REDIS_TEST_URL ({e})"
     return ""
@@ -70,9 +96,10 @@ def redis_client():
     if REDIS_SKIP_REASON:
         pytest.skip(REDIS_SKIP_REASON)
     r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
-    r.flushdb()
+    if not safe_flushdb(r):
+        pytest.skip(UNMARKED_REASON)
     yield r
-    r.flushdb()
+    safe_flushdb(r)
 
 
 @pytest.fixture
