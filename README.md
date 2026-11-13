@@ -449,16 +449,16 @@ has no per-tool permission gate, so this step is not needed there.
 ## Data location
 
 The Lite build does not store a database on disk — memories live in
-Redis and expire automatically. Only a small `config.json` sits in the
-platform-standard user data directory:
-
-| OS      | Path                                                       |
-| ------- | ---------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                       |
-| macOS   | `~/Library/Application Support/n3mc-workingmemory/`        |
-| Linux   | `~/.local/share/n3mc-workingmemory/`                       |
-
+Redis and expire automatically. Only a small `config.json` sits in
+`~/.n3mc-workingmemory/` (Windows: `%USERPROFILE%\.n3mc-workingmemory\`).
 Override with the `N3MC_DATA_DIR` environment variable.
+
+Since v1.10.0 the file is in the home directory instead of the platform
+app-data directory: the Microsoft Store build of the Claude desktop app
+redirects `%LOCALAPPDATA%` for the MCP servers it starts, which gave one PC
+two configs and two `owner_id`s, so memories saved from the desktop app
+were invisible to `claude` in a terminal. On first start the old config is
+copied over once (the old file is left in place).
 
 ## Configuration
 

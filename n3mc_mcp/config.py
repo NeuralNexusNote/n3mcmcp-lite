@@ -17,7 +17,7 @@ import sys
 import uuid
 from typing import Any
 
-from .paths import get_config_path
+from .paths import get_config_path, get_legacy_config_path
 
 # Complete schema from spec §6 — all fields with their defaults.
 # (`dedup_threshold` and `context_char_limit` were removed in v1.7.0; if an
@@ -107,8 +107,30 @@ def _defaults_with_fresh_ids() -> dict[str, Any]:
     return cfg
 
 
+def _migrate_legacy_config(path) -> None:
+    """Spec §7 (v1.7.0): copy the v1.6.x config once, byte-for-byte.
+
+    Only when the new file is missing and N3MC_DATA_DIR is not set. The
+    legacy file is left in place. Failures are logged and ignored (a new
+    config is then created as usual).
+    """
+    if path.exists() or os.environ.get("N3MC_DATA_DIR"):
+        return
+    legacy = get_legacy_config_path()
+    try:
+        if not legacy.is_file():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(legacy.read_bytes())
+        print(f"[n3mc] config migrated from {legacy} to {path} "
+              "(the old file was left in place)", file=sys.stderr)
+    except Exception as e:
+        print(f"[n3mc] config migration from {legacy} failed: {e}", file=sys.stderr)
+
+
 def load_config() -> dict[str, Any]:
     path = get_config_path()
+    _migrate_legacy_config(path)
     notices: list[str] = []
     file_data: dict[str, Any] | None = None   # what is (or will be) on disk
     persist = False

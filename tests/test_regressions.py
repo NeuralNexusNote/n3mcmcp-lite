@@ -362,3 +362,53 @@ class TestRedisAvailabilityLive:
         out = _call("search_memory", {"query": "anything"})
         assert out.startswith("Error: memory backend unreachable."), out
         assert db._ok is False
+
+
+# ── §7 config location: home dir + one-time migration (MSIX redirect fix) ────
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    from pathlib import Path
+    import n3mc_mcp.paths as paths
+    home = tmp_path / "home"
+    legacy = tmp_path / "legacy" / "config.json"
+    home.mkdir()
+    monkeypatch.delenv("N3MC_DATA_DIR", raising=False)
+    monkeypatch.delenv("N3MC_REDIS_URL", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(paths, "get_legacy_config_path", lambda: legacy)
+    monkeypatch.setattr(C, "get_legacy_config_path", lambda: legacy)
+    return home, legacy
+
+
+class TestConfigLocation:
+    def test_default_is_home_dir(self, fake_home):
+        home, _ = fake_home
+        from n3mc_mcp.paths import get_config_path
+        assert get_config_path() == home / ".n3mc-workingmemory" / "config.json"
+
+    def test_legacy_config_migrated_once_byte_for_byte(self, fake_home):
+        home, legacy = fake_home
+        legacy.parent.mkdir(parents=True)
+        raw = json.dumps({"owner_id": "legacy-owner", "local_id": "legacy-local",
+                          "ttl_seconds": 3600}, indent=2).encode("utf-8")
+        legacy.write_bytes(raw)
+        cfg = C.load_config()
+        assert cfg["owner_id"] == "legacy-owner" and cfg["ttl_seconds"] == 3600
+        new = home / ".n3mc-workingmemory" / "config.json"
+        assert new.exists() and legacy.read_bytes() == raw          # legacy kept
+        legacy.write_text('{"owner_id": "changed-later"}', encoding="utf-8")
+        assert C.load_config()["owner_id"] == "legacy-owner"         # not re-migrated
+
+    def test_no_legacy_creates_new_config(self, fake_home):
+        home, _ = fake_home
+        cfg = C.load_config()
+        assert (home / ".n3mc-workingmemory" / "config.json").exists()
+        assert cfg["owner_id"]
+
+    def test_data_dir_override_skips_migration(self, fake_home, tmp_path, monkeypatch):
+        _, legacy = fake_home
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text('{"owner_id": "legacy-owner", "local_id": "l"}', encoding="utf-8")
+        monkeypatch.setenv("N3MC_DATA_DIR", str(tmp_path / "override"))
+        assert C.load_config()["owner_id"] != "legacy-owner"

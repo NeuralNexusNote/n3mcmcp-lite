@@ -163,7 +163,7 @@ n3memorycore-mcp-lite/
 │   ├── database.py                 # Redis 層：インデックス・CRUD・TTL・重複判定
 │   ├── processor.py                # 埋め込み・ランキング・CJK トークナイズ・リランカー
 │   ├── config.py                   # config.json 読み書き + UUID 生成
-│   └── paths.py                    # platformdirs 基準の設定保存場所
+│   └── paths.py                    # 設定の場所（~/.n3mc-workingmemory/）と、引き継ぎ用の旧来の platformdirs の場所
 ├── tests/
 │   ├── conftest.py                 # Redis Stack 未起動時は自動スキップ
 │   ├── test_database.py
@@ -174,7 +174,7 @@ n3memorycore-mcp-lite/
     └── claude_code_mcp.json
 ```
 
-`config.json` は **ユーザーデータディレクトリ** に置かれます（[§7](#7-データ保存先) 参照）。ディスク上に DB ファイルは存在しません — メモリ状態は Redis 内にのみ存在します。
+`config.json` は **`~/.n3mc-workingmemory/`** に置かれます（[§7](#7-データ保存先) 参照）。ディスク上に DB ファイルは存在しません — メモリ状態は Redis 内にのみ存在します。
 
 ---
 
@@ -201,6 +201,7 @@ n3memorycore-mcp-lite/
 > | 11 | テストをライブの Redis に向ける | `FLUSHDB` がユーザーのワーキングメモリを消す | テストは `N3MC_REDIS_TEST_URL` にのみ接続し、既定値は持たない | [§9](#9-テストpytest) |
 > | 12 | BM25 クエリに制御文字・CJK 句読点が残る | `Syntax error`（BM25 が黙って抜ける）／`「記憶装置」は？` で BM25 ヒット 0 件 | 制御文字 → 空白、CJK・全角句読点も除去 | [§3.7](#37-トークナイズと句読点処理) |
 > | 13 | Redis を起動時にしか確かめない／接続エラーを握りつぶす | `docker start redis-stack` のあとも Redis が止まっていると言い続ける／あとから止まった Redis で `_No memories found._` | 毎回のツールの前に `ensure_connected()`（PING／つなぎ直し）、`ConnectionError` / `TimeoutError` は送り出す | [§3.9](#39-起動シーケンスと自己回復) |
+> | 14 | 設定を `%LOCALAPPDATA%` に置く | ストア（MSIX）版 Claude デスクトップアプリは MCP サーバーの `%LOCALAPPDATA%` を振り替える → `config.json` と `owner_id` が 2 つになり、デスクトップアプリで保存した記憶がターミナルの `claude` から見えない（逆も） | 設定は `~/.n3mc-workingmemory/`（振り替えの対象外）に置き、1 回だけ引き継ぐ | [§7](#7-データ保存先) |
 
 ### 3.1 ID 階層
 
@@ -453,6 +454,7 @@ def drop_lone_cjk_tokens(q: str) -> str:
 
 1. **設定読み込み**（`load_config()`）：
    - データディレクトリから `config.json` を読み込む。
+   - 設定は `~/.n3mc-workingmemory/config.json` に置く。v1.6.x から更新して最初に起動したときは、旧来の場所から引き継ぐ（[§7](#7-データ保存先)）。
    - **ユーザーが書き間違えた `config.json` を上書きしない**（v1.6.x は読めないファイルを既定値で置き換え、ユーザーの設定を失わせていた）。[§6](#6-設定) の表を参照：読めないファイルは変更せず、このプロセスでは既定値とメモリ上の UUID で動く。型の誤った項目は個別に無視する。Pro 版（公開予定）と違い、Lite では DB からの ID 回復を**試みない** — Redis は TTL 切れで空かもしれないため。
    - `N3MC_REDIS_URL` 環境変数のオーバーライドを適用（ファイルより優先）。
    - ファイルが読めて欠損フィールドがある場合は、既定値で埋めて保存。
@@ -851,18 +853,16 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 ## 7. データ保存先
 
-既定ではディスク上には `config.json` のみ：
+既定では、ディスク上に置くのは `config.json` だけで、場所は **`~/.n3mc-workingmemory/`**（ユーザーのホームフォルダ。Windows では `%USERPROFILE%\.n3mc-workingmemory\`）。環境変数 `N3MC_DATA_DIR`（絶対パス）で上書きできる。
 
-| OS      | パス                                                         |
-| ------- | ------------------------------------------------------------ |
-| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                         |
-| macOS   | `~/Library/Application Support/n3mc-workingmemory/`          |
-| Linux   | `~/.local/share/n3mc-workingmemory/`                         |
+データフォルダ内のファイル：
+- `config.json` — 設定（ディスク上の唯一の成果物）
 
-データディレクトリ内のファイル：
-- `config.json` — 設定（唯一のディスク上成果物）
+> **⚠️ アプリ用のデータフォルダではなくホームフォルダに置く理由（v1.7.0）**：v1.6.x までは、設定を OS 標準のユーザーデータフォルダ（Windows では `platformdirs` による `%LOCALAPPDATA%\n3mc-workingmemory\n3mc-workingmemory\`）に置いていた。Microsoft Store（MSIX）版の Claude デスクトップアプリは、起動した MCP サーバーをパッケージの中で動かすので、Windows はその **`%LOCALAPPDATA%` 以下の読み書きを** `%LOCALAPPDATA%\Packages\<パッケージ>\LocalCache\Local\…` **に振り替える**。そのため同じ PC に `config.json` が 2 つでき、`owner_id` も 2 つになった（デスクトップアプリが起動したサーバー用と、ターミナルの `claude` やスクリプトが起動したサーバー用）。検索と一覧は `owner_id` で絞る（§3.12）ので、同じ Redis なのに、一方で保存した記憶がもう一方から見えなかった。ホームフォルダは振り替えの対象外なので、どこから起動しても同じファイルを読む。
 
-環境変数 `N3MC_DATA_DIR`（絶対パス）で上書き可能。Redis 状態は Redis コンテナが置く場所（既定では無名 Docker ボリュームで、`docker rm -f redis-stack` で消える）に保存される。
+**引き継ぎ（1 回だけ）**：`~/.n3mc-workingmemory/config.json` がなく、`N3MC_DATA_DIR` も設定されていないとき、`load_config()` は旧来の場所（起動したプロセスから見た `platformdirs.user_data_dir("n3mc-workingmemory")` + `config.json`）のファイルを、新しい場所へバイト単位でそのまま写し、`stderr` に 1 行出す。旧来のファイルは残す。どちらの `owner_id` が残るかは、更新後に最初に起動したプロセスで決まる。もう一方の `owner_id` で保存した記録（長くても `ttl_seconds` の 7 日分）は結果に出なくなり、そのまま期限で消える。旧来のファイルもなければ、これまでどおり新しい設定を作る。
+
+Redis 状態は Redis コンテナが置く場所（既定では無名 Docker ボリュームで、`docker rm -f redis-stack` で消える）に保存される。
 
 ---
 

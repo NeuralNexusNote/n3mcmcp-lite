@@ -435,16 +435,15 @@ AI が停止します（ユーザーが席を外していれば動作不能）�
 ## データ保存先
 
 Lite 版はディスク上に DB を持ちません。メモリは Redis に保存され、
-自動で失効します。ディスクには小さな `config.json` だけがプラット
-フォーム標準のユーザーデータディレクトリに置かれます：
-
-| OS      | パス                                                        |
-| ------- | ----------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                        |
-| macOS   | `~/Library/Application Support/n3mc-workingmemory/`         |
-| Linux   | `~/.local/share/n3mc-workingmemory/`                        |
-
+自動で失効します。ディスクには小さな `config.json` だけが
+`~/.n3mc-workingmemory/`（Windows では `%USERPROFILE%\.n3mc-workingmemory\`）に置かれます。
 環境変数 `N3MC_DATA_DIR` で上書き可能です。
+
+v1.10.0 から、OS 標準のアプリ用データフォルダではなくホームフォルダに置きます。
+Microsoft Store 版の Claude デスクトップアプリは、起動した MCP サーバーの
+`%LOCALAPPDATA%` を別の場所に振り替えるため、同じ PC で設定と `owner_id` が 2 つに
+分かれ、デスクトップアプリで保存した記憶がターミナルの `claude` から見えませんでした。
+最初の起動のときに、旧来の設定を 1 回だけ写します（旧来のファイルは残します）。
 
 ## 設定
 

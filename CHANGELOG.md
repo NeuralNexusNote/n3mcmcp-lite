@@ -51,6 +51,13 @@ regenerated from the EN spec.
   PINGs / reconnects first (`ensure_connected()`), connection errors inside a
   tool are reported as the backend error, and the hint is English and shows
   the host:port from `redis_url` (no password).
+- **Memories split by launcher on Windows** (spec §7): the config lived in
+  `%LOCALAPPDATA%`, which the Microsoft Store (MSIX) Claude desktop app
+  redirects for the MCP servers it starts. One PC had two `config.json`
+  files and two `owner_id`s, so memories saved from the desktop app were
+  invisible to `claude` in a terminal (and vice versa) on the same Redis.
+  The config now lives in `~/.n3mc-workingmemory/` and the old file is
+  copied over once on first start.
 - **Startup model load split in two** (spec §3.9): the embedding library is
   imported synchronously before stdio starts, and only the model is built in
   the background. Importing it in the background after stdio starts (as the

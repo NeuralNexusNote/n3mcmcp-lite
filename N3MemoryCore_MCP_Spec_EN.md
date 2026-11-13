@@ -164,7 +164,7 @@ n3memorycore-mcp-lite/
 │   ├── database.py                 # Redis layer: index, CRUD, TTL, dedup
 │   ├── processor.py                # Embedding, ranking, CJK tokenization, reranker
 │   ├── config.py                   # config.json load/save + UUID generation
-│   └── paths.py                    # platformdirs-based config location
+│   └── paths.py                    # config location (~/.n3mc-workingmemory/) + legacy platformdirs path for migration
 ├── tests/
 │   ├── conftest.py                 # Skips if Redis Stack not reachable
 │   ├── test_database.py
@@ -175,7 +175,7 @@ n3memorycore-mcp-lite/
     └── claude_code_mcp.json
 ```
 
-`config.json` lives in a **user data directory** (see [§7](#7-data-location)). No database file exists on disk — memory state lives entirely in Redis.
+`config.json` lives in **`~/.n3mc-workingmemory/`** (see [§7](#7-data-location)). No database file exists on disk — memory state lives entirely in Redis.
 
 ---
 
@@ -202,6 +202,7 @@ n3memorycore-mcp-lite/
 > | 11 | Tests pointed at the live Redis | `FLUSHDB` wipes the user's working memory | Tests run only against `N3MC_REDIS_TEST_URL`; there is no default | [§9](#9-testing-pytest) |
 > | 12 | Control characters / CJK punctuation left in the BM25 query | `Syntax error` (BM25 silently skipped) / 0 BM25 hits for `「記憶装置」は？` | Control chars → space; strip CJK and full-width punctuation too | [§3.7](#37-text-tokenization--punctuation-handling) |
 > | 13 | Redis checked only at startup / connection errors swallowed | After `docker start redis-stack` the server still says Redis is down; a Redis that stops later yields `_No memories found._` | `ensure_connected()` (PING / reconnect) before every tool; re-raise `ConnectionError` / `TimeoutError` | [§3.9](#39-startup-sequence--self-recovery) |
+> | 14 | Config in `%LOCALAPPDATA%` | The Store (MSIX) Claude desktop app redirects its MCP servers' `%LOCALAPPDATA%` → two `config.json`, two `owner_id`s; memories saved from the desktop app are invisible to terminal `claude` and vice versa | Keep the config in `~/.n3mc-workingmemory/` (not redirected); migrate once | [§7](#7-data-location) |
 
 ### 3.1 ID Hierarchy
 
@@ -456,6 +457,7 @@ The server's `_startup()` runs these steps in order, **before** the stdio loop b
 
 1. **Load config** (`load_config()`):
    - Read `config.json` from the data directory.
+   - The config lives in `~/.n3mc-workingmemory/config.json`; on first start after upgrading from v1.6.x it is migrated from the legacy platform directory ([§7](#7-data-location)).
    - **Never overwrite a `config.json` the user mistyped** (v1.6.x replaced an unreadable file with defaults, losing the user's settings). See the table in [§6](#6-configuration): an unreadable file is left untouched and the server runs on defaults with in-memory UUIDs for this process; a wrongly typed item is ignored individually. Unlike the forthcoming Pro build, the Lite does **not** attempt DB-based ID recovery — Redis may already be empty (TTL-expired).
    - Apply `N3MC_REDIS_URL` env-var override (takes precedence over the file).
    - If the file is readable and a field is missing, fill with defaults and persist.
@@ -859,18 +861,14 @@ Complete schema (missing fields auto-filled with defaults below):
 
 ## 7. Data Location
 
-By default, only `config.json` lives on disk:
-
-| OS      | Path                                                        |
-| ------- | ----------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                        |
-| macOS   | `~/Library/Application Support/n3mc-workingmemory/`         |
-| Linux   | `~/.local/share/n3mc-workingmemory/`                        |
+By default, only `config.json` lives on disk, in **`~/.n3mc-workingmemory/`** (the user's home directory; on Windows `%USERPROFILE%\.n3mc-workingmemory\`). Override via the environment variable `N3MC_DATA_DIR` (absolute path).
 
 Files inside the data directory:
 - `config.json` — configuration (the only on-disk artifact)
 
-Override via the environment variable `N3MC_DATA_DIR` (absolute path). Redis state lives wherever the Redis container stores it (by default, an anonymous Docker volume that vanishes with `docker rm -f redis-stack`).
+> **⚠️ Why the home directory, not the platform app-data directory (v1.7.0)**: up to v1.6.x the config lived in the platform user-data directory (`%LOCALAPPDATA%\n3mc-workingmemory\n3mc-workingmemory\` on Windows, via `platformdirs`). The Microsoft Store (MSIX) build of the Claude desktop app runs the MCP servers it launches inside its package container, and Windows **redirects their reads and writes under `%LOCALAPPDATA%`** to `%LOCALAPPDATA%\Packages\<package>\LocalCache\Local\…`. The same PC therefore had two `config.json` files with two different `owner_id`s — one for servers launched by the desktop app, one for servers launched from a terminal (`claude`, scripts) — and because search and list filter by `owner_id` (§3.12), memories saved from one were invisible to the other, on the same Redis. The home directory is not redirected, so every launcher reads the same file.
+
+**Migration (once)**: when `~/.n3mc-workingmemory/config.json` does not exist (and `N3MC_DATA_DIR` is not set), `load_config()` copies the legacy file from the platform user-data directory (`platformdirs.user_data_dir("n3mc-workingmemory")` + `config.json`, as seen by the starting process) byte-for-byte to the new location, prints one line to `stderr`, and leaves the legacy file in place. The first process to start after the upgrade decides which `owner_id` is kept; entries saved under the other `owner_id` (at most `ttl_seconds`, 7 days, old) stop appearing in results and expire on their own. If no legacy file exists, a new config is created as usual. Redis state lives wherever the Redis container stores it (by default, an anonymous Docker volume that vanishes with `docker rm -f redis-stack`).
 
 ---
 
