@@ -32,11 +32,12 @@ jobs:
     # Redis Stack as a sidecar — RediSearch is required and only DB 0 is
     # indexable, so we point N3MC_REDIS_TEST_URL at db=0 (conftest.py
     # FLUSHDBs it before/after each test, hence "dedicated container only").
+    # Mapped to 6390: conftest refuses the live/default 6379 (spec §9).
     services:
       redis-stack:
         image: redis/redis-stack-server:latest
         ports:
-          - 6379:6379
+          - 6390:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -44,7 +45,7 @@ jobs:
           --health-retries 10
 
     env:
-      N3MC_REDIS_TEST_URL: redis://localhost:6379/0
+      N3MC_REDIS_TEST_URL: redis://localhost:6390/0
       # Pin HF cache so the embedding model is reused across runs.
       HF_HOME: ~/.cache/huggingface
       # Avoid sentence-transformers' progress bars on stdout (matters for
@@ -77,7 +78,7 @@ jobs:
         run: |
           python - <<'PY'
           import redis
-          r = redis.Redis.from_url("redis://localhost:6379/0")
+          r = redis.Redis.from_url("redis://localhost:6390/0")
           print("Redis ping:", r.ping())
           print("Redis info:", r.info("server")["redis_version"])
           PY

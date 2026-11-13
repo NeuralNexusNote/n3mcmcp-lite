@@ -212,7 +212,7 @@ Claude Code には標準の auto-memory 機能（`~/.claude/projects/.../memory/
 | ツール                          | 用途                                                                                |
 | ------------------------------- | ----------------------------------------------------------------------------------- |
 | `search_memory`                 | ハイブリッド検索（ベクトル + BM25、時間減衰ランキング、`session_id` ブースト）       |
-| `save_memory`                   | 短いエントリを保存（7d TTL、完全一致・近似重複は自動拒否）                          |
+| `save_memory`                   | 短いエントリを保存（7d TTL、完全一致だけを自動拒否）                                |
 | `list_memories`                 | 直近のエントリを新しい順に一覧                                                      |
 | `delete_memory`                 | 特定のエントリを id で削除（id が親ドキュメントの場合は子チャンクごとカスケード削除）|
 | `delete_memories_by_session`    | `session_id` に紐づく記憶を一括削除 — 終了したプロジェクトを TTL 待ちなしで撤収       |
@@ -390,39 +390,41 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 
 **プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote`
 でインストールすると、`SessionStart` フック [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
-が `~/.claude/settings.json` の `permissions.allow` に 6 つの
-`mcp__n3mc-workingmemory__*` ツールを冪等追加します。手動編集不要。
-1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは
-温存します。`hooks.json` は `python` → `py`（Windows Python Launcher） →
-`python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか
-1 つが `PATH` 上にあれば動作します。3 つすべて不在の場合のみ exit 非ゼロ
-で失敗し、Claude Code の `/plugins` Errors タブに表示されます（silent fail
-を回避）。
+が `~/.claude/settings.json` の `permissions.allow` にワイルドカードの
+ルールを 2 つ冪等追加します：
 
-同フックは **`uvx` 事前チェック** も併せて行います — プラグイン manifest が
-MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動
-するため、`uvx` が `PATH` に無いと MCP launcher 側では不透明な `ENOENT`
-で失敗します。フックが `shutil.which("uvx")` を確認し、見つからない場合
-は **stderr に日英両言語のインストール手順**（`pipx install uv` ／
-`curl -LsSf https://astral.sh/uv/install.sh \| sh` 等）を出力するので、
-`/plugins` Errors タブに actionable なメッセージが残ります（フックの
-exit code は常に 0 — パーミッション追加自体は成功しているため）。
+- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — プラグインが
+  提供する形のツール（Claude Code はプラグインの MCP ツールを
+  `mcp__plugin_<plugin>_<server>__<tool>` と名付け、パーミッションのルールも
+  この形で書く必要があります）
+- `mcp__n3mc-workingmemory__*` — サーバーを直接登録した場合
+  （`claude mcp add`、`.mcp.json`）の同じツール
 
-**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` /
-Python 完全不在）の場合は、下記ブロックを `~/.claude/settings.json`（ユーザー
-グローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）
-に手動追記してください：
+ワイルドカードは `recall_thread` を含む 7 ツールすべてに当たります。フックは
+ルールが欠けているときだけ書き込み、ほかのエントリには触れません。`settings.json` が読み取り専用・ポリシーで固定・JSON として壊れているときは、何も変えずに、自分で足すルールを警告で表示します。
+（v1.9.x までのフックは `mcp__n3mc-workingmemory__<tool>` という素の名前を
+追加していました。これはプラグインのツール名に当たらないため、プラグインの
+利用者は呼び出しのたびに許可を求められていました。）
+
+`hooks.json` のコマンドは `python` → `py`（Windows Python Launcher） →
+`python3` の順に試します。どれも `PATH` 上に無い場合は、Python を使わない
+最後の段が警告（`systemMessage`）を出し、ツールを事前許可できなかったことと
+追加すべきルールを知らせます。`uvx` が無い場合（プラグインは MCP サーバを
+`uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動します）も同じ
+方法で、インストールコマンド（`pipx install uv`、
+`curl -LsSf https://astral.sh/uv/install.sh \| sh`）付きで知らせます。
+
+**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json`）の
+場合は、下記のルールを `~/.claude/settings.json`（ユーザーグローバル — 推奨）
+または `.claude/settings.json`（プロジェクトスコープ）に追記してください。
+プラグインでインストールしたが Python が無い場合は、代わりに
+`mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` を使います：
 
 ```json
 {
   "permissions": {
     "allow": [
-      "mcp__n3mc-workingmemory__search_memory",
-      "mcp__n3mc-workingmemory__save_memory",
-      "mcp__n3mc-workingmemory__list_memories",
-      "mcp__n3mc-workingmemory__delete_memory",
-      "mcp__n3mc-workingmemory__delete_memories_by_session",
-      "mcp__n3mc-workingmemory__repair_memory"
+      "mcp__n3mc-workingmemory__*"
     ]
   }
 }
@@ -435,16 +437,15 @@ AI が停止します（ユーザーが席を外していれば動作不能）�
 ## データ保存先
 
 Lite 版はディスク上に DB を持ちません。メモリは Redis に保存され、
-自動で失効します。ディスクには小さな `config.json` だけがプラット
-フォーム標準のユーザーデータディレクトリに置かれます：
-
-| OS      | パス                                                        |
-| ------- | ----------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                        |
-| macOS   | `~/Library/Application Support/n3mc-workingmemory/`         |
-| Linux   | `~/.local/share/n3mc-workingmemory/`                        |
-
+自動で失効します。ディスクには小さな `config.json` だけが
+`~/.n3mc-workingmemory/`（Windows では `%USERPROFILE%\.n3mc-workingmemory\`）に置かれます。
 環境変数 `N3MC_DATA_DIR` で上書き可能です。
+
+v1.10.0 から、OS 標準のアプリ用データフォルダではなくホームフォルダに置きます。
+Microsoft Store 版の Claude デスクトップアプリは、起動した MCP サーバーの
+`%LOCALAPPDATA%` を別の場所に振り替えるため、同じ PC で設定と `owner_id` が 2 つに
+分かれ、デスクトップアプリで保存した記憶がターミナルの `claude` から見えませんでした。
+最初の起動のときに、旧来の設定を 1 回だけ写します（旧来のファイルは残します）。
 
 ## 設定
 
@@ -457,12 +458,15 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
   "local_id":                 "<uuid>",
   "redis_url":                "redis://localhost:6379/0",
   "ttl_seconds":              604800,
-  "dedup_threshold":          0.95,
   "half_life_days":           3,
   "bm25_min_threshold":       0.1,
   "search_result_limit":      20,
-  "context_char_limit":       3000,
   "min_score":                0.2,
+  "vector_min_cos":           0.85,
+  "relative_min_score_ratio": 0.6,
+  "version_order_enabled":    true,
+  "version_sim_threshold":    0.98,
+  "version_min_chars":        100,
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
@@ -482,6 +486,10 @@ Lite 版はディスク上に DB を持ちません。メモリは Redis に保�
 
 - `redis_url` — 接続 URL。環境変数 `N3MC_REDIS_URL` が優先される。
 - `ttl_seconds` — 保存ごとに付与される TTL（既定 7 日）。
+- `vector_min_cos` — ベクトル検索の候補にする cos 類似度の下限（既定 `0.85`）。下げる（例 0.80〜0.83）と言い回しが違っても拾いやすくなるが、関係の薄い記録も混ざる。上げる（例 0.88）と結果が短くなるが、関係のある記録も落ちやすい。目安は 0.80〜0.88。0.85 は `multilingual-e5-base` で測った値なので、`embedding_model` を変えたら測り直す。
+- `relative_min_score_ratio` — 1 位のスコアのこの倍率未満の結果を捨てる（既定 `0.6`、`0.0` で無効）。
+- `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 文書や長いエントリの新しい版を保存すると、古い版も残る。内容が 0.98 以上似ている結果は同じ内容の版とみなし、新しい順に並べる。各結果に `saved=`（保存日時）が付く。
+- 設定は MCP サーバーが起動し直したときに効く（MCP クライアントを再起動する）。書き間違えて読めないときは、ファイルはそのまま残り、既定値で動く。そのことは最初の `search_memory` の結果に表示される。数値は引用符を付けずに書く。
 - `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズと重複（文字数）。閾値超の本文は親ドキュメント＋チャンク経路に入り、verbatim 復元される。
 - `access_count_*` — アクセス頻度ベース自動 importance。検索の上位 K 件にヒットすると次回以降の検索でブースト（上限あり）。
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索ごとに上位 K 件の TTL をリセット（リセットのみ。新規保存以上には伸びない）。
@@ -531,6 +539,10 @@ Free 版の防御を一対一で移植：
 保存対象が全てサロゲートだった場合、サニタイズ後は空文字列に縮退し、
 通常の empty-content 拒否経路に合流する —
 `{"status":"error","saved":false,"reason":"empty content"}` を返す。
+見える文字を 1 つも含まない本文（空白、`\x00` や `U+200B` のような制御文字・
+書式文字、区切り文字、異体字セレクタだけでできたもの）は
+`empty content (no visible characters)` で拒否する。それ以外は、見える文字の
+間にある NUL やゼロ幅文字も含めて、そのまま保存する。
 
 ## ランキング式
 
@@ -597,7 +609,7 @@ auto-save の **信頼性** という観点では、N3MemoryCore は最近の LL
 | **検索内部** | ブラックボックス | **ハイブリッド BM25 + e5 ベクトル + CJK バイグラム + 時間減衰 + 軽量リランカー、全パラメータ可視・可変** |
 | **可視性／制御** | UI 経由のみ | **`list_memories` / `delete_memory` / `delete_memories_by_session` で生レコード操作可** |
 | **永続性** | ベンダのサービス継続期間に依存 | **インメモリ Redis、7 日 TTL** — 短命設計だがコンテナを自分で持つ。長期保存が必要なら任意の永続メモリバックエンドと組み合わせる |
-| **チューニング** | 固定 | `half_life_days` / `chunk_threshold` / `dedup_threshold` / リランク重み などすべて編集可能 |
+| **チューニング** | 固定 | `half_life_days` / `chunk_threshold` / `vector_min_cos` / リランク重み などすべて編集可能 |
 
 つまり N3MemoryCore Lite を動かす価値は **「より確実な auto-save」ではなく、
 「複数 AI が共有 `session_id` の下で協調できる透明・改造可能なワーキング
@@ -656,8 +668,10 @@ MCP の建付けの中で、この非決定性を回避する経路は **3 通�
 - 動作仕様：
   - **Claude が `save_memory` を呼び忘れる事故が構造的に発生しない**（harness が直接呼ぶ）
   - MCP の往復を経由しないため、ツール呼び出しコストゼロ
-  - 同一セッションは turn ごとに transcript が成長 → 重複判定（`dedup_threshold`）が
-    効くため近似一致は自動却下、DB は **1 セッション 1 エントリ近傍**に収束
+  - turn ごとの transcript は新しいエントリとして保存される（v1.10.0 から、自動で
+    拒否するのは完全一致だけ。似た内容でも更新が失われない）。`search_memory` は新しい版を
+    先に並べ、`saved=` を表示する。DB の増え方が気になるなら、transcript 全体ではなく
+    直近の往復だけを保存する
   - 200 文字未満の短い transcript は noise として skip
 - 利点: 決定論的／LLM の傾向に依存しない／ノイズや忘却の心配なし
 - 欠点: Claude Code 専用（Cursor / Windsurf など他クライアントでは別の仕組みが必要）／
@@ -684,10 +698,11 @@ MCP の建付けの中で、この非決定性を回避する経路は **3 通�
 ```bash
 git clone https://github.com/<YOU>/n3mcmcp-lite
 cd n3mcmcp-lite
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+# テストは使う Redis を FLUSHDB する。記憶用の Redis ではなく、テスト専用のコンテナを使う
+docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest tests/ -q                                     # 全 105 テスト・温暖時 ~30 秒
+N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
 CI は push と PR ごとに同じマトリクス（Python 3.10–3.13 × Redis Stack）

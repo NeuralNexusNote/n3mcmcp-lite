@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.6.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.7.0 [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版（公開予定）** との差別化を明確化しています。
@@ -61,7 +61,7 @@
 | Python                    | 3.10 以上                                                                   |
 | MCP 対応クライアント      | Claude Desktop、Claude Code、その他 MCP クライアント                        |
 | Redis Stack               | `localhost:6379` で稼働（`N3MC_REDIS_URL` で変更可能）                      |
-| pip パッケージ（自動導入） | `mcp` `redis` `sentence-transformers` `uuid-utils` `platformdirs` `numpy`   |
+| pip パッケージ（自動導入） | `mcp`（**`>=1.0.0,<2.0.0`**）`redis`（`<8.0.0`）`sentence-transformers` `uuid-utils` `platformdirs` `numpy` |
 
 ### クイックスタート
 
@@ -163,7 +163,7 @@ n3memorycore-mcp-lite/
 │   ├── database.py                 # Redis 層：インデックス・CRUD・TTL・重複判定
 │   ├── processor.py                # 埋め込み・ランキング・CJK トークナイズ・リランカー
 │   ├── config.py                   # config.json 読み書き + UUID 生成
-│   └── paths.py                    # platformdirs 基準の設定保存場所
+│   └── paths.py                    # 設定の場所（~/.n3mc-workingmemory/）と、引き継ぎ用の旧来の platformdirs の場所
 ├── tests/
 │   ├── conftest.py                 # Redis Stack 未起動時は自動スキップ
 │   ├── test_database.py
@@ -174,7 +174,7 @@ n3memorycore-mcp-lite/
     └── claude_code_mcp.json
 ```
 
-`config.json` は **ユーザーデータディレクトリ** に置かれます（[§7](#7-データ保存先) 参照）。ディスク上に DB ファイルは存在しません — メモリ状態は Redis 内にのみ存在します。
+`config.json` は **`~/.n3mc-workingmemory/`** に置かれます（[§7](#7-データ保存先) 参照）。ディスク上に DB ファイルは存在しません — メモリ状態は Redis 内にのみ存在します。
 
 ---
 
@@ -190,14 +190,22 @@ n3memorycore-mcp-lite/
 > |---|----|------|------|------|
 > | 1 | redis-py 8.0 が **RESP3** 既定 | `FT.SEARCH` が常に 0 件 | RESP3 の dict 応答をハンドリング（現行実装）＋ `redis<8.0.0` ピン、または `from_url(..., protocol=2)` | [§3.3](#33-redis-接続と-ttl) |
 > | 2 | BM25 スコア未取得 | キーワード検索が無効化（ベクトルのみに退化） | `.with_scores().scorer("BM25")` | [§3.6](#36-ランキング式) |
-> | 3 | NFKC 正規化の適用漏れ | 全角/半角の重複・検索ゆれ | embedding と dedup hash のみに NFKC | [§3.7](#37-トークナイズと句読点処理) |
-> | 4 | モデルロードが起動を**ブロック** | MCP 接続タイムアウト（~40s） | stdio 起動後にバックグラウンド + ロックでスレッド安全化 | [§3.9](#39-起動シーケンスと自己回復) |
+> | 3 | NFKC 正規化の適用漏れ | 全角/半角の重複・検索ゆれ | embedding・dedup hash・BM25 用テキストに NFKC（保存する `content` には適用しない） | [§3.7](#37-トークナイズと句読点処理) |
+> | 4 | モデルロードが起動を**ブロック** | MCP 接続タイムアウト（~40s） | ライブラリの import は stdio の前、モデル本体の構築は stdio 後にバックグラウンド + ロック（import をバックグラウンドにすると Windows で固まる） | [§3.9](#39-起動シーケンスと自己回復) |
 > | 5 | `doc.id` が**フルキー**（`mem:<uuid>`） | `mem:mem:...` ゴーストキー（TTL なし孤立） / `[doc×0]` / 削除失敗 | `_doc_bare_id()` で裸 UUID 統一 | [§3.12](#312-tag-クエリの-uuid-制約と-python-側フィルタリング) |
 > | 6 | `SCAN mem:*` が `mem:sha:*` にもマッチ | `HGET` が `WRONGTYPE` で落ちる | プレフィックス除外 or 例外捕捉 | [§3.12](#312-tag-クエリの-uuid-制約と-python-側フィルタリング) |
 > | 7 | `serverInfo.version` / `instructions` 未設定 | version 空・指示未広告 | `Server(name, version=, instructions=)` | [§4.2](#42-initialize-応答) |
 > | 8 | `search_memory` 応答に `turn_id` 無し | `recall_thread` が呼べない（運用フロー断絶） | RETURN に `turn_id`、markdown に出力 | [§4.3.1](#431-取り出し拡張ツールretrieval-extensions) |
 > | 9 | Evidence Report 中に pytest 実行 | `FLUSHDB` がライブデータを消す | §10 中は pytest を止める／別 Redis | [§9](#9-テストpytest) |
 > | 10 | 「定常 0.5s」を MCP 往復で計測 | 5〜10s に見え誤判定 | 0.5s は純サーバー側目標と理解 | [§10](#10-自律評価evidence-report) |
+> | 11 | テストをライブの Redis に向ける | `FLUSHDB` がユーザーのワーキングメモリを消す | テストは `N3MC_REDIS_TEST_URL` にのみ接続し、既定値は持たない | [§9](#9-テストpytest) |
+> | 12 | BM25 クエリに制御文字・CJK 句読点が残る | `Syntax error`（BM25 が黙って抜ける）／`「記憶装置」は？` で BM25 ヒット 0 件 | 制御文字 → 空白、CJK・全角句読点も除去 | [§3.7](#37-トークナイズと句読点処理) |
+> | 13 | Redis を起動時にしか確かめない／接続エラーを握りつぶす | `docker start redis-stack` のあとも Redis が止まっていると言い続ける／あとから止まった Redis で `_No memories found._` | 毎回のツールの前に `ensure_connected()`（PING／つなぎ直し）、`ConnectionError` / `TimeoutError` は送り出す | [§3.9](#39-起動シーケンスと自己回復) |
+> | 14 | 設定を `%LOCALAPPDATA%` に置く | ストア（MSIX）版 Claude デスクトップアプリは MCP サーバーの `%LOCALAPPDATA%` を振り替える → `config.json` と `owner_id` が 2 つになり、デスクトップアプリで保存した記憶がターミナルの `claude` から見えない（逆も） | 設定は `~/.n3mc-workingmemory/`（振り替えの対象外）に置き、1 回だけ引き継ぐ | [§7](#7-データ保存先) |
+> | 15 | プラグインの自動許可ルールにサーバー名をそのまま使う／フックの失敗が exit 非ゼロだけ | プラグインの利用者は記憶の呼び出しのたびに許可を求められる／Python が無いときの手がかりは `SessionStart hook error … python: command not found` だけ | `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（+ `mcp__n3mc-workingmemory__*`）を許可する。Python を使わないフォールバックが `systemMessage` の JSON を出して exit 0 | [§8](#ツール自動許可claude-code-固有) |
+> | 16 | `mcp` に上限がない | 新しく入れると（`uvx`・`pip`・プラグイン）`mcp` 2.x が入り、import の時点で落ちる：`AttributeError: 'Server' object has no attribute 'list_tools'`。`/mcp` には `Connection closed` としか出ない | サーバーを 2.x の API に移すまで、`pyproject.toml` で `mcp>=1.0.0,<2.0.0` に固定する | [セットアップ](#前提条件) |
+> | 17 | モデルの取得を呼び出しのたびにやり直す／劣化した検索を伝えない | オフラインの初回：`save_memory` は毎回約 24 秒、`search_memory` は約 12 秒。キーワードだけの結果が普段と同じに見える | 再試行は 1 分に 1 回まで。劣化中は毎回の `search_memory` に知らせ、`save_memory` に `detail` | [§3.9](#39-起動シーケンスと自己回復) |
+> | 18 | 「空」の判定を `strip()` だけで行う | `\x00`、単独の `U+200B` や `U+FEFF` が、何も表示されない記録として保存される | 見える文字のない本文を拒否する（`has_visible_text`）。それ以外はすべて verbatim に保存する | [§3.13](#313-エンコーディング安全策) |
 
 ### 3.1 ID 階層
 
@@ -381,43 +389,68 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
 **`min_score` フィルタは語彙リランクの後に適用する。** 融合スコアが `min_score` 直下の候補でも、フレーズ一致・coverage によるリランク加点で閾値を超えれば結果に残せるよう、スコアフロアによる足切りは融合時点ではなくリランク**後**に行う。融合時点で枝刈りすると、埋め込みが弱いがクエリ句を完全に含むレコードをリランクが救済する前に捨ててしまうため、この順序が重要である（[§6](#6-設定) `min_score`）。
 
+この式の前後で行う v1.7.0 の整形処理（ベクトル下限・新しい版を先頭へ・相対カット）は [§3.14](#314-検索結果の整形v170) を参照。
+
 ### 3.7 トークナイズと句読点処理
 
 **トークナイザ**：RediSearch 内蔵のトークナイザ（空白＋句読点区切り、大文字小文字統一）。Pro 版（公開予定）で使われる Porter ステマーは本版では利用不可。
 
 **CJK バイグラム展開**：日本語・中国語は単語間スペースがないため、素の RediSearch トークナイザでは 1 文が 1 トークンに潰れ BM25 がほぼ効かない。これを補うため、保存時に `content` 中の連続 CJK ランを **オーバーラップバイグラム**（例：「記憶装置」→「記憶 憶装 装置」）に展開し、並列の `content_ngram` TEXT フィールドに格納する。BM25 検索はクエリ側にも同じ展開を適用した上で `@content:(...) | @content_ngram:(...)` の OR クエリを走らせるため、日本語の部分一致が RediSearch 内で機能する。ベクトル検索側には一切干渉しない（e5 埋め込みは日本語を直接扱える）。
 
-**クエリ整形** — ユーザー入力クエリは RediSearch へ送る前に `strip_fts_punctuation` を適用し、CJK バイグラム展開ののち残った RediSearch 特殊文字をバックスラッシュでエスケープする。`content` はハッシュにそのまま（verbatim）保存する（RediSearch が動的にトークナイズする）。
+**クエリ整形**（`prepare_query`） — ユーザー入力クエリは RediSearch へ送る前に、NFKC 正規化 → 制御文字を空白に置換 → `strip_fts_punctuation`（ASCII **および** CJK・全角の句読点）→ CJK バイグラム展開 → 空白の連続を 1 つに畳む、の順で整形する。RediSearch の特殊文字はすべて除去されるため、エスケープは不要。`content` はハッシュにそのまま（verbatim）保存する（`content` は RediSearch が動的にトークナイズし、`content_ngram` は同じ句読点除去を通して事前展開した形を持つ）。
 
 ```python
-_PUNCT_STRIP_RE = re.compile(r'[,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?`]')
-_FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])')
+_CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
+_PUNCT_STRIP_RE = re.compile(
+    r'[,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?`'
+    r'「」『』【】（）〈〉《》〔〕［］｛｝・、。，．！？；：―─…“”‘’]'
+)
+
+def prepare_query(text: str) -> str:
+    text = normalize_text(text)              # NFKC
+    text = _CTRL_RE.sub(' ', text)
+    text = _PUNCT_STRIP_RE.sub(' ', text)
+    tokens = cjk_bigram_expand(text).split()
+    # Tokens with no letter or digit (e.g. a lone '_') are not indexed by
+    # RediSearch and leave an empty '@content:()' → syntax error.
+    return ' '.join(t for t in tokens if any(ch.isalnum() for ch in t))
+
+def drop_lone_cjk_tokens(q: str) -> str:
+    # BM25 query only: drop single-character CJK tokens (particles such as
+    # は / の / を left over by bigram expansion) when other tokens remain.
+    tokens = q.split()
+    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))]
+    return ' '.join(kept) if kept else q
 ```
+
+`_bm25_search` は `drop_lone_cjk_tokens(prepare_query(query))` を使う。RediSearch はクエリの語を AND で結ぶ。バイグラム展開のあとに残る 1 文字の CJK（`「記憶装置」は？` → `記憶 憶装 装置 は`）は、単独の語としてはほとんど索引にないので、この処理がないとキーワード検索は 0 件のままになる。1 文字の CJK だけのクエリは、そのまま使う。また `prepare_query` は、文字も数字も含まない語（`str.isalnum` が真の文字がない語。単独の `_` など）を落とす。RediSearch はこれを語として索引しないので、そればかりのクエリは `@content:()` になり、構文エラーになっていた。
+
+> **⚠️ 制御文字と CJK 句読点を除去する理由（v1.7.0）**：クエリに `\x00` などの制御文字が残ると `FT.SEARCH` が `Syntax error` で失敗する。このエラーは捕捉されるため、そのクエリでは BM25 側が黙って抜け落ちる。CJK 句読点は ASCII の除去対象に入っていなかったため、`「記憶装置」は？` が `「記` や `は？` のようなバイグラムに展開されていた。RediSearch はクエリ語を AND で結合するので、どの文書にも現れないバイグラムが 1 つあるだけで BM25 側全体が **0 件** になる — そして日本語の質問はほぼ必ず `？` で終わるか `「」` を含む。保存側・クエリ側の両方でこれらを除去することでキーワード一致が回復する。BM25 の失敗で `search_memory` 自体を失敗させてはならない：捕捉してベクトル結果だけで続行する。
 
 **空クエリ規則**：整形後に空文字列になった場合、キーワード検索はスキップしベクトル検索のみでランキングする。
 
-> **⚠️ 実装注意（NFKC 正規化の適用漏れに注意）**：[§3.13](#313-エンコーディング安全策) が定める通り、**NFKC 正規化は「embedding 生成」と「dedup hash 計算」の 2 か所にのみ適用**する（`unicodedata.normalize("NFKC", text)`）。これにより全角↔半角（`ＡＩ`↔`AI`、`２０２６`↔`2026`）・合成/分解形が検索・重複判定で同一視される。**実装時に忘れやすい**ため明示する：`embed()` のエンコード対象テキストと、`mem:sha:` / `docsha:` ガードキー生成用の SHA1 入力の両方を NFKC 正規化すること。**保存される `content` HASH フィールドには適用しない**（verbatim 契約を守る）。save / dedup-check / delete の全経路で一貫して同じ正規化を通すこと（さもないと保存時と削除時でハッシュが一致しない）。
+> **⚠️ 実装注意（NFKC 正規化の適用漏れに注意）**：[§3.13](#313-エンコーディング安全策) が定める通り、**NFKC 正規化は「embedding 生成」「dedup hash 計算」「BM25 用のテキスト（`prepare_query` と保存する `content_ngram`）」に適用**する（`unicodedata.normalize("NFKC", text)`）。これにより全角↔半角（`ＡＩ`↔`AI`、`２０２６`↔`2026`）・合成/分解形が検索・重複判定で同一視される。**実装時に忘れやすい**ため明示する：`embed()` のエンコード対象テキストと、`mem:sha:` / `docsha:` ガードキー生成用の SHA1 入力の両方を NFKC 正規化すること。**保存される `content` HASH フィールドには適用しない**（verbatim 契約を守る）。save / dedup-check / delete の全経路で一貫して同じ正規化を通すこと（さもないと保存時と削除時でハッシュが一致しない）。
 
-### 3.8 重複判定
+### 3.8 重複判定（v1.7.0：完全一致のみ）
 
 `save_memory` は入力本文長が `chunk_threshold`（既定 400 文字）以下かどうかで分岐する。
 
-**(A) 単一チャンクパス**（本文が `chunk_threshold` 以下）：以下の順で重複を拒否する。
+**(A) 単一チャンクパス**（本文が `chunk_threshold` 以下）：
 
 1. **完全一致（O(1)）** — `EXISTS mem:sha:<sha1(content)>`。キーが存在すれば `{"status": "duplicate", "saved": false}` を返す。
-2. **近似（意味的）重複** — 埋め込みを計算し、KNN=5 を `@embedding` に対して実行（§3.12 の理由から owner_id を FT.SEARCH クエリには含めず、返却された `owner_id` フィールドで Python 側フィルタリング）、`cosine_distance` → `cos_sim` に変換。`cos_sim >= dedup_threshold`（既定 `0.95`）なら `{"status": "near_duplicate", "saved": false, "similarity": <値>}`。
 
-両チェックを通過した場合のみ、HSET + EXPIRE + sha1 ガードのパイプラインへ進む。
+それ以外は HSET + EXPIRE + sha1 ガードのパイプラインへ進む。
 
 **(B) マルチチャンクパス**（本文が `chunk_threshold` 超）：重複判定は**親ドキュメント全文**のレベルで行う。
 
 1. **親レベル完全一致（O(1)）** — `EXISTS docsha:<sha1(full_text)>`。キーが存在すれば `{"status": "duplicate", "saved": false, "parent_id": "<既存>"}` を返す。
-2. **親レベル近似（意味的）重複** — 本文全体を埋め込み（multilingual-e5-base は約 512 トークンで切り詰めるが、文書冒頭のフィンガープリントとしては十分）、(A) と同じ KNN=5 近似 dedup をインデックス済みチャンク空間に対して実行する。同一 `owner_id` の既存チャンクで `cos_sim >= dedup_threshold`（既定 `0.95`）となるものがあれば `{"status": "near_duplicate", "saved": false, "similarity": <値>}` を返す。これにより長文 dedup 意味論は短文 (A) と対称になる。
-3. チャンク側は個別の sha ガードを付けず、個別近似 dedup もバイパスする。理由：スライディングウィンドウで生成される隣接チャンクは設計上ほぼ重複しており、個別に dedup すると自分自身を却下してしまう。
+2. チャンク側は個別の sha ガードを付けない。理由：スライディングウィンドウで生成される隣接チャンクは設計上ほぼ重複しており、個別に dedup すると自分自身を却下してしまう。
 
-親レベル両チェックを通過した場合、単一 `save_memory` 応答内で：
+親レベルのチェックを通過した場合、単一 `save_memory` 応答内で：
 - `doc:<parent_id>` に HSET + EXPIRE + `docsha:<sha1>` ガードを書く（単一パイプライン）
 - 全チャンクの HSET + EXPIRE を**単一パイプライン**で一括送信（sha ガード無し、各チャンクの `parent_id` フィールドに親 ID を格納）
+
+> **⚠️ 近似（類似度）による重複拒否は行わない（v1.7.0 で廃止）**：v1.6.x は短文・文書全体の両方で、既存エントリとの `cos_sim >= dedup_threshold`（0.95）なら新規エントリも拒否していた。`multilingual-e5` ではこの閾値で「同じ内容の再保存」と「更新版」「形が同じ別項目」を区別できない。新しい値で保存し直した事実（「予算は 100」の後の「予算は 120」）や、数値を少し変えて作り直した設定資料は 0.95 以上になり、**新しい版が黙って捨てられていた**（`near_duplicate`）— ユーザーの最新の決定がメモリに届かなかった。現在は完全一致の重複のみを拒否する。両方の版が返ってきた場合、`search_memory` は最新の版を先頭に置き、`saved=` 時刻を表示する（[§3.14](#314-検索結果の整形v170)）。設定キー `dedup_threshold` は無視される。
 
 ### 3.9 起動シーケンスと自己回復
 
@@ -425,13 +458,24 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 1. **設定読み込み**（`load_config()`）：
    - データディレクトリから `config.json` を読み込む。
-   - **ファイルが壊れている（JSON パースエラー）場合**：`stderr` に警告を出し、既定値にフォールバック。Pro 版（公開予定）と違い、Lite では DB からの回復を**試みない** — Redis は TTL 切れで空かもしれないため。新しい UUIDv4 ペアを生成して書き込む。
+   - 設定は `~/.n3mc-workingmemory/config.json` に置く。v1.6.x から更新して最初に起動したときは、旧来の場所から引き継ぐ（[§7](#7-データ保存先)）。
+   - **ユーザーが書き間違えた `config.json` を上書きしない**（v1.6.x は読めないファイルを既定値で置き換え、ユーザーの設定を失わせていた）。[§6](#6-設定) の表を参照：読めないファイルは変更せず、このプロセスでは既定値とメモリ上の UUID で動く。型の誤った項目は個別に無視する。Pro 版（公開予定）と違い、Lite では DB からの ID 回復を**試みない** — Redis は TTL 切れで空かもしれないため。
    - `N3MC_REDIS_URL` 環境変数のオーバーライドを適用（ファイルより優先）。
-   - 欠損フィールドは既定値で埋めて保存。
+   - ファイルが読めて欠損フィールドがある場合は、既定値で埋めて保存。
 
 2. **Redis 接続と ping**：
    - `redis_url` からクライアントを構築。
-   - `PING`。**失敗時**は `stderr` にヒント（初回：`docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest` ／ 再起動：`docker start redis-stack`）を出し、非機能クライアントのまま続行。以降のツール呼び出しはすべて**明示的なエラー**で応答する — `save_memory` / `delete_memory` / `repair_memory` は `{"status": "error", ...}` の JSON を返し、`search_memory` / `list_memories` は `Error:` プレフィックスと復旧ヒントを含む `TextContent` を返す。これにより [§5](#5-行動指示自動保存戦略) に記した「バックエンド故障は黙って『該当なし』で済ませず、必ず AI 側でユーザーに報告する」という契約が成立する。サーバー自体は生存し続け、ユーザーは MCP を再起動せずに Redis をホットフィックスできる。
+   - `PING`。**失敗時**は `stderr` に復旧の案内（下記）を出し、接続のないまま続行する。サーバー自体は生存し続け、ユーザーは MCP を再起動せずに Redis を起動できる（下記「ツール呼び出しごとの Redis の確認」）。
+   - クライアントは `socket_connect_timeout=2` で作る。止まっている Redis へのつなぎ直しが、ツール呼び出しを固めずに数秒で失敗するように。
+
+   **ツール呼び出しごとの Redis の確認（v1.7.0）** — 接続は起動時だけでなく、呼び出しのたびに確かめる：
+
+   1. ディスパッチャは、どのツールを実行する前にも `Database.ensure_connected()` を呼ぶ。つながっていれば `PING` を送り、つながっていない（または `PING` が失敗した）ときは `redis_url` からクライアントを作り直して、もう一度 `PING` する。接続が戻ったら `enforce_ephemeral()` と `ensure_index()` をやり直す（新しいコンテナにはインデックスがない）。`stderr` には、状態が変わったとき（切れた／戻った）に 1 行だけ出す。呼び出しごとには出さない。
+   2. Redis に届かないときはツールを実行せず、**復旧の案内付きのバックエンドエラー**を返す：`search_memory` / `list_memories` / `recall_thread` → `Error: memory backend unreachable. <案内>` で始まる `TextContent`、`save_memory` → `{"status": "error", "saved": false, "reason": "<案内>"}`、`delete_memory` / `delete_memories_by_session` → `{"status": "error", "reason": "<案内>"}`、`repair_memory` → `{"status": "error", "message": "<案内>"}`。
+   3. ツールの**途中で**接続が切れた（`redis.ConnectionError` / `redis.TimeoutError`）ときは、未接続の状態にして、そのツールにも同じバックエンドエラーを返す。ベクトル検索・BM25 の補助関数は、この 2 つの例外を握りつぶさずに**送り出す**こと — 握りつぶすと、止まった Redis が `_No memories found._` になり、LLM には「何も保存されていない」と見える。それ以外の `FT.SEARCH` のエラー（クエリの構文エラーなど）は従来どおり捕まえ、その経路だけを飛ばす。
+   4. **案内の文**（`backend_hint(redis_url)`。このサーバーは世界中で使われるので英語）：`Redis Stack is not reachable at <host>:<port>. If Docker itself is not running, start Docker (Docker Desktop) first. Then run: docker start redis-stack (first time: docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest). The MCP server reconnects automatically — no restart needed; just retry.` `<host>:<port>` は `redis_url` から取り、**ユーザー名とパスワードは出さない**。
+
+   > **⚠️ 理由（v1.7.0）**：v1.6.x は Redis を起動時にしか確かめなかった。Redis が止まった状態で起動したサーバーは、ユーザーが `docker start redis-stack` を実行したあとも「Redis Stack が起動していません」と答え続け（`repair_memory` でもつなぎ直さない）、MCP クライアントを再起動するまで使えなかった。あとから Redis が止まったサーバーは、`search_memory` が `_No memories found._` を返し、`save_memory` は案内のない生の `Error 10061 connecting to localhost:6379` を返した。案内も日本語だけだった。（v1.7.0 の §A4 の試験：Docker Desktop 自体が止まっていると `docker start redis-stack` は Docker の API のエラーになるので、案内に「先に Docker を起動する」を入れた。）
 
 3. **RediSearch インデックスの確保**（`ensure_index()`）：
    - [§3.5](#35-データレイアウト) の通り `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...`。
@@ -440,9 +484,19 @@ _FTS_SPECIAL_RE = re.compile(r'([,.<>\{\}\[\]"\':;!@#\$%\^&\*\(\)\-\+=~\|\\/?])'
 
 4. **埋め込みモデル事前ロード**（`get_model()`）：
    - `intfloat/multilingual-e5-base` をメモリにロードし、初回ツール呼び出しが一度だけのモデルロードで遅くならないようにする。
-   - **非致命的**：ロード失敗（オフライン・HF キャッシュ未生成等）時は警告を出して続行。初回 `save_memory` / `search_memory` で遅延リトライする。
+   - **非致命的**：ロード失敗（オフライン・HF キャッシュ未生成等）時は警告を出して続行。あとの `save_memory` / `search_memory` で遅延リトライするが、**再試行は 60 秒に 1 回まで**（`MODEL_RETRY_SECONDS`）。その間は `embed()` が取得を試みずにすぐ `None` を返す。
+   - **劣化中の知らせ（v1.7.0）**：モデルが使えない間は、黙って劣化せずにそう伝える。`processor.model_status()` は最後の読み込みエラーを返す。`search_memory` は出力の先頭に `> ⚠️ N3MC notice: <model_unavailable_message>` を付け（最初の 1 回だけでなく、劣化中は毎回）、`save_memory` は `"warning": "embedding_unavailable"` の横に `"detail": "<model_unavailable_message>"` を付ける。文面（英語）：`The embedding model (<embedding_model>) could not be loaded (<error>), so search is keyword-only (BM25) and new entries are saved without vectors. The first start downloads the model (~440 MB) from Hugging Face: check the network or proxy, or pre-download it. The server retries automatically.` `stderr` には、失敗した試行ごとに 1 行（多くても 1 分に 1 回）出す。
+
+     > **⚠️ 理由（v1.7.0、§A6 のオフラインの試験）**：ネットワークがなくモデルも未取得のとき、v1.6.x はツールの呼び出しのたびにダウンロードをやり直し、`save_memory` は 1 回約 24 秒、`search_memory` は約 12 秒かかった。`search_memory` にはベクトル検索が止まっている印がなく、ログも `Cannot send a request, as the client has been closed.` だけだった。
 
 > **⚠️ 実装注意（モデルロードは stdio ループ起動「後」にバックグラウンドで）**：`SentenceTransformer` の初期化は HF キャッシュ済みでも PyTorch 初期化のため **~30〜40 秒** かかる（実測 39s）。これを stdio ループ起動「前」に同期実行すると、**MCP `initialize` ハンドシェイクがタイムアウトしてクライアント（Claude Code 等）が接続失敗**する。手順 4 は **`stdio_server()` が listening を開始した後**に `ThreadPoolExecutor` 等でバックグラウンド起動すること。これにより手順 1〜3（実測 ~2s）の完了直後に initialize 応答を返せ、モデルは最初のツール呼び出しが来るまでに準備が整う。
+>
+> **⚠️ 読み込みは 2 段に分ける（v1.7.0、Windows のデッドロック）**：`sentence_transformers`（torch、sklearn など）の import は子プロセスを起動することがある。Windows では、MCP の stdio が stdin のパイプを同期で読んでいる間に子プロセスを作ると、そのハンドルで止まる。バックグラウンドの読み込みが import の途中で止まり、最初のツール呼び出しが `get_model()` のロックで待つので、サーバー全体が固まる（v1.7.0 の最初の実装で発生。v1.6.x は stdio の前にすべて同期で読み込んでいたので起きなかった）。そこで：
+>
+> 1. **`stdio_server()` を始める前に**、ライブラリの import だけを同期で行う（`import_backend()`）。その間は fd 1 を stderr に向け、余計な出力が JSON-RPC の経路に入らないようにする。実測は温まった状態で約 10 秒。
+> 2. **stdio を始めたあとで**、モデル本体の構築（`SentenceTransformer(...)`、温まった状態で約 5 秒。初回のダウンロードもここ）をバックグラウンドで行い、下のロックで守る。
+>
+> Windows 11 での実測：`initialize` の応答は 9.5 秒、最初の `save_memory` は 15 秒。stdio を始めたあとで子プロセスを起動する処理は、どれも同じ危険がある。
 >
 > **スレッド安全性**：上記バックグラウンドロードと「最初のツール呼び出し」が競合して `get_model()` が 2 スレッドから同時に呼ばれうる。`get_model()` は **double-checked locking**（`threading.Lock`）でシングルトンを保護すること。
 
@@ -462,7 +516,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 
 1. 本文全体を `chunk_threshold` 文字のスライディングウィンドウ（オーバーラップ `chunk_overlap`、既定 100 文字）に分割する。
 2. 新規 `parent_id`（UUIDv7）を採番し、`doc:<parent_id>` に全文 verbatim（切り詰め無し・コードブロック除去無し — 入力をバイト単位でそのまま保存）を HSET で書く。`docsha:<sha1(full_text)>` に親レベル完全一致ガードを設定する。
-3. 全チャンクの HSET + EXPIRE を**単一パイプライン**で一括送信し、各 `mem:<chunk_id>` の `parent_id` TAG フィールドに親 ID を格納する（個別 sha ガード・個別近似 dedup はスキップ — 親レベル近似 dedup が §3.8 (B) で責務を負う）。
+3. 全チャンクの HSET + EXPIRE を**単一パイプライン**で一括送信し、各 `mem:<chunk_id>` の `parent_id` TAG フィールドに親 ID を格納する（個別 sha ガードはスキップ — 文書全体の重複は §3.8 (B) の親レベル完全一致ガード `docsha:` が担う）。
 
 `search_memory` 側の整合：
 
@@ -504,7 +558,6 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 |---|---|---|
 | `_vector_search` | `*=>[KNN N @embedding $vec AS __dist]`（owner フィルタなし）、RETURN に `owner_id` 追加 | `owner_id` 一致のレコードのみ採用 |
 | `_bm25_search` | `(@content:(...) \| @content_ngram:(...))` のみ（owner フィルタなし）、RETURN に `owner_id` 追加 | `owner_id` 一致のレコードのみ採用 |
-| `_near_dedup` | `*=>[KNN 5 @embedding $vec AS __dist]`（KNN 5 でグローバル取得）、RETURN に `owner_id` 追加 | `owner_id` 一致かつ `cos_sim >= dedup_threshold` なら重複と判定 |
 | `list_memories` | `*`（全件取得）、RETURN に `owner_id`・`parent_id` 追加 | `owner_id` 一致かつ `parent_id` が空文字列のレコードのみ採用 |
 | `delete_memory`（cascade） | `@parent_id:{<id>}` で FT.SEARCH 試行（成功すればそのまま利用）、失敗時は `SCAN mem:*` でフォールバック | SCAN フォールバック時に `parent_id` フィールド値を Python で照合 |
 
@@ -585,13 +638,29 @@ def sanitize_surrogates(text):
 決定論的な失敗モードであり、呼び出し側はエンコード起因のサイレントクラッシュ
 ではなく明示的な拒否応答を受け取る。
 
+**見える文字のない入力の契約（v1.7.0）**：`save_memory` は、**見える文字を 1 つも
+含まない**本文も拒否する。すべての文字が、空白、制御文字・書式文字（Unicode の
+カテゴリ `Cc` / `Cf`。例：`U+0000`、`U+001B`、`U+200B`、`U+FEFF`）、区切り文字
+（`Zs` / `Zl` / `Zp`）、異体字セレクタ（`U+FE00`–`U+FE0F`、`U+E0100`–`U+E01EF`）
+のいずれかである場合だ。応答は `{"status":"error","saved":false,"reason":"empty
+content (no visible characters)"}`。判定は `processor.has_visible_text()` で行う。
+この判定は保存する *かどうか* だけを決め、保存する内容は変えない — 見える文字を
+1 つでも含む本文（例：`A\x00B`、単独の結合文字 `U+309A`）は下記のとおり verbatim
+に保存する。空白だけの入力の理由は、これまでどおり `empty content` のまま。
+
+> **⚠️ 理由（v1.7.0、A10 エンコーディング試験）**：`str.strip()` は空白を落とすが
+> `U+0000` や `U+200B` は落とさない。そのため `\x00` や単独のゼロ幅スペースが、
+> 何も表示されない記録として保存されていた。`list_memories` で見分けがつかず、
+> 検索のノイズになるだけだった。
+
 **サニタイズ対象に含まれないもの（意図的）** — 以下は **保存・取り出しを通じて
 verbatim に保持される**（§3.11 の親ドキュメント verbatim 契約と整合）。表示・
 グラフ可逆性・異体字情報・後方互換のため、変換を行わない:
 
 - **`U+0000`（NUL）等の C0 制御文字** — Redis HSET / RediSearch HASH はバイナリ
   セーフのため、NUL を含む文字列もそのまま round-trip する。`A\x00B` のような
-  入力は 3 文字として保存される（empty-content 拒否経路には進まない）。
+  入力は 3 文字として保存される（empty-content 拒否経路には進まない）。こうした
+  文字 **だけ** でできた本文は拒否する（上の「見える文字のない入力の契約」）。
 - **ゼロ幅スペース・結合用スペーサ**（`U+200B`、`U+200C`、`U+200D`、`U+FEFF` 等） —
   検索時のトークナイズには影響しうるが（RediSearch 側の挙動）、保存本文には残る。
 - **異体字セレクタ**（`U+E0100`–`U+E01EF`、`U+FE00`–`U+FE0F`） — `神󠄀` のような
@@ -612,6 +681,36 @@ verbatim 契約を破る可能性を最小化するための設計判断であ�
 するため、復旧対象となる過去データが存在しない。復旧ルーチンを足したところで
 ユーザーが既に ephemeral と受け入れたデータの上でしか動かない。
 
+### 3.14 検索結果の整形（v1.7.0）
+
+v1.6.x は KNN の候補をすべて順位付けしていた。`multilingual-e5` では無関係なレコードでもほぼどのクエリに対してもコサイン 0.80〜0.85 になるため、`search_memory` は関連の薄い行を長々と返し、事実や文書の更新版が古い版より下に来ることがあった（古い版は `access_count` を蓄積している）。そこで `search_memory` は候補を次の順で整形する：
+
+1. **時間窓（事前フィルタ）** — `since` / `until` はランキング後ではなく、KNN と BM25 のクエリ内で適用する（[§4.3.1](#431-取り出し拡張ツールretrieval-extensions) 参照）。
+2. **ベクトル下限** — `cos_sim < vector_min_cos`（既定 `0.85`）のベクトル候補を落とす。落ちた行も BM25 経由では入りうる（`cos_sim = 0.0` として）。**0.85 は `multilingual-e5-base` で計測した値。`embedding_model` を変えたら計測し直すこと。**
+3. **融合スコア** — §3.6 の式、続いて親ドキュメント解決（§3.11）、語彙リランク（§3.6）、`min_score` の足切り（§3.6）。
+4. **新しい版を先頭へ**（`version_order_enabled`、既定 `true`） — ユーザーが設定や事実を作り直すと、旧版と新版の両方が保存され（近似重複は拒否しなくなった、§3.8）、両方が返ってくる。
+   - 各結果の**代表埋め込み**を取る：独立行は自身の `embedding`、親ドキュメントは先頭チャンク（`chunk_ids[0]`）の `embedding`。代表テキスト（独立行の `content`、または先頭チャンクの `content`）が `version_min_chars`（既定 `100`）より短い行は対象外 — 短い行同士は似すぎていて、版違いと別の事実を区別できない。
+   - 代表コサインが `>= version_sim_threshold`（既定 `0.98`）の 2 結果は同じ内容の版とみなし、推移的にグループ化する。
+   - 各グループ内で行を `(timestamp_epoch, id)` の新しい順に並べ替える（`id` は UUIDv7 なので、同じ秒に保存した行も順序が付く）。**各位置のスコアはそのまま** — 動くのは行だけなので、最新版がグループ内の最高スコアを引き継ぐ。**2 件以上のグループの全員**に `_version_group`（1 から始まるグループ番号）を付ける。最新版がもともと先頭で何も動かなかったときも付ける（下の相対カットで旧版が残るように）。何も削除しない。`chunk_ids` がなかった時期に保存した親ドキュメントは代表がないので、グループにしない。
+   - 0.98 は `multilingual-e5-base` での計測値：同じ設定の作り直し → 1.0、形が同じで値が違う設定 → 0.88〜0.91、1 つの長い返答内の別項目 → 最大 0.95。
+5. **相対カット** — スコアが先頭スコア × `relative_min_score_ratio`（既定 `0.6`）未満の結果を落とす。ただし `_version_group` の印が付いた行は除く（旧版を新版の隣に残すため）。`0.0` で無効化。
+6. 上位 `ttl_refresh_top_k` 件の **TTL 更新 / access_count**（§3.11）を行い、`limit` 件に切り詰める。
+
+**出力形式**（`search_memory` の markdown、v1.7.0）：
+
+```markdown
+> ⚠️ N3MC notice: <only if a notice is pending, §6, or the embedding model is unavailable, §3.9>
+
+_If several versions of the same content appear, the one with the newest `saved` time is the current one._
+
+### [doc×3] [<id>] turn=<turn_id> score=0.812 saved=2026-11-13 10:34 (UTC+0900)
+<content>
+```
+
+- `saved=` は保存された UTC タイムスタンプを**サーバーのローカル時刻**に変換し、オフセットを付けたもの（`_fmt_saved`）。
+- 版についての一文は、ヒットが 1 件以上あれば最初のヒットの上に 1 回だけ出す。
+- `turn=` は行に `turn_id` が無ければ省略。`[doc×N]` は親ドキュメントのみ。
+
 ---
 
 ## 4. MCP プロトコル表面
@@ -624,11 +723,11 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 サーバーが広告する内容：
 - `protocolVersion: "2024-11-05"`
-- `serverInfo: { name: "n3mc-workingmemory", version: "1.6.0" }`
+- `serverInfo: { name: "n3mc-workingmemory", version: <package __version__> }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — 振る舞い指示の複数行文字列（[§5](#5-振る舞い指示自動保存戦略) 参照）。**Lite 用文面には「メモリは 7 日で失効する」旨を明示する。**
 
-> **⚠️ 実装注意（version / instructions の設定漏れに注意）**：`serverInfo.version` と `instructions` は **`Server()` コンストラクタ引数で渡せる**（`Server(name, version="1.6.0", instructions=INSTRUCTIONS)`）。これを忘れると version が空・instructions が未広告になりやすい。コンストラクタで渡せば `create_initialization_options()` が自動で拾う。MCP SDK のバージョンによっては `init_options.instructions` への後付け代入も併用すると確実。
+> **⚠️ 実装注意（version / instructions の設定漏れに注意）**：`serverInfo.version` と `instructions` は **`Server()` コンストラクタ引数で渡せる**（`Server(name, version=__version__, instructions=INSTRUCTIONS)`）。これを忘れると version が空・instructions が未広告になりやすい。コンストラクタで渡せば `create_initialization_options()` が自動で拾う。MCP SDK のバージョンによっては `init_options.instructions` への後付け代入も併用すると確実。
 
 ### 4.3 ツール
 
@@ -636,8 +735,8 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
-| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
-| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | 本文長 ≤ `chunk_threshold` なら完全 + 近似重複判定後、HSET + EXPIRE し `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}` を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー、および後続 `search_memory` の `b_session` マッチ対象）。 |
+| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。結果は [§3.14](#314-検索結果の整形v170) の通りに整形・表示される（ベクトル下限、新しい版を先頭へ、相対カット、`saved=` 時刻）。`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
+| `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | 本文長 ≤ `chunk_threshold` なら完全一致の重複判定のみ（§3.8）を行った後、HSET + EXPIRE し `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}` を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー、および後続 `search_memory` の `b_session` マッチ対象）。 |
 | `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。親は `[doc×N]` タグ付き。チャンクは隠蔽（FT.SEARCH `*` クエリ後に Python 側で `parent_id` 空文字列フィルタ、§3.12 参照）。 |
 | `delete_memory` | `id: string`                              | ID が親（`doc:<uuid>`）なら親＋`docsha:`＋該当 `parent_id` を持つ全チャンクを連鎖削除。それ以外は `mem:<uuid>` とその sha ガードをアトミック削除。 |
 | `delete_memories_by_session` | `session_id: string`         | 指定 `session_id` に紐づく独立メモリ・親ドキュメント・子チャンク・sha ガードを、設定 `owner_id` のレコードに限定して一括削除。応答は `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`。ヒットゼロのときは `{"status":"not_found", "session_id": ..., "deleted": 0}`（再呼び出しは安全な no-op）。**不可逆操作のため呼び出し前に `session_id` をユーザーに確認すること。** Lite 専用（[§10 Test 6](#10-自律評価evidence-report) 参照）。 |
@@ -656,7 +755,9 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 | `since`  | `string` (ISO 8601 日付 or 日時) | このタイムスタンプ以降に保存されたエントリのみに絞る。日付のみ指定時は `00:00:00` として解釈。 |
 | `until`  | `string` (ISO 8601 日付 or 日時) | このタイムスタンプ以前に保存されたエントリのみに絞る。日付のみ指定時は `23:59:59` として解釈。 |
 
-`since` / `until` は片方のみ指定可。既存のランキングロジックには影響せず、最終的な候補集合に対する後段フィルタとして適用する。
+`since` / `until` は片方のみ指定可。ランキング式には影響しない。両方のクエリの内部で**事前フィルタ**として適用する — KNN：`@timestamp_epoch:[<since> <until>]=>[KNN N @embedding $vec AS __dist]`、BM25：`(<text query>) @timestamp_epoch:[<since> <until>]`（片側が開いている場合は `-inf` / `+inf`）。NUMERIC フィルタは §3.12 の UUID TAG 問題に該当しない。
+
+> **⚠️ 事前フィルタにする理由（v1.7.0）**：KNN はまず全体で最も近い N 件を返す。v1.6.x はランキング*後*に時間で絞っていたため、窓外の行のほうがクエリに近いものが多いと、窓内の行が候補集合に入らず、`search_memory(since=...)` が何も返さなかった。
 
 #### 新ツール `recall_thread`
 
@@ -666,11 +767,11 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 **運用**: 接続中の LLM は `search_memory` のスニペットで文脈不足と判断したとき、ヒットの `turn_id` を `recall_thread` に渡して周辺会話を取得すること。ユーザーがこのツールを直接指定する必要はない。
 
-> **⚠️ 実装注意（`search_memory` 応答に `turn_id` を出力すること）**：上記運用が成立するには、`recall_thread` に渡す `turn_id` を LLM が `search_memory` の結果から読み取れる必要がある。したがって **`search_memory` の markdown 出力に各ヒットの `turn_id` を含める**こと（空のときは省略可）。実装上は `_vector_search` / `_bm25_search` の `RETURN_FIELDS` に `turn_id` を追加し、親解決時は `doc:<pid>` から `turn_id` を取得して行 dict に載せ、最終 markdown に `**turn_id**: \`...\`` 行を出す。これが無いと `recall_thread` は事実上呼べない（仕様の運用フローが閉じない）。
+> **⚠️ 実装注意（`search_memory` 応答に `turn_id` を出力すること）**：上記運用が成立するには、`recall_thread` に渡す `turn_id` を LLM が `search_memory` の結果から読み取れる必要がある。したがって **`search_memory` の markdown 出力に各ヒットの `turn_id` を含める**こと（空のときは省略可）。実装上は `_vector_search` / `_bm25_search` の `RETURN_FIELDS` に `turn_id` を追加し、親解決時は `doc:<pid>` から `turn_id` を取得して行 dict に載せ、最終 markdown に 各ヒットの見出し行に `turn=<turn_id>` として出す（[§3.14](#314-検索結果の整形v170)）。これが無いと `recall_thread` は事実上呼べない（仕様の運用フローが閉じない）。
 
 ### 4.4 エラー処理
 
-ツール例外はディスパッチ層で捕捉し、先頭 `"Error: "` を付けた `TextContent` で返す。ツールレベル例外で stdio ループがクラッシュすることはない。ツール呼び出し時に Redis 到達不可な場合、ディスパッチャはツール実行を行わず「Redis Stack を起動してください」のヒントを返す。
+ツール例外はディスパッチ層で捕捉し、先頭 `"Error: "` を付けた `TextContent` で返す。ツールレベル例外で stdio ループがクラッシュすることはない。Redis の状態は呼び出しのたびに確かめ、切れた接続は自動でつなぎ直す。Redis に届かない間は、ディスパッチャはツールを実行せず、復旧の案内付きのバックエンドエラーを返す（[§3.9](#39-起動シーケンスと自己回復)「ツール呼び出しごとの Redis の確認」）。そのため Redis が止まっていても、MCP クライアントにはサーバーが**接続済み**と表示される。これは設計どおり：指示文とツールが届いているので、LLM がユーザーにすべきことを伝えられる（§5 ルール 4）。
 
 ---
 
@@ -683,7 +784,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 0. **Pro が同時接続中の場合の役割分担（共存ポリシー）** — `n3mc-longtermmemory`（N3MemoryCore Pro、永続 SQLite+sqlite-vec バックエンド）が同一セッションに登録されている場合、Lite はワーキングメモリ（セッション内進捗メモ・一時デバッグ状態・使い捨て中間結果）として、Pro は正規長期ストア（ユーザープロフィール・プロジェクト仕様・設計決定・世界観設定・API 契約・調査サマリ等、セッション跨ぎで残す価値のあるもの）として機能する。疑わしい場合は Pro 側に倒す。Pro 接続時は TTL 警告（ルール 7）は基本不要 — 長期コンテンツを Pro にルーティングするだけでよい。Pro が未接続の場合は本サーバーが唯一のメモリストアとなり全コンテンツを受け入れ、ルール 7 を有効化する。同一事実を両サーバーに二重保存しない。
 
 1. **先に検索し、想起したら明示する** — 各ユーザーターンの先頭で、意図を反映した簡潔なクエリで `search_memory` を呼ぶ。検索結果を実際に応答に活用した（以前の記憶を想起して答えた）場合は、返答冒頭にユーザーの言語で一言そえる。例:「前回の回答がメモリに保存されています。」「以前の会話から該当情報を取り出しました。」／英語なら "Pulling this from earlier memory in this session."。**関連メモリが無かった / 想起内容を使わなかった場合は告知しない。** 単に「検索した」ことを述べるのは禁止 — 「想起した」ことだけを述べる。
-2. **毎ターン自動保存（許可を求めない）** — 保存は静かに自動で行う。ユーザーが「保存して」「覚えておいて」と言う必要は一切なく、**既定で保存する**。保存してよいか確認する質問もしない。各意味のあるターン後に `save_memory` を呼び、(a) ユーザーの意図・質問の言い換え、(b) **自分が生成した実質的な出力** — 特にユーザーが後で参照しそうな創作・生成コンテンツ（世界観設定、キャラクター設定、設計スケッチ、コードアーキテクチャ、リサーチ要約、アウトライン等。1〜2 文を超えて作ったものは保存）、(c) 確立した事実・嗜好・未解決の問いを保存。1 事実 = 1 `save_memory` 呼び出し、各 50–200 字（長文は 3 番ルール）。重複はサーバー側で自動却下されるため「多めに保存」が安全。**Lite は 7 日で消えるローリングスクラッチパッド**である旨を LLM に明示。
+2. **毎ターン自動保存（許可を求めない）** — 保存は静かに自動で行う。ユーザーが「保存して」「覚えておいて」と言う必要は一切なく、**既定で保存する**。保存してよいか確認する質問もしない。各意味のあるターン後に `save_memory` を呼び、(a) ユーザーの意図・質問の言い換え、(b) **自分が生成した実質的な出力** — 特にユーザーが後で参照しそうな創作・生成コンテンツ（世界観設定、キャラクター設定、設計スケッチ、コードアーキテクチャ、リサーチ要約、アウトライン等。1〜2 文を超えて作ったものは保存）、(c) 確立した事実・嗜好・未解決の問いを保存。1 事実 = 1 `save_memory` 呼び出し、各 50–200 字（長文は 3 番ルール）。完全一致の重複はサーバー側で自動却下されるため「多めに保存」が安全。近似重複は却下**しない**：更新した事実や作り直した文書は新しいエントリとして保存され、`search_memory` は最新の版を先頭に表示する。**Lite は 7 日で消えるローリングスクラッチパッド**である旨を LLM に明示。
 3. **長文は全文 1 回で保存（verbatim 復元）** — ターンで発生した長文 — ユーザー貼り付け（仕様・記事・ログ・コード）**または自分が生成した長文（創作設定・世界観・キャラシ・設計ドキュメント）** — でユーザーが後で原文を取り出しそうなものは、**全文を単一の `save_memory` 呼び出しに渡す**。サーバーが自動的に親ドキュメント＋チャンク化を行い、検索はチャンクで、復元は親本文で verbatim 返却する（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。目安：**~400 字超 → 全文 1 回保存**。それ未満の要約可能な内容は 2 番ルールで短文複数保存。長文 verbatim 候補を多数の短い要約に分割してはならない（復元忠実度が崩れる）。
 4. **ツールエラー時は先にユーザーへ通知（長文生成を先走らない）** — `search_memory` / `save_memory` がサーバーエラーを返した場合（Redis 不達・接続拒否・タイムアウト・「start Redis Stack」ヒント等）、**長文生成に入る前に停止し、ユーザーの言語で端的に通知する**。理由：バックエンド不稼働時は後続の `save_memory` も全て暗黙失敗するため、長文設計ドキュメントや創作設定を作っても **セッション閉鎖時に全て失われる**（ユーザーは記憶層の故障に気付けない）。通知内容：(a) 失敗事実（例「Redis Stack が停止しているようです。メモリ保存・検索が使えません。」）、(b) ツールが返した復旧ヒント（例 `docker run -p 6379:6379 redis/redis-stack-server:latest`）、(c) メモリ無効のまま続行するか・復旧まで待つかをユーザーに確認。短い事実回答は続行してよいが、一度は保存失敗中である旨を必ず触れる。
 5. **ノイズをスキップ** — 挨拶・確認質問・機械的な了解は保存しない。
@@ -695,6 +796,8 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 9. **`session_id` 単位での一括掃除** — `delete_memories_by_session` は完了したプロジェクトのメモリを TTL 前に除去し、検索結果のノイズを低減するために使う。操作は**不可逆**なので、呼び出す前に対象 `session_id` をユーザーに確認すること。
 
 10. **スレッドコンテキスト取り出し — `recall_thread`（§4.3.1）** — `search_memory` のスニペットで文脈が不足していると判断した場合、ヒットの `turn_id` を `recall_thread` に渡して前後の会話スレッドを時系列で取得する。`save_memory` に `turn_id` 引数を渡して同一ターン内の保存をグルーピングしておくと後の取り出しが容易になる（推奨形式：短い UUID・タイムスタンプ・`"turn-N"` 等）。ユーザーがこのツールを直接指定する必要はない — LLM が想起品質を高めるために主体的に使うツールである。
+
+11. **版と通知** — `search_memory` の結果に同じ内容の版が複数現れたら、`saved=` 時刻が最も新しいものが現行版である。それに基づいて答える（変更が重要なら変更に触れる）。結果が `> ⚠️ N3MC notice:` で始まる場合は、その内容をユーザーの言語で伝える（例：`config.json` が読めない）。
 
 完全文面は [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py)。
 
@@ -712,12 +815,15 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
   "local_id":                 "<UUIDv4 自動生成>",
   "redis_url":                "redis://localhost:6379/0",
   "ttl_seconds":              604800,
-  "dedup_threshold":          0.95,
   "half_life_days":           3,
   "bm25_min_threshold":       0.1,
   "search_result_limit":      20,
-  "context_char_limit":       3000,
   "min_score":                0.2,
+  "vector_min_cos":           0.85,
+  "relative_min_score_ratio": 0.6,
+  "version_order_enabled":    true,
+  "version_sim_threshold":    0.98,
+  "version_min_chars":        100,
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
@@ -740,7 +846,8 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `redis_url` — 接続 URL。環境変数 `N3MC_REDIS_URL` がこのフィールドより優先。
 - `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 7 日）。下げるのは問題ないが、1 週間を大きく超える値に上げると Lite の目的が崩れるためレビュー時に指摘される。
 - `search_result_limit` — `search_memory` が返す最大件数。
-- `context_char_limit` — 下流ツールのクライアント側トリミング用に予約（内部では未使用）。
+- `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 検索結果の整形（[§3.14](#314-検索結果の整形v170)）。`vector_min_cos`（0.85）と `version_sim_threshold`（0.98）は `multilingual-e5-base` で計測した値。別の `embedding_model` では計測し直すこと。`vector_min_cos` の妥当な範囲は 0.80〜0.88（低くすると再現率が上がり関連の薄い行も増える、高くすると結果が短くなり関連行も落ちやすい）。変更は MCP サーバープロセスの再起動時に反映される（MCP クライアントを再起動する）。
+- `dedup_threshold` と `context_char_limit`（v1.6.x）は**廃止** — 既存の `config.json` にあっても無視される（削除する必要はない）。
 - `min_score` — このスコア未満の結果を除外（既定 `0.2`）。`0.0` で無効化。**フィルタは語彙リランク（[§3.6](#36-ランキング式)）の後に適用される** — フレーズ一致・coverage の加点を受けた最終スコアで判定するため、融合スコアが閾値直下でもリランク加点で救済されうる。
 - `search_query_max_chars` — クエリから使う最大文字数（既定 `2000`；埋め込みモデルが ~512 トークンで飽和）。
 - `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズとオーバーラップ（既定 400 / 100 文字）。本文長がこの閾値を超えた場合に親ドキュメント＋チャンク化（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）に入る。
@@ -751,24 +858,34 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `skip_code_blocks` — `true` のとき `save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含む本文を拒否し、`{"status": "skipped_code", "saved": false}` を返す。既定は `false`（FastAPI 時代の N3MemoryCore に倣い「コードをメモリに入れたくない」ユーザー向けのオプトイン）。ヒューリスティックはフェンス記号のみ — 散文とコード混在でも一括拒否であり、コード部分だけを剥離する処理は行わない。LLM は §5 の指示で、`skipped_code` を受けた同一ペイロードを再送せず、代わりにコードの要約散文を保存するよう誘導される。
 - `embedding_model` / `embedding_dim` — 埋め込みモデル名（既定 `intfloat/multilingual-e5-base`）と、そのモデルの出力ベクトル次元（既定 `768`）。[§3.2](#32-埋め込み) 参照。運用者が品質・リソース・言語のトレードオフを選べるよう設定可能化した項目で、製品自体は言語中立を保つ。`embedding_dim` は **`embedding_model` の実際の出力次元と一致させること** — RediSearch のベクトルインデックス（`DIM`）はこの値で構築されるため、不一致だと保存・検索が失敗する。両者の変更は**プロセス再起動 + インデックスフラッシュ**を要する（Lite は 7 日 TTL なので、既存データは放置しても自然消滅する）。既定のままなら従来挙動と完全に同一。
 
+**読めない・型を誤った `config.json`（v1.7.0）** — ユーザーはこのファイルを手で編集する（例：`vector_min_cos` の調整）ため、書き間違いは起こる前提とする。**上書きしない。**
+
+| ケース | 挙動 |
+|---|---|
+| ファイルが無い | 新しい `owner_id` / `local_id` 付きで既定値を書き出す |
+| JSON として不正、またはトップレベルがオブジェクトでない | **ファイルを変更しない。** 既定値で動き、このプロセスに限り新しい UUID を使う（保存しない）。通知 `config_unreadable` を出す（文面: `config_unreadable: <path> could not be read (<理由>) …`） |
+| 値の型が誤っている（例：`"vector_min_cos": "0.83"`、引用符付きの数値） | **その項目だけ**無視して（既定値を使い）、他の項目は使う。ファイルは変更しない。項目名を挙げた通知 `config_type` を出す |
+| 読める | 欠損フィールドを既定値で埋めて保存（従来通り） |
+
+- 型チェック（`config_value_ok`）：既定値が bool なら bool のみ、数値なら数値のみ（int / float 可、bool は不可）、文字列なら文字列のみ受け付ける。既定値の無いフィールド（`owner_id`、`local_id`）と未知のフィールドはチェックしない。
+- **通知**：`load_config()` はこれらのメッセージを `cfg["_notices"]`（文字列のリスト）に集め、それぞれを `stderr` に出力する。各メッセージは先頭にキーを付ける（例 `config_type: …`）。サーバーはプロセスで**最初に成功した** `search_memory` 呼び出しの出力の先頭に（エラー応答は `Error:` で始める必要があるので、その場合は次に成功した検索まで持ち越す） `> ⚠️ N3MC notice: <message>` 行として付け、接続中の LLM がユーザーに伝えられるようにする（§5 ルール 11）。ファイルを直してクライアントを再起動すれば消える。
+
 > **1 PC 内の複数アカウント**：OS ユーザーごとに各自の `config.json` で動く。Redis を共有したい場合は両方の設定の `redis_url` を揃える — エントリは `owner_id` TAG フィルタで分離される。
 
 ---
 
 ## 7. データ保存先
 
-既定ではディスク上には `config.json` のみ：
+既定では、ディスク上に置くのは `config.json` だけで、場所は **`~/.n3mc-workingmemory/`**（ユーザーのホームフォルダ。Windows では `%USERPROFILE%\.n3mc-workingmemory\`）。環境変数 `N3MC_DATA_DIR`（絶対パス）で上書きできる。
 
-| OS      | パス                                                         |
-| ------- | ------------------------------------------------------------ |
-| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                         |
-| macOS   | `~/Library/Application Support/n3mc-workingmemory/`          |
-| Linux   | `~/.local/share/n3mc-workingmemory/`                         |
+データフォルダ内のファイル：
+- `config.json` — 設定（ディスク上の唯一の成果物）
 
-データディレクトリ内のファイル：
-- `config.json` — 設定（唯一のディスク上成果物）
+> **⚠️ アプリ用のデータフォルダではなくホームフォルダに置く理由（v1.7.0）**：v1.6.x までは、設定を OS 標準のユーザーデータフォルダ（Windows では `platformdirs` による `%LOCALAPPDATA%\n3mc-workingmemory\n3mc-workingmemory\`）に置いていた。Microsoft Store（MSIX）版の Claude デスクトップアプリは、起動した MCP サーバーをパッケージの中で動かすので、Windows はその **`%LOCALAPPDATA%` 以下の読み書きを** `%LOCALAPPDATA%\Packages\<パッケージ>\LocalCache\Local\…` **に振り替える**。そのため同じ PC に `config.json` が 2 つでき、`owner_id` も 2 つになった（デスクトップアプリが起動したサーバー用と、ターミナルの `claude` やスクリプトが起動したサーバー用）。検索と一覧は `owner_id` で絞る（§3.12）ので、同じ Redis なのに、一方で保存した記憶がもう一方から見えなかった。ホームフォルダは振り替えの対象外なので、どこから起動しても同じファイルを読む。
 
-環境変数 `N3MC_DATA_DIR`（絶対パス）で上書き可能。Redis 状態は Redis コンテナが置く場所（既定では無名 Docker ボリュームで、`docker rm -f redis-stack` で消える）に保存される。
+**引き継ぎ（1 回だけ）**：`~/.n3mc-workingmemory/config.json` がなく、`N3MC_DATA_DIR` も設定されていないとき、`load_config()` は旧来の場所（起動したプロセスから見た `platformdirs.user_data_dir("n3mc-workingmemory")` + `config.json`）のファイルを、新しい場所へバイト単位でそのまま写し、`stderr` に 1 行出す。旧来のファイルは残す。どちらの `owner_id` が残るかは、更新後に最初に起動したプロセスで決まる。もう一方の `owner_id` で保存した記録（長くても `ttl_seconds` の 7 日分）は結果に出なくなり、そのまま期限で消える。旧来のファイルもなければ、これまでどおり新しい設定を作る。
+
+Redis 状態は Redis コンテナが置く場所（既定では無名 Docker ボリュームで、`docker rm -f redis-stack` で消える）に保存される。
 
 ---
 
@@ -837,11 +954,28 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
 
-**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に 7 ツールを冪等追加する。1 件でも欠けていれば追記、すべて揃っていれば無書き込み。既存フィールドは温存。`hooks.json` は `python` → `py`（Windows Python Launcher） → `python3` の順にフォールバックチェイン（`||`）で試行するため、いずれか 1 つが `PATH` 上にあれば動作する。3 つすべて不在の場合のみ exit 非ゼロで失敗し、Claude Code の `/plugins` Errors タブに表示される（silent fail を回避）。
+**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote` でインストールすると、プラグインの `SessionStart` フック [`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py) が `~/.claude/settings.json` の `permissions.allow` に **ワイルドカードのルールを 2 つ** 冪等追加する：
 
-同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が `PATH` 上に無いと MCP launcher 側では不透明な `ENOENT` で失敗する。フックが事前に `shutil.which("uvx")` を確認し、見つからない場合は **stderr に日英両言語のインストール手順**（`pipx install uv` ／ `curl -LsSf https://astral.sh/uv/install.sh | sh` 等）を出力して `/plugins` Errors タブに actionable なメッセージを残す。フックの exit code は常に 0（パーミッション追加自体は成功しているため）。
+- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — **プラグインが提供する形** のツール。Claude Code はプラグインの MCP ツールを `mcp__plugin_<plugin-name>_<server-name>__<tool>` と名付け、パーミッションのルールもこのプラグイン付きの形で書く必要がある（[permissions docs](https://code.claude.com/docs/en/permissions.md)、"Servers that a plugin provides"）。
+- `mcp__n3mc-workingmemory__*` — サーバーを直接登録した場合（`claude mcp add`、`.mcp.json`）の同じツール。
 
-**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json` / Python 完全不在）では下記ブロックを `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）に手動追記：
+ワイルドカードは `recall_thread` を含む 7 ツールすべてと、今後追加されるツールにも当たる。フックはルールが欠けているときだけ書き込み、ユーザーがすでに持っているエントリ（v1.6.x のツールごとの明示リストなど）は消さず、関係のないフィールドにも触れない。
+
+**`settings.json` を更新できないとき（v1.7.0）** — ルールが欠けているのに、ファイルを JSON のオブジェクトとして読めない（JSON が壊れている、一番外の型が違う、`permissions` / `allow` の型が違う）か、書き込めない（読み取り専用、権限がない、会社のポリシーで固定されている）とき、フックは**何も変えず**、黙って失敗せずにそれを伝える。`stderr` に 1 行（Claude Code のデバッグログに残る）と、下と同じ `systemMessage` + `additionalContext` の JSON を出す。文面の例：`[n3mc-workingmemory] Could not update ~/.claude/settings.json (PermissionError: …), so the memory tools were not pre-approved and Claude Code will ask for permission on every memory call. Make the file writable, or add "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" to permissions.allow yourself.` 終了コードは 0 のまま。ルールがすでにあるときは何も伝えない（ルール入りの読み取り専用ファイルは問題ない）。v1.6.x はこのエラーを握りつぶしていた：終了コード 0 で出力なし（§A8 の試験で発見）。
+
+> **⚠️ v1.6.x の自動許可はプラグインに一度も当たっていなかった（v1.7.0 で修正）**：v1.6.x は `mcp__n3mc-workingmemory__<tool>` の明示ルールを 6 つ追加していた。この名前は直接登録したサーバーには当たるが、プラグイン付きのツール名には **当たらない**。そのためプラグインの利用者は `search_memory` / `save_memory` のたびに許可を求められ（自動許可で防ぐはずだった停止そのもの）、`recall_thread` はそもそもリストに入っていなかった。
+
+**Python のフォールバックと、目に見える失敗** — `hooks.json` のコマンドは `python` → `py`（Windows Python Launcher） → `python3` の順に `||` チェインで試す。**どれも** `PATH` 上に無い場合は、Python を使わない 4 段目が JSON オブジェクトを 1 つ stdout に出して exit 0 で終わる：
+
+```json
+{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), so the memory tools could not be pre-approved and Claude Code will ask for permission on every memory call. Install Python 3, or add \"mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
+```
+
+`systemMessage` はユーザーに警告として表示され、`additionalContext` によって接続中の LLM がその内容を説明できる。単に exit 非ゼロで終わるだけでは **足りない**：Claude Code は失敗した `SessionStart` フックを、stderr の最初の行（`python: command not found`）を載せた `SessionStart hook error` の通知としてトランスクリプトに出すだけで、何が壊れるのかも直し方も伝わらない。また `/plugin` の Errors タブに出るのはプラグインの *読み込み* エラー（不正な `hooks.json`、誤ったパス）で、フックの *実行時* の失敗ではない（[hooks docs](https://code.claude.com/docs/en/hooks.md)、[plugin troubleshooting](https://code.claude.com/docs/en/plugins/troubleshooting.md)）。v1.6.x は Errors タブ頼みで、実質的に無言だった。
+
+同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が無いと MCP launcher 側で不透明な `ENOENT` としてしか現れない。フックは `shutil.which("uvx")` を確認し、見つからない場合は同じ形の JSON（`systemMessage` + `additionalContext`）で日英両言語のインストール手順（`pipx install uv`、`curl -LsSf https://astral.sh/uv/install.sh | sh`、ドキュメントの URL）を出して exit 0 で終わる。両方に当てはまるときは、メッセージを 1 つの JSON オブジェクトにまとめる（フックの stdout は単一の JSON オブジェクトでなければならない）。
+
+**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json`）では、下記ブロックを手動で追記する（ワイルドカードの形なら `mcp__n3mc-workingmemory__*`）。**プラグインでインストールしたが Python が無い場合** は、代わりに `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（プラグイン付きの名前）を追加する。追記先は `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）：
 
 ```json
 {
@@ -870,17 +1004,20 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 ### 実行方法
 
 ```bash
-# 1. Redis Stack を起動（RediSearch は DB 0 しか索引できない）
-#    初回：docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
-#    2 回目以降：docker start redis-stack
-docker start redis-stack 2>/dev/null || docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+# 1. テスト専用の Redis Stack を起動（メモリが入っている Redis は絶対に使わない）
+#    RediSearch は DB 0 しか索引できず、テストスイートはそれを FLUSHDB する
+#    初回：docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
+#    2 回目以降：docker start redis-stack-test
+docker start redis-stack-test 2>/dev/null || docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
 
-# 2. 開発依存込みでインストールして pytest
+# 2. テストの接続先を明示して pytest
 pip install -e ".[dev]"
-pytest tests/ -q
+N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
-Redis Stack が `N3MC_REDIS_TEST_URL`（既定 `redis://localhost:6379/0`）で到達不可の場合、テストは失敗ではなく自動スキップされる。
+**テスト URL の既定値は無い（v1.7.0）。** Redis を要するテストは `N3MC_REDIS_TEST_URL` が設定されていなければスキップされる。またその URL がユーザーの実際の `config.json` の `redis_url` または `N3MC_REDIS_URL` と同じ場合、スイートは実行を拒否する（理由付きでスキップ）。すべてのテストファイルは `conftest.py` の同じ `REDIS_TEST_URL` を使い、Redis URL をハードコードしてはならない。v1.6.x は既定で `redis://localhost:6379/0` — MCP サーバーと同じ Redis — を使っていたため、素の `pytest` がユーザーのワーキングメモリを消していた。
+
+`N3MC_REDIS_TEST_URL` が未設定、またはその先の Redis Stack に到達できない場合、テストは失敗ではなく自動スキップされる。Redis を必要としないテスト（ランキング、整形、設定）は Redis 無しで実行される。
 
 > **⚠️ 破壊的なテスト DB**：RediSearch は DB 0 以外でインデックスを作成できません（`Cannot create index on db != 0`）。このためテストスイートは各テストの前後で DB 0 を `FLUSHDB` します。残したいデータが入っている Redis には `N3MC_REDIS_TEST_URL` を向けないでください — テスト専用コンテナを用意してください。
 
@@ -894,7 +1031,8 @@ n3mcmcp-lite/
     ├── conftest.py          # 共通フィクスチャ：隔離 data dir、Redis URL 上書き、ダミーベクトル
     ├── test_database.py     # Layer 1: Redis / RediSearch 単体（CRUD、スキーマ、TTL、重複、BM25、KNN）
     ├── test_processor.py    # Layer 2: ランキング数式、埋め込み、purify、チャンク化、リランク
-    └── test_server.py       # Layer 3: MCP ツールディスパッチ E2E（隔離 `config.json` + flush 済み DB 0）
+    ├── test_server.py       # Layer 3: MCP ツールディスパッチ E2E（隔離 `config.json` + flush 済み DB 0）
+    └── test_regressions.py  # Layer 4: v1.7.0 の修正（クエリ整形、完全一致のみの重複判定、事前フィルタ、整形、設定）
 ```
 
 ### Layer 1: `tests/test_database.py`（34 テスト）
@@ -903,7 +1041,7 @@ n3mcmcp-lite/
 |---|---|---|
 | `TestIndexSetup` | RediSearch インデックス生成、再実行冪等性、欠損フィールドの追加 | スキーマ管理 |
 | `TestInsertAndRetrieve` | INSERT→COUNT、ハッシュ整合性、embedding 無し挿入、`parent_id` 格納 | CRUD |
-| `TestDedup` | 完全一致 SHA 衝突、近似類似度閾値、親ドキュメント SHA ガード | 重複排除 |
+| `TestDedup` | 完全一致 SHA 衝突、親ドキュメント SHA ガード（v1.7.0 から類似度による拒否はない） | 重複排除 |
 | `TestDelete` | 単体削除、親→チャンクカスケード、`docsha:` ガード掃除 | トランザクション保護 |
 | `TestTTL` | 7 日 TTL 設定、検索ヒット時の `EXPIRE` リフレッシュ、期限切れ消失 | TTL |
 | `TestFTS` | 句読点除去、BM25 スコア、短クエリ、CJK バイグラム展開によるヒット | FTS / 日本語 |
@@ -940,6 +1078,20 @@ n3mcmcp-lite/
 | `TestParentDocRecall` | 架空都市「不知火」設定の一字一句復元、チャンク→親集約、`[doc×N]` 表示、親→チャンク削除カスケード | 親ドキュメント（§3.11） |
 | `TestEncodingSafetyE2E` | 孤立サロゲート混じりの content で `save_memory` が例外を投げない、全サロゲート入力は空内容エラー、孤立サロゲート混じりのクエリで `search_memory` が正常応答 | エンコーディング安全策 E2E（§3.13） |
 
+### Layer 4: `tests/test_regressions.py`（v1.7.0）
+
+埋め込みは決定的なフェイク（モデル不要）。*Redis* と記したクラスは `N3MC_REDIS_TEST_URL` を要する。
+
+| テストクラス | テスト内容 |
+|---|---|
+| `TestQueryCleaning` | 制御文字と CJK・全角句読点が除去される。`「記憶装置」は？` が 記憶装置 を含むレコードにヒットする（*Redis*）。記号・制御文字リストのどのクエリでも `FT.SEARCH` が例外を投げない（*Redis*） |
+| `TestExactOnlyDedup` | 値だけ新しいほぼ同一の短い事実が保存される。数か所を変えて作り直した長文文書が保存される。完全一致の重複は引き続き拒否される（*Redis*） |
+| `TestTimeWindow` | クエリにより近い新しい行が `limit × 5` 件より多くあっても、`since` / `until` が範囲内の行を返す（*Redis*） |
+| `TestShaping` | `vector_min_cos` が低コサインのベクトル候補を落とす。相対カット。最新版が先頭に移り、その位置のスコアを引き継ぐ。`_version_group` の行は相対カットで残る。短い行（< `version_min_chars`）はグループ化されない |
+| `TestRender` | ローカル時刻の `saved=`、版についての一文、通知が最初の検索でのみ出る |
+| `TestConfig` | 読めない `config.json` が変更されない。型の誤った項目が無視され報告される。bool は数値として受け付けない |
+| `TestTestSafety` | `conftest` がライブの `redis_url` と同じテスト URL を拒否する |
+
 ### 実行例
 
 ```bash
@@ -975,12 +1127,13 @@ pytest tests/ -v -k "not TestEmbedding"
    - 日本語版の例: 「浮遊都市・不知火（架空の設定資料）」
    - 英語版の例: 任意の架空のキャラクター・都市・固有名詞
 
-4. **FTS 句読点・CJK 耐性テスト**: 括弧・句読点を含む日本語テキスト（例: `架空の惑星「アルファ9」の気温設定`）を `save_memory` で保存後、括弧を含まないクエリ（例: `アルファ9 気温`）で `search_memory` を実行し、**上位 3 件以内にヒット**することを合格基準とする。§3.7 の句読点除去と CJK バイグラム展開が保存側・クエリ側の両方で一貫して適用されていることを検証するテストである。
+4. **FTS 句読点・CJK 耐性テスト**: 括弧・句読点を含む日本語テキスト（例: `架空の惑星「アルファ9」の気温設定`）を `save_memory` で保存後、括弧を含まないクエリ（例: `アルファ9 気温`）**と CJK 句読点を残したクエリ**（例: `「アルファ9」の気温は？`）で `search_memory` を実行し、どちらでも**上位 3 件以内にヒット**することを合格基準とする。§3.7 の句読点除去と CJK バイグラム展開が保存側・クエリ側の両方で一貫して適用されていることを検証するテストである。
 
 5. **完全記録テスト**: 空でない入力がすべて記録されることを確認せよ。旧「N 文字未満フィルタ」「定型語スキップ」「ノイズパターン」が**存在しない**こと。
    - 2 文字の文字列（例: `はい`）を `save_memory` に渡し、**レコードが保存される**こと。
-   - 定型語（例: `ok`、`yes`、`thanks`）を `save_memory` に渡し、**レコードが保存される**こと（ただし完全重複・近似重複は server-side で拒否されうる — その場合は別文字列で再試行）。
-   - 空文字列・空白のみの入力は `empty content` で拒否されることを確認。
+   - 定型語（例: `ok`、`yes`、`thanks`）を `save_memory` に渡し、**レコードが保存される**こと（ただし完全重複は server-side で拒否されうる — その場合は別文字列で再試行）。
+   - 更新した事実（例: `The project budget is 100 dollars.` の後に `The project budget is 120 dollars.`）が**新しいエントリとして保存され**（`near_duplicate` にならない）、それを `search_memory` で検索すると両方が `saved=` 時刻付きで並ぶこと。
+   - 空文字列・空白のみの入力は `empty content` で拒否されることを確認。見える文字のない入力（例：`\x00`、単独の `U+200B`）は `empty content (no visible characters)` で拒否されることを確認（§3.13）。
 
 6. **session_id 一括削除テスト（`delete_memories_by_session`）**: 不要になったプロジェクト／タスクのワーキングメモリを TTL を待たずに整理できることを確認せよ。
    1. 一意な `session_id`（例: `eval-cleanup-YYYY-MM-DD`）を決め、その session_id を渡しながら **複数の異なる形態**のレコードを `save_memory` する：

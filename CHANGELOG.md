@@ -11,6 +11,110 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.10.0] — 2026-11-14
+
+Spec v1.6.0 → v1.7.0 (JP/EN). Fixes found while running the Pro edition
+(2026-11-12 memo), applied to Lite through the specification; code
+regenerated from the EN spec.
+
+### Fixed
+- **Updated facts were silently dropped**: `save_memory` rejected a new
+  entry as `near_duplicate` when an existing one had cosine ≥ 0.95. With
+  `multilingual-e5` that also hits a fact re-saved with a new value or a
+  setting sheet re-made with a few changes, so the user's latest decision
+  never reached memory. Only exact duplicates are rejected now (short
+  entries and whole documents); `dedup_threshold` is removed.
+- **BM25 leg lost on Japanese questions**: CJK punctuation (`「」`, `？`, …)
+  was not stripped from the query, so bigrams such as `「記` were ANDed into
+  the RediSearch query and `「記憶装置」は？` returned 0 keyword hits.
+  Control characters made `FT.SEARCH` fail with a syntax error. Both are
+  stripped now, and a BM25 failure never fails the search.
+- **`since` / `until` missed in-range entries**: the time window was applied
+  after ranking the global top-N. It is now a pre-filter inside the KNN and
+  BM25 queries (`@timestamp_epoch:[…]`).
+- **Mistyped `config.json` was overwritten**: an unreadable file was reset to
+  defaults. It is now left untouched; wrongly typed items are ignored one by
+  one, and a notice is shown on the first `search_memory`.
+- **Tests could wipe the live working memory**: the suite FLUSHes DB 0 and
+  defaulted to `redis://localhost:6379/0` (the MCP server's own Redis);
+  `test_cross_session.py` hard-coded it and its subprocess servers used the
+  user's real config. Tests now need `N3MC_REDIS_TEST_URL`, refuse the live
+  `redis_url`, and run the subprocess servers against the test Redis and a
+  temp data dir. CI uses a sidecar on port 6390.
+
+- **Redis outages were not recoverable / were silent** (spec §3.9, found by
+  the A1 abnormal-case test): Redis was checked only at startup, so a server
+  started while Redis was stopped kept saying "Redis Stack is not running"
+  after `docker start redis-stack` until the MCP client was restarted; and a
+  Redis that stopped later made `search_memory` return `_No memories found._`
+  and `save_memory` a raw `Error 10061` without a hint. Every tool call now
+  PINGs / reconnects first (`ensure_connected()`), connection errors inside a
+  tool are reported as the backend error, and the hint is English and shows
+  the host:port from `redis_url` (no password). The hint also says to start
+  Docker (Docker Desktop) first: with Docker itself stopped (A4 test),
+  `docker start redis-stack` alone fails with a Docker API error.
+- **Plugin hook failed silently when `settings.json` could not be updated**
+  (spec §8, found by the A8 test): with a read-only or policy-locked
+  `~/.claude/settings.json`, or invalid JSON in it, the hook exited 0 with no
+  output, so the user never learned that the tools were not pre-approved. It
+  now changes nothing and reports the reason (stderr + `systemMessage`) with
+  the rule to add by hand; a read-only file that already has the rules stays
+  quiet.
+- **Blank memories from invisible-only input** (spec §3.13, found by the A10
+  encoding test): `strip()` keeps `U+0000`, `U+200B` and `U+FEFF`, so a
+  payload such as `\x00` or a lone zero-width space was saved as a memory
+  that shows as nothing. `save_memory` now rejects content with no visible
+  character (`empty content (no visible characters)`); anything with a
+  visible character is still stored verbatim, NUL included.
+- **Offline without a cached model: every call retried the download, and
+  keyword-only search was silent** (spec §3.9, found by the A6 test): each
+  `save_memory` took ~24 s and each `search_memory` ~12 s, with no sign in
+  the search output that the vector leg was off. A failed model load is now
+  retried at most once every 60 s, `search_memory` carries a notice on every
+  degraded call, and `save_memory` adds a `detail` explaining the
+  `embedding_unavailable` warning.
+- **Fresh installs crashed on start with `mcp` 2.x** (found while running the
+  A3 abnormal-case test): `pyproject.toml` required `mcp>=1.0.0` with no upper
+  bound, so `uvx` / `pip` / the plugin now install `mcp` 2.3.0, which removed
+  the low-level `Server.list_tools()` decorator API — the server died on import
+  (`AttributeError: 'Server' object has no attribute 'list_tools'`) and `/mcp`
+  showed only `Connection closed`. This also affects the published 1.9.1.
+  Pinned to `mcp>=1.0.0,<2.0.0` until the server is ported to the 2.x API.
+- **Plugin auto-approve never matched, and failed silently without Python**
+  (spec §8, found by the A2 abnormal-case test): the SessionStart hook added
+  plain `mcp__n3mc-workingmemory__<tool>` rules, but Claude Code names a
+  plugin's MCP tools `mcp__plugin_<plugin>_<server>__<tool>`, so plugin users
+  were prompted on every memory call; `recall_thread` was also missing. The
+  hook now adds `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` and
+  `mcp__n3mc-workingmemory__*`. When no Python is on PATH, a Python-free last
+  step prints a `systemMessage` warning (what breaks, what to add) and exits
+  0 — a non-zero exit only produced a one-line `python: command not found`
+  transcript notice, not an entry in the `/plugin` Errors tab as the spec
+  claimed. The missing-`uvx` hint uses the same `systemMessage` JSON.
+- **Memories split by launcher on Windows** (spec §7): the config lived in
+  `%LOCALAPPDATA%`, which the Microsoft Store (MSIX) Claude desktop app
+  redirects for the MCP servers it starts. One PC had two `config.json`
+  files and two `owner_id`s, so memories saved from the desktop app were
+  invisible to `claude` in a terminal (and vice versa) on the same Redis.
+  The config now lives in `~/.n3mc-workingmemory/` and the old file is
+  copied over once on first start.
+- **Startup model load split in two** (spec §3.9): the embedding library is
+  imported synchronously before stdio starts, and only the model is built in
+  the background. Importing it in the background after stdio starts (as the
+  spec's v1.6 note suggested) deadlocked on Windows — child processes spawned
+  during the import block on the stdin pipe that the MCP reader is reading.
+  `initialize` answers in ~10 s warm.
+
+### Changed
+- **Search result shaping**: vector candidates below `vector_min_cos`
+  (0.85) are dropped; results below 0.6 × the top score are cut; versions of
+  the same content (≥ 0.98 similar) are listed newest first. Each hit shows
+  `saved=` in local time, with a note that the newest version is current.
+- `serverInfo.version` follows the package version.
+- New config keys: `vector_min_cos`, `relative_min_score_ratio`,
+  `version_order_enabled`, `version_sim_threshold`, `version_min_chars`.
+  Removed: `dedup_threshold`, `context_char_limit` (ignored if present).
+
 ## [1.9.1] — 2026-05-31
 
 ### Docs

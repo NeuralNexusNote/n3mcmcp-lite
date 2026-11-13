@@ -226,7 +226,7 @@ storage.
 | Tool                          | Purpose                                                                          |
 | ----------------------------- | -------------------------------------------------------------------------------- |
 | `search_memory`               | Hybrid (vector + BM25) search, ranked & time-decayed, `session_id` boost         |
-| `save_memory`                 | Persist a short entry (7d TTL, dedup: exact + near-duplicate)                    |
+| `save_memory`                 | Persist a short entry (7d TTL, exact duplicates rejected)                        |
 | `list_memories`               | Most-recent entries, newest first                                                |
 | `delete_memory`               | Remove a specific entry by id (cascades to chunks if id is a parent doc)         |
 | `delete_memories_by_session`  | Bulk-delete every memory tied to a `session_id` — wraps up a finished project    |
@@ -401,42 +401,44 @@ fully automatic memory loop — so the connected AI never blocks on an
 
 **Plugin install auto-configures this** — when you install via
 `/plugin install n3mc-workingmemory@neuralnexusnote`, a `SessionStart`
-hook runs [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
-which idempotently adds the six `mcp__n3mc-workingmemory__*` tools to
-`~/.claude/settings.json`. No manual editing needed. The hook only
-writes if at least one entry is missing and never touches unrelated
-fields. The `hooks.json` command tries `python` → `py` (Windows Python
-Launcher) → `python3` in a `||` fallback chain, so the hook works as
-long as any one of these is on `PATH`. It only exits non-zero —
-surfacing in Claude Code's `/plugins` Errors tab — when **all three**
-are missing, avoiding silent failure.
+hook runs [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py),
+which idempotently adds two wildcard rules to `permissions.allow` in
+`~/.claude/settings.json`:
 
-The same hook also performs a **`uvx` pre-flight check** — the plugin
-manifest launches the MCP server via
-`uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so a missing
-`uvx` would otherwise surface only as an opaque `ENOENT` in the MCP
-launcher. The hook calls `shutil.which("uvx")` and, if not found,
-writes a bilingual install hint to stderr (`pipx install uv`,
-`curl -LsSf https://astral.sh/uv/install.sh | sh`, plus the docs URL)
-so the user sees an actionable message in the `/plugins` Errors tab.
-The hook still exits 0 because the permission install itself
-succeeded.
+- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — the tools as the
+  plugin provides them (Claude Code names plugin MCP tools
+  `mcp__plugin_<plugin>_<server>__<tool>`, and permission rules must use that
+  form)
+- `mcp__n3mc-workingmemory__*` — the same tools for a directly registered
+  server (`claude mcp add`, `.mcp.json`)
 
-**If you installed without the plugin** (e.g. `claude mcp add` or a
-manual `.mcp.json`), or no Python interpreter is available at all, add
-the block below manually to `~/.claude/settings.json` (user-global,
-recommended) or `.claude/settings.json` (per-project):
+The wildcards cover all seven tools, including `recall_thread`. The hook
+only writes when a rule is missing and never touches other entries. If
+`settings.json` is read-only, locked by policy or not valid JSON, the hook
+changes nothing and shows a warning with the rule to add yourself.
+(Up to v1.9.x the hook added plain `mcp__n3mc-workingmemory__<tool>` names,
+which do not match the plugin's tool names, so plugin users were asked for
+permission on every call.)
+
+The `hooks.json` command tries `python` → `py` (Windows Python Launcher) →
+`python3`. If none is on `PATH`, a Python-free last step shows a warning
+(`systemMessage`) telling you that the tools could not be pre-approved and
+what to add. A missing `uvx` (the plugin launches the MCP server via
+`uvx --from n3memorycore-mcp-lite n3mc-workingmemory`) is reported the same
+way, with install commands (`pipx install uv`,
+`curl -LsSf https://astral.sh/uv/install.sh | sh`).
+
+**If you installed without the plugin** (e.g. `claude mcp add` or a manual
+`.mcp.json`), add the rule below to `~/.claude/settings.json` (user-global,
+recommended) or `.claude/settings.json` (per-project). If you installed the
+plugin but have no Python, use `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`
+instead:
 
 ```json
 {
   "permissions": {
     "allow": [
-      "mcp__n3mc-workingmemory__search_memory",
-      "mcp__n3mc-workingmemory__save_memory",
-      "mcp__n3mc-workingmemory__list_memories",
-      "mcp__n3mc-workingmemory__delete_memory",
-      "mcp__n3mc-workingmemory__delete_memories_by_session",
-      "mcp__n3mc-workingmemory__repair_memory"
+      "mcp__n3mc-workingmemory__*"
     ]
   }
 }
@@ -449,16 +451,16 @@ has no per-tool permission gate, so this step is not needed there.
 ## Data location
 
 The Lite build does not store a database on disk — memories live in
-Redis and expire automatically. Only a small `config.json` sits in the
-platform-standard user data directory:
-
-| OS      | Path                                                       |
-| ------- | ---------------------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\n3mc-workingmemory\`                       |
-| macOS   | `~/Library/Application Support/n3mc-workingmemory/`        |
-| Linux   | `~/.local/share/n3mc-workingmemory/`                       |
-
+Redis and expire automatically. Only a small `config.json` sits in
+`~/.n3mc-workingmemory/` (Windows: `%USERPROFILE%\.n3mc-workingmemory\`).
 Override with the `N3MC_DATA_DIR` environment variable.
+
+Since v1.10.0 the file is in the home directory instead of the platform
+app-data directory: the Microsoft Store build of the Claude desktop app
+redirects `%LOCALAPPDATA%` for the MCP servers it starts, which gave one PC
+two configs and two `owner_id`s, so memories saved from the desktop app
+were invisible to `claude` in a terminal. On first start the old config is
+copied over once (the old file is left in place).
 
 ## Configuration
 
@@ -471,12 +473,15 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "local_id":                 "<uuid>",
   "redis_url":                "redis://localhost:6379/0",
   "ttl_seconds":              604800,
-  "dedup_threshold":          0.95,
   "half_life_days":           3,
   "bm25_min_threshold":       0.1,
   "search_result_limit":      20,
-  "context_char_limit":       3000,
   "min_score":                0.2,
+  "vector_min_cos":           0.85,
+  "relative_min_score_ratio": 0.6,
+  "version_order_enabled":    true,
+  "version_sim_threshold":    0.98,
+  "version_min_chars":        100,
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
@@ -496,6 +501,10 @@ On first run, `config.json` is auto-generated with random UUIDs for
 
 - `redis_url` — connection URL; `N3MC_REDIS_URL` env var takes precedence.
 - `ttl_seconds` — TTL on every new memory and sha-guard (default 7 d).
+- `vector_min_cos` — how close (cosine) a record must be to the query to become a vector candidate (default `0.85`). Lower it (e.g. 0.80–0.83) to recall records even when the wording differs, at the cost of more loosely related rows; raise it (e.g. 0.88) for shorter results, at the cost of dropping related rows more easily. A sensible range is 0.80–0.88; 0.85 was measured with `multilingual-e5-base`, so re-measure it if you change `embedding_model`.
+- `relative_min_score_ratio` — drop results scoring below this ratio × the top score (default `0.6`; `0.0` disables).
+- `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — when an updated version of a document or long entry is saved, both versions are kept; results whose content is ≥ 0.98 similar are treated as versions and listed newest first. Each hit shows its `saved=` time.
+- Settings take effect when the MCP server restarts (restart your MCP client). If `config.json` has a typo and cannot be read, it is left untouched and the server runs on defaults; the first `search_memory` result says so. Write numbers without quotes.
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (chars). Bodies longer than the threshold trigger the parent-document + chunks path for verbatim recall.
 - `access_count_*` — access-frequency auto-importance; top-K search hits receive a capped boost on future queries.
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
@@ -544,6 +553,10 @@ Same guards as the Free build, ported one-to-one:
 If a save payload consists entirely of surrogates, sanitization collapses
 it to the empty string and the regular empty-content rejection path
 applies — `{"status":"error","saved":false,"reason":"empty content"}`.
+Content with no visible character (only whitespace, control / format
+characters such as `\x00` or `U+200B`, separators or variation selectors) is
+rejected with `empty content (no visible characters)`. Everything else is
+stored verbatim, including NUL and zero-width characters inside visible text.
 
 ## Ranking formula
 
@@ -609,7 +622,7 @@ sits elsewhere:
 | **Search internals** | Black box | **Hybrid BM25 + e5 vectors + CJK bigram + time decay + lightweight reranker, all parameters visible and tunable** |
 | **Inspect / control** | UI only | **`list_memories` / `delete_memory` / `delete_memories_by_session` operate on raw records** |
 | **Persistence** | Tied to the vendor's service lifetime | **In-memory Redis with 7-day TTL** — short-lived by design, but you own the container; pair with any persistent memory backend for long-term storage |
-| **Tunability** | Fixed | `half_life_days`, `chunk_threshold`, `dedup_threshold`, rerank weights — all editable |
+| **Tunability** | Fixed | `half_life_days`, `chunk_threshold`, `vector_min_cos`, rerank weights — all editable |
 
 So the value of running N3MemoryCore Lite is **not** "more reliable
 auto-save" — it is **owning a transparent, multi-client working-memory
@@ -680,9 +693,11 @@ Behavioral notes:
 - **Claude can never accidentally skip a save** — the harness fires the
   hook regardless of what the LLM does.
 - No MCP round-trip overhead; the hook talks to Redis directly.
-- As a session grows, the per-turn transcripts collide via near-duplicate
-  detection (`dedup_threshold`), so the DB stays close to **one entry per
-  session** instead of one per turn.
+- Each turn's transcript is saved as a new entry (only exact repeats are
+  rejected — near-duplicates are kept since v1.10.0, so no update is lost).
+  `search_memory` lists the newest version first and shows `saved=` times;
+  if the DB grows too fast, save only the latest exchange instead of the
+  whole transcript.
 - Transcripts shorter than ~200 chars are skipped as noise.
 - Pros: deterministic / independent of model behavior / no save anxiety.
 - Cons: Claude Code only (Cursor / Windsurf need a different approach) /
@@ -714,10 +729,11 @@ and run it freely. The fork-and-run path is:
 ```bash
 git clone https://github.com/<YOU>/n3mcmcp-lite
 cd n3mcmcp-lite
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+# Tests FLUSHDB their Redis: use a DEDICATED test container, never your memory Redis
+docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
-pytest tests/ -q                                      # 105 tests, ~30s warm
+N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
 CI runs the same matrix on every push and PR — see

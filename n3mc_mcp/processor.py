@@ -3,7 +3,10 @@ Embedding, scoring, text-processing utilities.
 
 Spec §3.2  — intfloat/multilingual-e5-base, normalize_embeddings=True, passage:/query: prefixes
 Spec §3.6  — ranking formula: (cos·0.7 + kw·0.3) × time_decay × b_local × b_session
-Spec §3.7  — CJK bigram expansion, FTS punctuation stripping
+Spec §3.7  — query cleaning (prepare_query), CJK bigram expansion,
+             control-char + ASCII/CJK punctuation stripping
+Spec §3.14 — search result shaping (vector floor, newest version first,
+             relative cut) as pure, Redis-free functions
 """
 import contextlib
 import math
@@ -11,6 +14,7 @@ import re
 import struct
 import sys
 import threading
+import time
 import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
@@ -66,8 +70,16 @@ _CJK_RANGES = [
 # Match a closed fence (``` ... ```) OR an unclosed fence that reaches the
 # end of the string (e.g. content truncated at a chunk boundary).
 _CODE_BLOCK_RE  = re.compile(r"```[\s\S]*?(?:```|\Z)")
-_PUNCT_STRIP_RE = re.compile(r'[,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?`]')
-_FTS_SPECIAL_RE = re.compile(r'([,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?])')
+# v1.7.0: control characters make FT.SEARCH fail with "Syntax error", and
+# CJK / full-width punctuation turned into never-matching bigrams (「記, は？)
+# that zeroed the AND-joined BM25 leg. Both are replaced with spaces on the
+# query side AND in content_ngram at save time. Every RediSearch special
+# character is in this set, so no escaping is needed afterwards.
+_CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
+_PUNCT_STRIP_RE = re.compile(
+    r'[,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?`'
+    r'「」『』【】（）〈〉《》〔〕［］｛｝・、。，．！？；：―─…“”‘’]'
+)
 
 # Lone UTF-16 surrogate halves — produced by Windows subprocess stdin
 # pipes when raw UTF-8 bytes get misdecoded. They round-trip through
@@ -118,6 +130,31 @@ def sanitize_surrogates(text):
     return text
 
 
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
+
+
+def _is_variation_selector(ch: str) -> bool:
+    cp = ord(ch)
+    return 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF
+
+
+def has_visible_text(text: str) -> bool:
+    """True if `text` has at least one visible character (spec §3.13).
+
+    Invisible = whitespace, control / format characters (Cc / Cf, e.g.
+    U+0000, U+001B, U+200B, U+FEFF), separators (Zs / Zl / Zp) and variation
+    selectors. Only decides whether save_memory accepts the content; the
+    stored content is never changed by this check.
+    """
+    for ch in text:
+        if ch.isspace() or _is_variation_selector(ch):
+            continue
+        if unicodedata.category(ch) in _INVISIBLE_CATEGORIES:
+            continue
+        return True
+    return False
+
+
 def fold_diacritics(text: str) -> str:
     """Strip combining marks for Latin/Greek/Cyrillic cross-match.
 
@@ -135,32 +172,85 @@ def fold_diacritics(text: str) -> str:
 
 @contextlib.contextmanager
 def _silenced_stdout():
-    """Python-level stdout redirect for the lazy-retry path inside get_model().
+    """Python-level stdout redirect around the model load inside get_model().
 
-    Once mcp.run() is active, fd 1 is the JSON-RPC channel; the stronger
-    fd-level redirect used at startup (server._main) is not safe here because
-    a concurrent tool-response write could land on stderr.  The asyncio main
-    thread serialises tool handlers, so a Python-level redirect is race-free
-    on this path.  See spec §3.9 step 4 for the full design rationale.
+    The model loads in a background thread after the stdio loop starts
+    (spec §3.9 step 4), when fd 1 is the JSON-RPC channel; an fd-level
+    redirect is not safe then because a concurrent tool-response write could
+    land on stderr. The MCP stdio transport writes through its own wrapper
+    of sys.stdout.buffer, so swapping sys.stdout only diverts stray Python
+    prints from the library load to stderr.
     """
     with contextlib.redirect_stdout(sys.stderr):
         yield
 
 
+def import_backend() -> None:
+    """Import the embedding library (spec §3.9 step 4, part 1).
+
+    Called synchronously BEFORE the stdio loop starts. Importing
+    sentence_transformers (torch, sklearn, ...) can spawn child processes on
+    Windows; once the MCP stdio reader has a synchronous read pending on the
+    stdin pipe, creating a child process blocks on that handle and the server
+    deadlocks. Only the model construction (part 2) runs in the background.
+    Non-fatal: on failure the model load is retried lazily.
+    """
+    try:
+        import sentence_transformers  # noqa: F401
+    except Exception as e:
+        print(f"[n3mc] embedding library import failed: {e}", file=sys.stderr)
+
+
+# Spec §3.9 step 4 (v1.7.0): after a failed load, retry at most once every
+# MODEL_RETRY_SECONDS. Without this, an offline first run retried the
+# Hugging Face download inside every tool call (~12-24 s per call).
+MODEL_RETRY_SECONDS = 60
+_model_error: Optional[str] = None
+_model_failed_at: float = 0.0
+
+
 def get_model():
-    global _model
+    global _model, _model_error, _model_failed_at
     if _model is not None:
         return _model
+    if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
+        return None
     with _model_lock:
         if _model is None:
+            if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
+                return None
             try:
                 with _silenced_stdout():
                     from sentence_transformers import SentenceTransformer
                     _model = SentenceTransformer(_model_name)
+                _model_error = None
             except Exception as e:
-                print(f"[n3mc] embedding model load failed ({_model_name}): {e}",
-                      file=sys.stderr)
+                _model_error = f"{type(e).__name__}: {e}"
+                _model_failed_at = time.monotonic()
+                print(f"[n3mc] embedding model load failed ({_model_name}): {e} "
+                      f"- retrying in {MODEL_RETRY_SECONDS}s. "
+                      "Check the network / proxy (the first start downloads it "
+                      "from Hugging Face).", file=sys.stderr)
     return _model
+
+
+def model_status() -> tuple[bool, Optional[str]]:
+    """(loaded, last load error). Spec §3.9 degraded-mode notice."""
+    return _model is not None, (None if _model is not None else _model_error)
+
+
+def model_unavailable_message() -> Optional[str]:
+    """Degraded-mode text (English) or None when the model is fine / not yet tried."""
+    loaded, error = model_status()
+    if loaded or not error:
+        return None
+    return (
+        f"The embedding model ({_model_name}) could not be loaded ({error}), so "
+        "search is keyword-only (BM25) and new entries are saved without "
+        "vectors. The first start downloads the model (~440 MB) from Hugging "
+        "Face: check the network or proxy, or pre-download it. The server "
+        "retries automatically."
+    )
 
 
 # ── embeddings ───────────────────────────────────────────────────────────────
@@ -257,21 +347,58 @@ def cjk_bigram_expand(text: str) -> str:
 
 # ── query preparation ────────────────────────────────────────────────────────
 
+def strip_control_chars(text: str) -> str:
+    """Replace C0 control characters and DEL with spaces (spec §3.7)."""
+    return _CTRL_RE.sub(" ", text)
+
+
 def strip_fts_punctuation(text: str) -> str:
+    """Replace ASCII and CJK / full-width punctuation with spaces (spec §3.7)."""
     return _PUNCT_STRIP_RE.sub(" ", text)
 
 
 def prepare_query(text: str) -> str:
-    """Normalize, strip FTS punct, expand bigrams, collapse whitespace.
+    """BM25 query cleaning (spec §3.7, v1.7.0).
 
-    NFKC happens inside `cjk_bigram_expand`; calling it explicitly here
-    too is harmless (idempotent) but keeps the pipeline order obvious:
-    normalize → strip → bigram-expand → collapse-whitespace.
+    NFKC → control chars to space → strip ASCII + CJK punctuation →
+    CJK bigram expansion → collapse whitespace. The result contains no
+    RediSearch special characters, so it is used without escaping.
+    An empty result means "skip BM25, vector only".
     """
     text = normalize_text(text)
-    stripped = strip_fts_punctuation(text)
-    expanded = cjk_bigram_expand(stripped)
-    return " ".join(expanded.split()).strip()
+    text = strip_control_chars(text)
+    text = strip_fts_punctuation(text)
+    tokens = cjk_bigram_expand(text).split()
+    # Tokens with no letter or digit (e.g. a lone "_") are not indexed by
+    # RediSearch and leave an empty "@content:()" -> syntax error (spec §3.7).
+    return " ".join(t for t in tokens if any(ch.isalnum() for ch in t))
+
+
+def drop_lone_cjk_tokens(fts_query: str) -> str:
+    """Drop single-character space-less-script tokens from a cleaned query.
+
+    RediSearch ANDs query terms. After punctuation stripping, a one-character
+    CJK run such as the particle `は` in `「記憶装置」は？` stays a lone token
+    (`記憶 憶装 装置 は`); it only matches a document whose content_ngram has
+    that character standing alone, so it zeroes the whole BM25 leg. Lone
+    tokens are dropped when at least one other token remains (a query that
+    is a single character is kept as is). Applied by Database._bm25_search
+    on top of `prepare_query`, whose output stays exactly as in spec §3.7.
+    """
+    tokens = fts_query.split()
+    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))]
+    return " ".join(kept) if kept else fts_query
+
+
+def content_ngram(text: str) -> str:
+    """Save-time `content_ngram` field value (spec §3.7).
+
+    Built with the same cleaning as `prepare_query` (NFKC, control chars,
+    ASCII + CJK punctuation stripping, bigram expansion) so the save side
+    and the query side tokenize symmetrically. The raw `content` field is
+    stored verbatim and is never passed through this.
+    """
+    return prepare_query(text)
 
 
 def purify(text: str) -> str:
@@ -448,3 +575,164 @@ def lexical_rerank(
         r["score"] = r.get("score", 0.0) + (coverage * weight + phrase_bonus) * length_factor
 
     return sorted(results, key=lambda x: x["score"], reverse=True)
+
+
+# ── search result shaping (spec §3.14, v1.7.0) ───────────────────────────────
+#
+# Pure functions so they can be tested without Redis or the embedding model.
+# database.Database.search_memory runs them in this order:
+#   apply_vector_floor (before fusion) → fusion → parent resolution →
+#   lexical rerank → min_score → order_versions_newest_first →
+#   relative_cut → TTL refresh / access_count (top-K) → truncate to limit.
+
+def apply_vector_floor(vec_results: dict, min_cos: float) -> dict:
+    """Drop vector candidates whose `cos_sim < min_cos` (spec §3.14 step 2).
+
+    *vec_results* maps a key to a row dict carrying `cos_sim`. A dropped row
+    can still enter the fusion through BM25, where it gets cos_sim = 0.0.
+    `min_cos <= 0` disables the floor.
+    """
+    if not min_cos or min_cos <= 0:
+        return dict(vec_results)
+    return {
+        k: v for k, v in vec_results.items()
+        if float(v.get("cos_sim", 0.0)) >= min_cos
+    }
+
+
+def vector_from_bytes(raw) -> Optional[np.ndarray]:
+    """Decode a FLOAT32 little-endian embedding blob; None when unusable."""
+    if not raw:
+        return None
+    try:
+        vec = np.frombuffer(raw, dtype="<f4").astype(np.float32)
+    except Exception:
+        return None
+    if vec.size == 0:
+        return None
+    return vec
+
+
+def _row_sort_key(row: dict) -> tuple:
+    try:
+        ts = float(row.get("timestamp_epoch") or 0.0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    return (ts, str(row.get("id", "")))
+
+
+def order_versions_newest_first(
+    rows: list[dict],
+    rep_vectors: list,
+    cfg: dict,
+    rep_texts: Optional[list] = None,
+) -> list[dict]:
+    """Put the newest version of the same content first (spec §3.14 step 4).
+
+    rows         -- ranked result rows (score-descending), already through
+                    fusion, parent resolution, rerank and min_score.
+    rep_vectors  -- one entry per row: the row's representative embedding
+                    (standalone row → its own embedding; parent document →
+                    the embedding of its first chunk `chunk_ids[0]`), as a
+                    numpy array, raw FLOAT32 bytes, or None (row is skipped).
+    rep_texts    -- one entry per row: the representative text (standalone
+                    `content`, or the first chunk's `content`). Defaults to
+                    each row's `content`. Rows whose representative text is
+                    shorter than `version_min_chars` are skipped.
+    cfg          -- uses version_order_enabled / version_sim_threshold /
+                    version_min_chars.
+
+    Rows whose representative cosine is >= version_sim_threshold are grouped
+    transitively. Inside each group the rows are re-ordered newest first by
+    (timestamp_epoch, id) over the SAME positions; every position keeps its
+    score, so the newest version inherits the group's best score. Every
+    member of a group of two or more rows is marked with `_version_group`
+    (the group number, 1-based). Nothing is deleted. Returns a new list.
+    """
+    rows = list(rows)
+    if not cfg.get("version_order_enabled", True) or len(rows) < 2:
+        return rows
+    threshold = float(cfg.get("version_sim_threshold", 0.98))
+    min_chars = int(cfg.get("version_min_chars", 100))
+    if rep_texts is None:
+        rep_texts = [r.get("content", "") for r in rows]
+
+    # Eligible rows: usable vector + long-enough representative text.
+    idx: list[int] = []
+    vecs: list[np.ndarray] = []
+    for i, row in enumerate(rows):
+        v = rep_vectors[i] if i < len(rep_vectors) else None
+        if v is not None and not isinstance(v, np.ndarray):
+            v = vector_from_bytes(v)
+        text = rep_texts[i] if i < len(rep_texts) else ""
+        if v is None or len(text or "") < min_chars:
+            continue
+        norm = float(np.linalg.norm(v))
+        if norm == 0.0:
+            continue
+        idx.append(i)
+        vecs.append(v / norm)
+    if len(idx) < 2:
+        return rows
+    dims = {v.shape for v in vecs}
+    if len(dims) != 1:
+        return rows
+
+    mat = np.vstack(vecs)
+    sims = mat @ mat.T
+
+    # Transitive grouping (union-find over eligible rows).
+    parent = list(range(len(idx)))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    n = len(idx)
+    for a in range(n):
+        for b in range(a + 1, n):
+            if sims[a, b] >= threshold:
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[rb] = ra
+
+    groups: dict[int, list[int]] = {}
+    for a in range(n):
+        groups.setdefault(find(a), []).append(idx[a])
+
+    out = list(rows)
+    group_no = 0
+    # Iterate groups in order of their best (first) position for stable numbering.
+    for members in sorted(groups.values(), key=lambda m: min(m)):
+        if len(members) < 2:
+            continue
+        group_no += 1
+        positions = sorted(members)
+        slot_scores = [rows[p].get("score", 0.0) for p in positions]
+        newest_first = sorted(
+            (rows[p] for p in positions), key=_row_sort_key, reverse=True
+        )
+        for pos, score, row in zip(positions, slot_scores, newest_first):
+            moved = dict(row)
+            moved["score"] = score
+            moved["_version_group"] = group_no
+            out[pos] = moved
+    return out
+
+
+def relative_cut(rows: list[dict], ratio: float) -> list[dict]:
+    """Drop rows scoring below `ratio × top score` (spec §3.14 step 5).
+
+    Rows marked `_version_group` are always kept (old versions stay visible
+    next to the new one). `ratio <= 0` disables the cut. Order is preserved.
+    """
+    if not rows or not ratio or ratio <= 0:
+        return list(rows)
+    top = max(float(r.get("score", 0.0)) for r in rows)
+    floor = ratio * top
+    return [
+        r for r in rows
+        if r.get("_version_group") or float(r.get("score", 0.0)) >= floor
+    ]
