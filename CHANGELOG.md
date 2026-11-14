@@ -11,6 +11,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 _Nothing yet._
 
+## [1.10.1] — 2026-11-15
+
+Spec v1.7.1 → v1.7.2 (JP/EN): the weak-match fill from scoring v1.7.1
+(decision LA1), applied through the specification; code regenerated from
+the EN spec. This version adds a `config.json` key (`min_results`) and a
+new heading in the `search_memory` output, so search results change.
+
+### Added
+- **Weak matches** (`min_results`, default 3): `search_memory` returned at
+  most one row for most questions (the relevance floors cut the rest).
+  When fewer rows pass the floors, the closest rows they dropped now fill
+  the shortfall under `#### Possibly related (weak matches — may be
+  unrelated)`, one row per parent document. Weak rows never get their TTL
+  reset or `access_count` incremented, so being shown does not keep them
+  alive. `0` turns the fill off; a blank query never fills. The server
+  instructions (rule 12) and the `search_memory` description tell the LLM
+  to use weak rows only when they are relevant.
+- Measured with the real model (50 records, 26 questions, searched from
+  another session): recall@3 22/26 → 25/26, about 2.1 weak rows per
+  question; unrelated questions now always get 3 rows.
+
 ## [1.10.0] — 2026-11-14
 
 Spec v1.6.0 → v1.7.0 (JP/EN). Fixes found while running the Pro edition

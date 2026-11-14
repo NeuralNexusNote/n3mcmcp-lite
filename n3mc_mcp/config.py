@@ -41,6 +41,7 @@ DEFAULTS: dict[str, Any] = {
     # were measured with multilingual-e5-base; re-measure for another model.
     "vector_min_cos":           0.85,
     "relative_min_score_ratio": 0.6,
+    "min_results":              3,      # §3.14 step 6 weak-match fill (v1.7.2)
     "version_order_enabled":    True,
     "version_sim_threshold":    0.98,
     "version_min_chars":        100,
@@ -85,6 +86,7 @@ _NUMERIC_RULES: dict[str, tuple[str, tuple]] = {
     "chunk_overlap":            ("int",    (0, True, None, False)),
     "ttl_refresh_top_k":        ("int",    (0, True, None, False)),
     "version_min_chars":        ("int",    (0, True, None, False)),
+    "min_results":              ("int",    (0, True, None, False)),
     "half_life_days":           ("number", (0, False, None, False)),
     "bm25_min_threshold":       ("number", (0, True, None, False)),
     "access_count_weight":      ("number", (0, True, None, False)),

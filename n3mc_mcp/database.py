@@ -882,8 +882,9 @@ class Database:
 
         Order: time-window pre-filter (inside both queries) → vector floor →
         fusion → parent resolution → lexical rerank → min_score →
-        newest version first → relative cut → TTL refresh / access_count
-        (top-K) → truncate to `limit`.
+        newest version first → relative cut → truncate to `limit` → TTL
+        refresh / access_count (top-K normal rows) → weak-match fill up to
+        `min_results` (v1.7.2; weak rows are marked `_weak`, never refreshed).
         """
         # §4.3.1 (v1.7.1): an unreadable since/until (or since > until) is an
         # error and the search is not run (raises TimeBoundError).
@@ -911,11 +912,11 @@ class Database:
 
         # §4.3.1 / §3.14 step 1: since/until are PRE-filters inside both
         # queries (time_filter, parsed above).
-        vec_results = self._vector_search(query, owner_id, limit, time_filter)
+        vec_all = self._vector_search(query, owner_id, limit, time_filter)
         # §3.14 step 2: vector floor. A dropped row can still enter via BM25
-        # (with cos_sim = 0.0).
+        # (with cos_sim = 0.0); it is also a weak candidate (step 6).
         vec_results = apply_vector_floor(
-            vec_results, self.cfg.get("vector_min_cos", 0.85)
+            vec_all, self.cfg.get("vector_min_cos", 0.85)
         )
         # §3.7: a BM25 failure never fails search_memory.
         try:
@@ -926,14 +927,73 @@ class Database:
             print(f"[n3mc] BM25 search skipped: {e}", file=sys.stderr)
             bm25_results = {}
 
-        all_keys = set(vec_results) | set(bm25_results)
         max_bm25 = max(
             (v["bm25_score"] for v in bm25_results.values()), default=1.0
         )
+        scoring = (bm25_results, max_bm25, half_life, bm25_thr,
+                   effective_session, b_sess_match, b_sess_mismatch)
 
+        candidates = self._score_rows(
+            set(vec_results) | set(bm25_results), vec_results, scoring
+        )
+        # §3.11 parent-document resolution — BEFORE lexical rerank so the
+        # reranker sees the full verbatim body rather than just the chunk text.
+        candidates = self._resolve_parents(candidates)
+        candidates = self._rerank(candidates, query)
+
+        # min_score floor AFTER rerank, on filter_score (spec §3.6 / §6, v1.7.1).
+        if min_score_val > 0:
+            candidates = [c for c in candidates if judged_score(c) >= min_score_val]
+
+        # §3.14 step 4: newest version first.
+        if self.cfg.get("version_order_enabled", True) and len(candidates) > 1:
+            rep_vectors, rep_texts = self._fetch_representatives(candidates)
+            candidates = order_versions_newest_first(
+                candidates, rep_vectors, self.cfg, rep_texts
+            )
+
+        # §3.14 step 5: relative cut (spares `_version_group` rows).
+        candidates = relative_cut(
+            candidates, self.cfg.get("relative_min_score_ratio", 0.6)
+        )
+        normal = candidates[:limit]
+
+        # §3.14 step 7 / §3.11: TTL refresh on the top-K NORMAL hits only.
+        if self.cfg.get("ttl_refresh_on_search", True):
+            try:
+                self._refresh_ttl(normal[: self.cfg.get("ttl_refresh_top_k", 5)])
+            except _CONN_ERRORS:
+                raise  # §3.9: a lost connection is a backend error, not "no results"
+            except Exception as e:
+                print(f"[n3mc] TTL refresh skipped: {e}", file=sys.stderr)
+
+        # §3.14 step 6 (v1.7.2, LA1): fill up to min_results with weak matches
+        # — candidates this search fetched but steps 2, 3 or 5 dropped. They
+        # are never TTL-refreshed (§3.4) and come after every normal row.
+        target = min(self.cfg.get("min_results", 3), limit)
+        weak: list[dict] = []
+        if len(normal) < target and query.strip():  # blank query: no fill
+            weak = self._weak_matches(
+                normal, vec_all, scoring, query, target - len(normal)
+            )
+
+        final: list[dict] = []
+        for c in normal + weak:
+            c.pop("_parent_key", None)
+            c.pop("_sibling_keys", None)
+            c.pop("_rep_key", None)
+            c.pop("key", None)
+            final.append(c)
+        return final
+
+    def _score_rows(self, keys, vec_map: dict, scoring: tuple) -> list[dict]:
+        """§3.6 fusion score for each key (vector row from *vec_map*, BM25 row
+        from the search). Sorted by score, best first."""
+        (bm25_results, max_bm25, half_life, bm25_thr,
+         effective_session, b_sess_match, b_sess_mismatch) = scoring
         candidates: list[dict] = []
-        for key in all_keys:
-            vr = vec_results.get(key, {})
+        for key in keys:
+            vr = vec_map.get(key, {})
             br = bm25_results.get(key, {})
 
             content         = vr.get("content") or br.get("content", "")
@@ -960,11 +1020,8 @@ class Database:
                 if (effective_session and row_sess == effective_session)
                 else b_sess_mismatch
             )
-            score = final_score(cos, kw, dec, b, b_sess)
             # v1.7.1 (LD1): the floors judge filter_score — no time_decay,
             # no b_session (they decide the order, not whether a row shows).
-            fscore = filter_score(cos, kw, b)
-
             # min_score is NOT applied here: the lexical reranker can lift a
             # fused score that is just below the threshold (spec §3.6).
             candidates.append({
@@ -973,21 +1030,22 @@ class Database:
                 "content":         content,
                 "timestamp":       timestamp,
                 "timestamp_epoch": timestamp_epoch,
-                "score":           score,
-                "filter_score":    fscore,
+                "score":           final_score(cos, kw, dec, b, b_sess),
+                "filter_score":    filter_score(cos, kw, b),
                 "parent_id":       parent_id,
                 "session_id":      row_sess,
                 "turn_id":         turn_id,
                 "importance":      imp,
                 "access_count":    acc,
             })
-
         # Sort descending so the highest-scoring chunk wins when multiple
         # chunks share the same parent (spec §3.11: keep the best hit).
         candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates
 
-        # §3.11 parent-document resolution — BEFORE lexical rerank so the
-        # reranker sees the full verbatim body rather than just the chunk text.
+    def _resolve_parents(self, candidates: list[dict]) -> list[dict]:
+        """§3.11: collapse chunk hits to their parent document (one row per
+        parent — the best-scoring chunk wins)."""
         seen_parents: dict[str, bool] = {}
         resolved: list[dict] = []
         for c in candidates:
@@ -1018,8 +1076,8 @@ class Database:
                     doc_ep = doc_data.get(b"timestamp_epoch", b"")
                     if doc_ep:
                         c["timestamp_epoch"] = _to_float(doc_ep.decode(), c["timestamp_epoch"])
-                    # Every sibling chunk key, so the TTL refresh below extends
-                    # the whole document's chunks together (spec §3.11). Older
+                    # Every sibling chunk key, so the TTL refresh extends the
+                    # whole document's chunks together (spec §3.11). Older
                     # docs without chunk_ids fall back to single-chunk refresh.
                     cids_raw = doc_data.get(b"chunk_ids", b"")
                     cids = cids_raw.decode().split() if cids_raw else []
@@ -1031,55 +1089,54 @@ class Database:
                 # (graceful degrade, spec §3.11). Do NOT mark seen_parents so
                 # sibling orphan chunks each get their own listing.
             resolved.append(c)
-        candidates = resolved
+        return resolved
 
-        # Lexical rerank (spec §3.6) — optional, default enabled.
+    def _rerank(self, candidates: list[dict], query: str) -> list[dict]:
+        """Lexical rerank (spec §3.6) — optional, default enabled."""
         if self.cfg.get("lexical_rerank_enabled", True):
-            candidates = lexical_rerank(
+            return lexical_rerank(
                 candidates,
                 query,
                 self.cfg.get("rerank_weight", 0.3),
                 self.cfg.get("rerank_phrase_weight", 0.2),
             )
-        else:
-            candidates.sort(key=lambda x: x["score"], reverse=True)
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates
 
-        # min_score floor AFTER rerank, on filter_score (spec §3.6 / §6, v1.7.1).
-        if min_score_val > 0:
-            candidates = [c for c in candidates if judged_score(c) >= min_score_val]
+    def _weak_matches(self, normal: list[dict], vec_all: dict,
+                      scoring: tuple, query: str, need: int) -> list[dict]:
+        """§3.14 step 6 (v1.7.2): the weak-match fill.
 
-        # §3.14 step 4: newest version first.
-        if self.cfg.get("version_order_enabled", True) and len(candidates) > 1:
-            rep_vectors, rep_texts = self._fetch_representatives(candidates)
-            candidates = order_versions_newest_first(
-                candidates, rep_vectors, self.cfg, rep_texts
-            )
-
-        # §3.14 step 5: relative cut (spares `_version_group` rows).
-        candidates = relative_cut(
-            candidates, self.cfg.get("relative_min_score_ratio", 0.6)
-        )
-
-        # §3.14 step 6 / §3.11: TTL refresh on top-K hits.
-        if self.cfg.get("ttl_refresh_on_search", True):
-            try:
-                self._refresh_ttl(candidates[: self.cfg.get("ttl_refresh_top_k", 5)])
-            except _CONN_ERRORS:
-                raise  # §3.9: a lost connection is a backend error, not "no results"
-            except Exception as e:
-                print(f"[n3mc] TTL refresh skipped: {e}", file=sys.stderr)
-
-        final: list[dict] = []
-        for c in candidates[:limit]:
-            c.pop("_parent_key", None)
-            c.pop("_sibling_keys", None)
-            c.pop("_rep_key", None)
-            c.pop("key", None)
-            final.append(c)
-        return final
+        Every fetched candidate that is not already a normal row is rescored
+        with its ACTUAL cosine (a row below vector_min_cos is not cos 0.0
+        here), parent-resolved and reranked like a normal row, then taken in
+        descending filter_score — one row per parent document / id, skipping
+        anything already in *normal*. filter_score < 1e-6 (no signal; float32
+        cosine leaves ~1e-7 for orthogonal vectors) is never added.
+        """
+        bm25_results = scoring[0]
+        used_keys = {c.get("key") for c in normal}
+        used_ids = {c.get("id") for c in normal}
+        keys = (set(vec_all) | set(bm25_results)) - used_keys
+        if not keys:
+            return []
+        pool = self._resolve_parents(self._score_rows(keys, vec_all, scoring))
+        pool = [c for c in self._rerank(pool, query) if judged_score(c) >= 1e-6]
+        pool.sort(key=lambda c: (judged_score(c), c.get("timestamp_epoch") or 0.0,
+                                 c.get("id") or ""), reverse=True)
+        weak: list[dict] = []
+        for c in pool:
+            if len(weak) >= need:
+                break
+            if c.get("id") in used_ids:
+                continue  # same parent document / same record as a shown row
+            used_ids.add(c.get("id"))
+            c["_weak"] = True
+            weak.append(c)
+        return weak
 
     def _refresh_ttl(self, rows: list[dict]) -> None:
-        """TTL refresh for the top-K hits (spec §3.3, §3.11, §3.14 step 6).
+        """TTL refresh for the top-K normal hits (spec §3.3, §3.11, §3.14 step 7).
 
         Pipeline 1: EXPIRE the hit, its parent doc and ALL sibling chunks.
         Pipeline 2 (v1.7.1): only where the EXPIRE of the hit / parent

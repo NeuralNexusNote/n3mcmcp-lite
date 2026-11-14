@@ -54,6 +54,7 @@ app = Server("n3mc-workingmemory", version=__version__, instructions=INSTRUCTION
 # output after it was added (v1.7.1).
 _notices_seen: set = set()
 
+WEAK_HEADING = "#### Possibly related (weak matches — may be unrelated)"
 _VERSION_SENTENCE = (
     "_If several versions of the same content appear, the one with the "
     "newest `saved` time is the current one._"
@@ -98,28 +99,37 @@ def _render_search(results: list[dict], notices: Optional[list[str]] = None) -> 
 
     `turn=` is omitted when the row has no turn_id; `[doc×N]` only for
     parent documents. Hits are separated by `---`.
+    v1.7.2: rows marked `_weak` (the weak-match fill, §3.14 step 6) follow
+    every normal row under the WEAK_HEADING. With no normal rows the output
+    is `_No memories found._`, then the weak heading (no version sentence).
     """
     parts: list[str] = []
     if notices:
         parts.append("\n".join(f"> ⚠️ N3MC notice: {n}" for n in notices))
-    if not results:
+    normal = [r for r in results if not r.get("_weak")]
+    weak = [r for r in results if r.get("_weak")]
+    if not normal:
         parts.append("_No memories found._")
-        return "\n\n".join(parts)
-    parts.append(_VERSION_SENTENCE)
-    hits: list[str] = []
-    for r in results:
-        tag     = r.get("_tag", "")
-        tag_str = f"{tag} " if tag else ""
-        tid     = r.get("turn_id", "")
-        tid_str = f" turn={tid}" if tid else ""
-        score   = float(r.get("score", 0.0))
-        saved   = _fmt_saved(r.get("timestamp", ""), r.get("timestamp_epoch"))
-        hits.append(
-            f"### {tag_str}[{r.get('id', '')}]{tid_str} score={score:.3f} "
-            f"saved={saved}\n{purify(r.get('content', ''))}"
-        )
-    parts.append("\n\n---\n\n".join(hits))
+    else:
+        parts.append(_VERSION_SENTENCE)
+        parts.append("\n\n---\n\n".join(_hit(r) for r in normal))
+    if weak:
+        parts.append(WEAK_HEADING)
+        parts.append("\n\n---\n\n".join(_hit(r) for r in weak))
     return "\n\n".join(parts)
+
+
+def _hit(r: dict) -> str:
+    tag     = r.get("_tag", "")
+    tag_str = f"{tag} " if tag else ""
+    tid     = r.get("turn_id", "")
+    tid_str = f" turn={tid}" if tid else ""
+    score   = float(r.get("score", 0.0))
+    saved   = _fmt_saved(r.get("timestamp", ""), r.get("timestamp_epoch"))
+    return (
+        f"### {tag_str}[{r.get('id', '')}]{tid_str} score={score:.3f} "
+        f"saved={saved}\n{purify(r.get('content', ''))}"
+    )
 
 
 def _take_notices() -> list[str]:
@@ -173,6 +183,12 @@ async def list_tools() -> list[Tool]:
                 "Each hit shows its saved= time; when several versions of the "
                 "same content appear, the newest is listed first and is the "
                 "current one. "
+                "When fewer than min_results (default 3) rows pass the "
+                "relevance floors, the closest dropped rows are added under "
+                "'Possibly related (weak matches — may be unrelated)': they "
+                "are often unrelated — use one only when it is actually "
+                "relevant to the question; if it is not, ignore it and do not "
+                "mention it. "
                 "NOTE: Lite memories expire 7d after they were saved."
             ),
             inputSchema={
