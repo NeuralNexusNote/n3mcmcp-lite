@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.7.1 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.7.2 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
@@ -258,7 +258,7 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 
 **Pipeline atomicity**: the three commands (`HSET`, `EXPIRE`, `SET`) ship as one pipeline, so partial-failure interleavings that could produce a record without a TTL or a sha-guard without a record are not possible. The long-content path follows the same rule since v1.7.1: after every chunk embedding has been computed and the `docsha:` guard has been taken with `SET … NX EX`, the parent document and **all** chunks are written in **one** pipeline; if that pipeline fails, the guard is deleted again (§3.8 (B)). Pipelines are sent with `transaction=True` (`MULTI`/`EXEC`).
 
-**Guards follow their record's TTL (v1.7.1)**: whenever a record's TTL is reset by a search hit (§3.11 / §3.14 step 6), the dedup guard of that record is reset in the same pipeline — `SET mem:sha:<sha1> <id> EX <ttl_seconds>` for a standalone record, `SET docsha:<sha1> <parent_id> EX <ttl_seconds>` for a parent document. The `<sha1>` is recomputed from the stored content with the same function `save_memory` uses (SHA-1 of the NFKC-normalized text), so records saved by earlier versions need no extra field. A chunk has no guard of its own; its parent's guard is reset when the parent is.
+**Guards follow their record's TTL (v1.7.1)**: whenever a record's TTL is reset by a search hit (§3.11 / §3.14 step 7), the dedup guard of that record is reset in the same pipeline — `SET mem:sha:<sha1> <id> EX <ttl_seconds>` for a standalone record, `SET docsha:<sha1> <parent_id> EX <ttl_seconds>` for a parent document. The `<sha1>` is recomputed from the stored content with the same function `save_memory` uses (SHA-1 of the NFKC-normalized text), so records saved by earlier versions need no extra field. A chunk has no guard of its own; its parent's guard is reset when the parent is.
 
 > **⚠️ Why (v1.7.1, Lite review LM7)**: v1.7.0 reset only `mem:<id>` / `doc:<id>`. A record that kept coming up in searches lived on, but its guard expired 7 days after the save, after which the same content could be saved again and the record existed twice — contradicting "the record and its guard expire together".
 
@@ -269,7 +269,7 @@ On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline
 **The following are absolutely prohibited (even for "performance" or "persistence" reasons):**
 - Writing records without an `EXPIRE` (i.e. infinite TTL).
 - Enabling Redis RDB / AOF persistence policies that would survive container removal for the sole purpose of extending Lite memory lifespan. (The user may, of course, choose any Redis configuration; the spec simply doesn't rely on it.)
-- Unconditional TTL extension on read (`TOUCH` / `EXPIRE` applied indiscriminately on `search_memory`). Note: the `ttl_refresh_on_search` setting (§6, default `true`) is an **explicit design exception** to this rule — it resets TTL only for the top-K search hits and only up to `ttl_seconds`, never extending memory beyond the configured maximum lifetime.
+- Unconditional TTL extension on read (`TOUCH` / `EXPIRE` applied indiscriminately on `search_memory`). Note: the `ttl_refresh_on_search` setting (§6, default `true`) is an **explicit design exception** to this rule — it resets TTL only for the top-K search hits and only up to `ttl_seconds`, never extending memory beyond the configured maximum lifetime. **Weak matches (§3.14 step 6, v1.7.2) are never refreshed**: they did not pass the relevance floors, so being shown must not keep them alive.
 - Write buffering / deferred pipelines beyond the single save call.
 
 **Reason**: the Lite build's differentiation is explicit volatility; circumventing it erodes the product distinction.
@@ -364,7 +364,7 @@ access_boost = min(access_count_max_boost, access_count × access_count_weight)
 ```
 
 - `stored_importance`: provided at `save_memory` time (default `1.0`, range `0.5–2.0`).
-- `access_boost`: **automatic CPU-only frequency boost**. Every `search_memory` call increments `access_count` by 1 for each memory returned in the top `ttl_refresh_top_k` hits. On subsequent queries that memory receives an additive boost of `access_count × access_count_weight` (default `0.02`), capped at `access_count_max_boost` (default `0.5`). This creates a self-adjusting "frequently-used memories rank higher" loop with zero LLM involvement.
+- `access_boost`: **automatic CPU-only frequency boost**. Every `search_memory` call increments `access_count` by 1 for each memory returned in the top `ttl_refresh_top_k` hits (weak matches excluded, §3.14 step 6). On subsequent queries that memory receives an additive boost of `access_count × access_count_weight` (default `0.02`), capped at `access_count_max_boost` (default `0.5`). This creates a self-adjusting "frequently-used memories rank higher" loop with zero LLM involvement.
 
 Set `access_count_enabled: false` in config to disable the boost (the formula falls back to `stored_importance` only).
 
@@ -424,7 +424,7 @@ Set `lexical_rerank_enabled: false` in config to skip this pass (candidates are 
 | Value | Formula | Used for |
 |---|---|---|
 | `score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local × b_session` + rerank boost | The order of the results and the `score=` shown |
-| `filter_score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × b_local` + rerank boost | `min_score` (§3.6) and the relative cut (§3.14 step 5) |
+| `filter_score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × b_local` + rerank boost | `min_score` (§3.6) and the relative cut (§3.14 step 5), and the order of the weak matches (§3.14 step 6, v1.7.2) |
 
 `time_decay` and `b_session` decide **which records come first**, not whether a record is shown: a 3-day-old record or one saved before the server restarted (another `session_id`) still appears when it is as relevant as the top hit, just lower in the list. The rerank boost is added to both values.
 
@@ -590,7 +590,7 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
   - If the same `parent_id` has already been emitted → drop as duplicate (keep the highest-scoring hit).
   - First occurrence → `HGET doc:<parent_id>` to fetch the full body and substitute it into the result, replacing the id with the parent id.
 - The subsequent lexical rerank (token-coverage + phrase bonus) therefore sees the **full verbatim body** for parent hits, not just the matched chunk — a query phrase that appears in a non-matching chunk of the same document still boosts the parent's rank correctly.
-- When `ttl_refresh_on_search` is enabled, TTL refresh is applied to the top-K **after** rerank: for each hit the underlying `mem:<chunk_id>` (or standalone `mem:<id>`) key has its `access_count` incremented; if the hit resolved to a parent document, the `doc:<parent_id>` key's TTL **and the TTL of every sibling chunk listed in `chunk_ids` are refreshed together in one pipeline** (not just the single best-scoring chunk, but all chunks that make up the document). This keeps search recall via any chunk's content alive for the whole window — refreshing only the winning chunk would let sibling chunks expire mid-window and thin out the hit paths into the document. `access_count` is incremented only on the chunk that actually matched, not on its silently-refreshed siblings. Older docs saved without a `chunk_ids` field gracefully fall back to single-chunk + parent refresh.
+- When `ttl_refresh_on_search` is enabled, TTL refresh is applied to the top-K **after** rerank (weak matches are skipped — they are neither refreshed nor counted, §3.14 step 6): for each hit the underlying `mem:<chunk_id>` (or standalone `mem:<id>`) key has its `access_count` incremented; if the hit resolved to a parent document, the `doc:<parent_id>` key's TTL **and the TTL of every sibling chunk listed in `chunk_ids` are refreshed together in one pipeline** (not just the single best-scoring chunk, but all chunks that make up the document). This keeps search recall via any chunk's content alive for the whole window — refreshing only the winning chunk would let sibling chunks expire mid-window and thin out the hit paths into the document. `access_count` is incremented only on the chunk that actually matched, not on its silently-refreshed siblings. Older docs saved without a `chunk_ids` field gracefully fall back to single-chunk + parent refresh.
 - Rendered output tags parent hits with `[doc×N]` (N = `chunk_count`) in the markdown.
 
 `list_memories` integration:
@@ -759,7 +759,7 @@ through cp932; Lite has no historical data to retrofit because every entry
 ages out within `ttl_seconds` (default 7 days). Adding a recovery routine
 would only run on data that the user already accepted as ephemeral.
 
-### 3.14 Search Result Shaping (v1.7.0)
+### 3.14 Search Result Shaping (v1.7.0; weak-match fill since v1.7.2)
 
 v1.6.x ranked every KNN candidate. With `multilingual-e5`, even unrelated records sit at cosine 0.80–0.85 to almost any query, so `search_memory` returned long lists of loosely related rows, and an updated version of a fact or document could rank below the old one (the old one has accumulated `access_count`). `search_memory` therefore shapes its candidates in this order:
 
@@ -772,11 +772,21 @@ v1.6.x ranked every KNN candidate. With `multilingual-e5`, even unrelated record
    - Inside each group, re-order the rows newest first by `(timestamp_epoch, id)` (`id` is a UUIDv7, so rows saved in the same second are still ordered). **Every position keeps its score** — only the rows move, so the newest version inherits the group's best score. Mark **every row of a group of two or more** with `_version_group` (the group number, starting at 1) — also when the newest version was already on top and nothing moved, so the old versions survive the relative cut below. Nothing is deleted. Parent documents saved before `chunk_ids` existed have no representative and are not grouped.
    - 0.98 was measured with `multilingual-e5-base`: the same setting re-made → 1.0; settings with the same shape but different values → 0.88–0.91; different items inside one long reply → at most 0.95.
 5. **Relative cut** — drop results whose **`filter_score`** is below `relative_min_score_ratio` (default `0.6`) × the highest `filter_score` (v1.7.1), except rows marked `_version_group` (old versions stay visible next to the new one). `0.0` disables it. Step 4 moves rows while each position keeps its `score`; `filter_score` moves with the position in the same way.
-6. **TTL refresh / access_count** for the top `ttl_refresh_top_k` (§3.11), then truncate to `limit`. **Increment `access_count` only on a key that still exists (v1.7.1, Lite review LL4)**: run `EXPIRE` first and `HINCRBY` only where `EXPIRE` returned 1 (two pipelines, or one Lua script). A key that expired between the search and the refresh would otherwise be recreated by `HINCRBY` as a hash holding only `access_count` and no TTL.
+6. **Minimum-results fill with weak matches (v1.7.2, Lite review LA1)** — when fewer than `min(min_results, limit)` results remain after step 5 (`limit` is the `search_memory` argument, or `search_result_limit`), add the shortfall from the candidates that **this search fetched but steps 2, 3 or 5 dropped**:
+   - Weak candidates are: vector candidates dropped by `vector_min_cos` in step 2, **with their actual `cos_sim`** (not the `0.0` they get as BM25-only rows), and results dropped by `min_score` (step 3) or the relative cut (step 5). A row dropped in step 2 that also hit BM25 is one candidate with its actual `cos_sim` and its `keyword_relevance`. Their `filter_score` and `score` use the §3.6 formula with the same parent-document resolution (§3.11) and lexical rerank as normal rows. Candidates whose `filter_score` is below `1e-6` (no similarity and no keyword signal; the cosine distance of float32 vectors leaves about `1e-7` for orthogonal vectors, so do not compare with exactly `0`) are never added. The `since` / `until` window applies as for normal rows (weak candidates come from the same pre-filtered queries).
+   - Take them in **descending `filter_score`** (ties: newer `(timestamp_epoch, id)` first). `score` is the `score=` shown, but it does not decide the order of weak matches.
+   - **One row per parent document**, counted together with the rows already in the results: a weak candidate that resolves to a parent document already in the results (or already added as a weak row), or to the same standalone `id`, is skipped and the next candidate is tried.
+   - Stop when the total reaches `min(min_results, limit)` or the candidates run out. Mark every added row `_weak`. Weak rows always come after every normal row.
+   - **Weak rows are not refreshed** (step 7): no `EXPIRE` on their `mem:` / `doc:` / guard keys and no `access_count` increment. §3.4 forbids extending a record's life just because it was read; a weakly related record shown to fill the list must not be kept alive by it.
+   - `min_results: 0` disables this step. **An empty or whitespace-only query skips it** (no weak rows): the vector search still returns rows for an empty query (it embeds the empty string), and filling a list for a query with no content would only add noise.
+   - Weak rows take no part in steps 4 and 5 (they are not moved by version ordering and do not count toward the relative cut's top score).
+7. **TTL refresh / access_count** for the top `ttl_refresh_top_k` **normal** rows (§3.11; rows marked `_weak` are skipped), then truncate to `limit`. **Increment `access_count` only on a key that still exists (v1.7.1, Lite review LL4)**: run `EXPIRE` first and `HINCRBY` only where `EXPIRE` returned 1 (two pipelines, or one Lua script). A key that expired between the search and the refresh would otherwise be recreated by `HINCRBY` as a hash holding only `access_count` and no TTL.
 
 > **⚠️ Why (v1.7.1, Lite review LH1; decision LD1)**: v1.7.0 compared the final score, which already contains `time_decay` (3-day half-life) and `b_session` (0.6 for another session). With equal relevance, a record about 2.2 days older than the top hit (0.5^(2.2/3) ≈ 0.6) and every record from another session fell under the cut — and because the default `session_id` is a new UUID per server process, every record saved before the MCP server last restarted counts as another session. Reproduced: with a fresh current-session record at cos 0.86 (score 0.602, cut 0.361), a 3-day-old same-session record at cos 0.95 (0.332) and 1-day-old other-session records at cos 0.99 (0.330) and 0.95 (0.317) were all dropped. Lite is a 7-day working memory; one recent hit hid everything older than two days.
 
-**Output format** (`search_memory` markdown, v1.7.0):
+> **Note: Why weak matches (v1.7.2, Lite review LA1)**: in a measurement with the real model (50 records, 26 questions, searched from another session) every question got **at most one** result (0.9 on average): recall@1 and recall@3 were both 22/26, so when the first hit was wrong the right record was never shown, and 2 of 26 questions got nothing. Filling up to 3 rows gives the LLM the next candidates under their own heading. **Cost**: every search can carry up to 3 more rows, mostly weakly related, and even an unrelated question always gets them. In Free (same corpus) the fill raised recall@3 from 23/26 to 24/26 and added about 2 weak rows per question; Lite has not been measured yet — re-run the measurement after implementing. The heading, the `min_results` key and the instruction wording are shared with N3MC Free.
+
+**Output format** (`search_memory` markdown, v1.7.0; weak matches added in v1.7.2):
 
 ```markdown
 > ⚠️ N3MC notice: <only if a notice is pending, §6, or the embedding model is unavailable, §3.9>
@@ -785,11 +795,18 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 ### [doc×3] [<id>] turn=<turn_id> score=0.812 saved=2026-11-13 10:34 (UTC+0900)
 <content>
+
+#### Possibly related (weak matches — may be unrelated)
+
+### [<id>] turn=<turn_id> score=0.412 saved=2026-11-12 21:15 (UTC+0900)
+<content>
 ```
 
 - `saved=` is the stored UTC timestamp converted to the **server's local time** with its offset (`_fmt_saved`).
 - The version sentence is printed once, above the first hit, whenever there is at least one hit.
 - `turn=` is omitted when the row has no `turn_id`; `[doc×N]` only for parent documents.
+- **Weak matches (v1.7.2)**: rows marked `_weak` are printed after every normal row, under `#### Possibly related (weak matches — may be unrelated)`, in the same `### …` form. The heading is printed only when there is at least one weak row.
+- **No normal rows but weak rows (v1.7.2)**: print `_No memories found._` (the text of an empty result), then the weak-matches heading and rows. The version sentence is not printed in this case. With neither normal nor weak rows, the output stays `_No memories found._`.
 
 ---
 
@@ -815,7 +832,7 @@ Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Results are shaped and rendered as in [§3.14](#314-search-result-shaping-v170) (vector floor, newest version first, relative cut, `saved=` times). The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
+| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Results are shaped and rendered as in [§3.14](#314-search-result-shaping-v170) (vector floor, newest version first, relative cut, `saved=` times). **When fewer than `min_results` (default 3) rows pass the floors, the closest dropped rows are added under `#### Possibly related (weak matches — may be unrelated)` (v1.7.2); the tool description tells the LLM: weak matches did not pass the relevance floors and are often unrelated — use one only when it is actually relevant to the question; if it is not, ignore it and do not mention it.** The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | Body ≤ `chunk_threshold`: exact dedup only (§3.8), then HSET + EXPIRE. Returns `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
 | `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). **Pages through the index (v1.7.1)**: fetch newest first in pages of 200 (`LIMIT <offset> 200`, sorted by `timestamp_epoch` desc) and keep paging until `limit` standalone memories of this owner are collected or the index is exhausted. (v1.7.0 read one block of `max(limit × 5, 200)` rows; after a 260-chunk document the block held only chunks, and a standalone memory saved just before it was not listed — Lite review LM6.) |
 | `delete_memory` | `id: string`                              | Only records of the configured `owner_id` (another owner's id → `{"status":"not_found","id":...}`, v1.7.1). If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk listed in its `chunk_ids` (§3.11). Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
@@ -884,6 +901,8 @@ The instructions require the LLM to:
 
 11. **Versions and notices** — when several versions of the same content appear in `search_memory` results, the one with the newest `saved=` time is the current one; answer from it (mention the change if it matters). If a result starts with `> ⚠️ N3MC notice:`, tell the user what it says in their language (e.g. an unreadable `config.json`).
 
+12. **Weak matches (v1.7.2)** — records under `#### Possibly related (weak matches — may be unrelated)` did not pass the relevance floors and are added only so that a search is never empty. Use one only when it is actually relevant to the question; if it is not, ignore it and do not mention it (do not say that unrelated memories were found).
+
 The full text is in [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py).
 
 ---
@@ -906,6 +925,7 @@ Complete schema (missing fields auto-filled with defaults below):
   "min_score":                0.2,
   "vector_min_cos":           0.85,
   "relative_min_score_ratio": 0.6,
+  "min_results":              3,
   "version_order_enabled":    true,
   "version_sim_threshold":    0.98,
   "version_min_chars":        100,
@@ -932,8 +952,9 @@ Complete schema (missing fields auto-filled with defaults below):
 - `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 7 d). Lowering it is fine; raising it far beyond a week defeats the purpose of the Lite and will be flagged during review.
 - `search_result_limit` — max results returned by `search_memory`.
 - `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — search result shaping ([§3.14](#314-search-result-shaping-v170)). `vector_min_cos` (0.85) and `version_sim_threshold` (0.98) were measured with `multilingual-e5-base`; re-measure them for another `embedding_model`. A sensible `vector_min_cos` range is 0.80–0.88 (lower: more recall, more loosely related rows; higher: shorter results, related rows dropped more easily). Changes take effect when the MCP server process restarts (restart the MCP client).
+- `min_results` (v1.7.2) — when fewer results than this pass the floors, the shortfall is filled with **weak matches** — candidates the floors dropped, shown under a separate heading and never TTL-refreshed (default `3`; [§3.14](#314-search-result-shaping-v170) step 6). Set to `0` to disable the fill. Changes take effect when the MCP server process restarts.
 - `dedup_threshold` and `context_char_limit` (v1.6.x) are **removed** — ignored if present in an existing `config.json` (no need to delete them).
-- `min_score` — excludes results with score below this value (default `0.2`). Set to `0.0` to disable. **The filter is applied after lexical rerank ([§3.6](#36-ranking-formula))** — it judges the final score including phrase/coverage boosts, so a candidate just below the threshold at fusion time can be rescued by the rerank boost.
+- `min_score` — excludes results whose `filter_score` (the score without `time_decay` and `b_session`, [§3.6](#36-ranking-formula)) is below this value (default `0.2`). Set to `0.0` to disable. **The filter is applied after lexical rerank ([§3.6](#36-ranking-formula))** — it judges the score including phrase/coverage boosts, so a candidate just below the threshold at fusion time can be rescued by the rerank boost.
 - `search_query_max_chars` — max characters used from a query (default `2000`; embedding model caps at ~512 tokens).
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (defaults 400 / 100 chars). Bodies longer than the threshold trigger the parent-document + chunks path (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
 - `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — enable flag, per-hit weight, and cap for the frequency boost (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` disables the feature entirely and the formula falls back to `stored_importance` only.
@@ -962,7 +983,7 @@ Complete schema (missing fields auto-filled with defaults below):
 | `search_result_limit`, `search_query_max_chars`, `embedding_dim` | integer | ≥ 1 |
 | `chunk_threshold` | integer | ≥ 50 |
 | `chunk_overlap` | integer | ≥ 0 and < `chunk_threshold` (the value in effect after checking `chunk_threshold`). When the configured value — or the default 100, if the key is absent or rejected — is not below `chunk_threshold`, use `chunk_threshold // 4` (lowering only `chunk_threshold` to 100 or less must not break saving) |
-| `ttl_refresh_top_k`, `version_min_chars` | integer | ≥ 0 |
+| `ttl_refresh_top_k`, `version_min_chars`, `min_results` (v1.7.2) | integer | ≥ 0 |
 | `half_life_days` | number | > 0 |
 | `bm25_min_threshold`, `access_count_weight`, `access_count_max_boost`, `rerank_weight`, `rerank_phrase_weight` | number | ≥ 0 |
 | `min_score`, `vector_min_cos`, `relative_min_score_ratio`, `version_sim_threshold`, `b_session_match`, `b_session_mismatch` | number | 0–1 |
@@ -1188,7 +1209,7 @@ n3mcmcp-lite/
 | `TestParentDocRecall` | Verbatim recall of fictional "Shiranui" city doc, chunk→parent collapse, `[doc×N]` rendering, parent→chunk cascade delete | Parent document (§3.11) |
 | `TestEncodingSafetyE2E` | `save_memory` with surrogate-laced content does not raise, surrogate-only payload returns empty-content error, `search_memory` with surrogate-laced query returns cleanly | Encoding safety end-to-end (§3.13) |
 
-### Layer 4: `tests/test_regressions.py` (v1.7.0)
+### Layer 4: `tests/test_regressions.py` (v1.7.0 – v1.7.2)
 
 Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC_REDIS_TEST_URL`.
 
@@ -1198,13 +1219,13 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestExactOnlyDedup` | A near-identical short fact with a new value is saved; a re-made long document with a few changes is saved; exact duplicates are still rejected (*Redis*) |
 | `TestTimeWindow` | `since` / `until` return in-range rows even when more than `limit × 5` newer rows are closer to the query (*Redis*) |
 | `TestShaping` | `vector_min_cos` drops low-cosine vector candidates; relative cut; the newest version moves to the top and inherits the slot score; `_version_group` rows survive the relative cut; short rows (< `version_min_chars`) are not grouped |
-| `TestRender` | `saved=` in local time, the version sentence, each notice printed once; **v1.7.1**: a notice added after the first search is printed on the next search |
+| `TestRender` | `saved=` in local time, the version sentence, each notice printed once; **v1.7.1**: a notice added after the first search is printed on the next search; **v1.7.2**: weak rows appear under `#### Possibly related (weak matches — may be unrelated)` after every normal row; with no normal rows, `_No memories found._` is followed by the weak-matches heading and no version sentence; no weak heading when there are no weak rows |
 | `TestConfig` | An unreadable `config.json` is not modified; a wrongly typed item is ignored and reported; bool is not accepted as a number |
 | `TestTestSafety` | `conftest` refuses a test URL equal to the live `redis_url`. **v1.7.1**: the live `config.json` is read with a BOM; a DB with data and no marker is not flushed |
 | `TestFilterScore` (v1.7.1) | With a fresh current-session record at cos 0.86 on top, a 3-day-old same-session record and 1-day-old other-session records at cos 0.95–0.99 survive the relative cut and `min_score`; the order is still by the final score |
 | `TestRedisTimeouts` (v1.7.1, *Redis*) | The client is built with `socket_timeout=5`; a server socket that accepts and never answers makes `ensure_connected()` return within ~5 s with the backend error; the old client is closed on reconnect |
 | `TestConfigCreate` (v1.7.1) | Several processes creating `config.json` at once end with one `owner_id` (every process uses the file's ID); updates go through a temporary file and `os.replace`; the legacy migration uses the exclusive-create rule (temporary file + `os.link`) |
-| `TestConfigRanges` (v1.7.1) | `ttl_seconds` `604800.5` / `0`, `embedding_dim` `768.0`, `chunk_overlap >= chunk_threshold`, `chunk_threshold` 10, `half_life_days` 0, `min_score` 1.5 are ignored with `config_type`; `chunk_text(text, 100, 100)` on a body without breaks terminates |
+| `TestConfigRanges` (v1.7.1) | `ttl_seconds` `604800.5` / `0`, `embedding_dim` `768.0`, `chunk_overlap >= chunk_threshold`, `chunk_threshold` 10, `half_life_days` 0, `min_score` 1.5 are ignored with `config_type` (**v1.7.2**: so are `min_results` `-1` and `1.5`, while `0` is accepted); `chunk_text(text, 100, 100)` on a body without breaks terminates |
 | `TestLongSaveAtomic` (v1.7.1, *Redis*) | An embedding failure in the middle of a long save leaves no `doc:` / `docsha:` key, and the same body can then be saved; the guard is taken with `SET NX` and the parent and all chunks are written in one pipeline |
 | `TestIndexFailure` (v1.7.1) | `FT.CREATE` failing with `unknown command` does not end `_main()`; tools return the "Redis Stack required" hint; the index is retried on the next call; an existing index with another `DIM` adds `index_dim_mismatch` |
 | `TestEnforceEphemeral` (v1.7.1, *Redis*) | An empty DB or one with only `mem:` / `doc:` / `docsha:` keys gets `CONFIG SET`; a DB with another key does not, and `shared_redis` is added; a refused `CONFIG` adds `config_refused` without failing the connection |
@@ -1219,6 +1240,7 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestAccessCountNoGhost` (v1.7.1, *Redis*) | A key that expires between the search and the TTL refresh is not recreated by `HINCRBY` |
 | `TestHangulFiller` (v1.7.1) | `U+3164`, `U+115F`, `U+1160`, `U+FFA0`, `U+2800` alone are rejected as no visible characters; with a visible character they are stored verbatim |
 | `TestPluginHook` (additions, v1.7.1) | `settings.json` is re-read just before writing and replaced atomically; the fallback text names "or the permission script failed" |
+| `TestWeakMatches` (v1.7.2, *Redis*) | With one row passing the floors and `min_results: 3`, two weak rows are added after it, ordered by `filter_score` and marked `_weak`; a candidate below `vector_min_cos` is added with its actual cos; `min_results: 0` adds nothing; nothing is added when enough rows pass; a `limit` smaller than `min_results` caps the total; two chunk hits of one parent document give one weak row, and a parent already in the results is not added again; a candidate with `filter_score` below `1e-6` is never added; **the TTL and `access_count` of a weak row's `mem:` / `doc:` / guard keys do not change** while a normal row's are refreshed; an empty or whitespace-only query adds no weak rows; the default config has `min_results: 3` |
 
 ### Example runs
 

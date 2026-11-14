@@ -472,6 +472,7 @@ Microsoft Store 版の Claude デスクトップアプリは、起動した MCP 
   "min_score":                0.2,
   "vector_min_cos":           0.85,
   "relative_min_score_ratio": 0.6,
+  "min_results":              3,
   "version_order_enabled":    true,
   "version_sim_threshold":    0.98,
   "version_min_chars":        100,
@@ -496,6 +497,7 @@ Microsoft Store 版の Claude デスクトップアプリは、起動した MCP 
 - `ttl_seconds` — 保存ごとに付与される TTL（既定 7 日）。
 - `vector_min_cos` — ベクトル検索の候補にする cos 類似度の下限（既定 `0.85`）。下げる（例 0.80〜0.83）と言い回しが違っても拾いやすくなるが、関係の薄い記録も混ざる。上げる（例 0.88）と結果が短くなるが、関係のある記録も落ちやすい。目安は 0.80〜0.88。0.85 は `multilingual-e5-base` で測った値なので、`embedding_model` を変えたら測り直す。
 - `relative_min_score_ratio` — 1 位のスコアのこの倍率未満の結果を捨てる（既定 `0.6`、`0.0` で無効）。
+- `min_results`（1.10.1 から） — 下限を通った結果がこの件数に満たないとき、`search_memory` は落ちた行のうち近いものを、合計がこの件数になるまで、`#### Possibly related (weak matches — may be unrelated)` という別の見出しの下に足します（既定 `3`、`0` で補充しない）。接続した LLM には「関係があるときだけ使う」と指示しています。弱い候補は 7 日の TTL を延ばさないので、表示されても延命しません。記憶がまったく入らない質問がなくなる代わりに、検索のたびに最大 3 行、多くは関係の薄い行が増えます。
 - `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 文書や長いエントリの新しい版を保存すると、古い版も残る。内容が 0.98 以上似ている結果は同じ内容の版とみなし、新しい順に並べる。各結果に `saved=`（保存日時）が付く。
 - 設定は MCP サーバーが起動し直したときに効く（MCP クライアントを再起動する）。書き間違えて読めないときは、ファイルはそのまま残り、既定値で動く。そのことは最初の `search_memory` の結果に表示される。数値は引用符を付けずに書く。
 - `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズと重複（文字数）。閾値超の本文は親ドキュメント＋チャンク経路に入り、verbatim 復元される。

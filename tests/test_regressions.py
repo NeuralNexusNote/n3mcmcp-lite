@@ -1,4 +1,4 @@
-"""Layer 4: regression tests for the v1.7.0 and v1.7.1 fixes (spec §9).
+"""Layer 4: regression tests for the v1.7.0 – v1.7.2 fixes (spec §9).
 
 Embeddings are deterministic fakes (no model). Redis classes use the `db`
 fixture, i.e. ONLY the dedicated N3MC_REDIS_TEST_URL instance.
@@ -1555,3 +1555,143 @@ class TestConfigUnreadableSave:
             res = db.save_memory(text)
             assert res["saved"] and res["warning"] == "config_unreadable"
             assert "temporary owner_id" in res["detail"] and "/x/config.json" in res["detail"]
+
+
+# ── v1.7.2 LA1 weak matches (spec §3.14 step 6) ──────────────────────────────
+
+WEAK_H = "#### Possibly related (weak matches — may be unrelated)"
+
+
+@requires_redis
+class TestWeakMatches:
+    def _setup(self, db, fake_embed, rows, **cfg):
+        db.cfg.update(vector_min_cos=0.85, relative_min_score_ratio=0.6, min_score=0.2,
+                      access_count_enabled=False, lexical_rerank_enabled=False,
+                      version_order_enabled=False, min_results=3)
+        db.cfg.update(cfg)
+        fake_embed["WMQUERY"] = axis(0)
+        ids = {}
+        for i, (name, vec) in enumerate(rows):
+            fake_embed[name] = vec
+            res = db.save_memory(f"{name} record")
+            assert res["saved"], res
+            ids[name] = res.get("id") or res.get("parent_id")
+        return ids
+
+    BASE = [("WMstrong", at_cos(0.95, 1)), ("WMa", at_cos(0.80, 2)),
+            ("WMb", at_cos(0.70, 3)), ("WMc", at_cos(0.60, 4))]
+
+    def test_fill_to_min_results(self, db, fake_embed):
+        self._setup(db, fake_embed, self.BASE)
+        res = db.search_memory("WMQUERY")
+        assert [r["content"] for r in res] == ["WMstrong record", "WMa record", "WMb record"]
+        assert [bool(r.get("_weak")) for r in res] == [False, True, True]
+        # a candidate below vector_min_cos keeps its actual cos
+        assert res[1]["filter_score"] == pytest.approx(0.80 * 0.7, abs=1e-3)
+
+    def test_zero_disables(self, db, fake_embed):
+        self._setup(db, fake_embed, self.BASE, min_results=0)
+        assert [r["content"] for r in db.search_memory("WMQUERY")] == ["WMstrong record"]
+
+    def test_nothing_added_when_enough(self, db, fake_embed):
+        rows = self.BASE + [("WMs2", at_cos(0.94, 5)), ("WMs3", at_cos(0.93, 6))]
+        self._setup(db, fake_embed, rows)
+        res = db.search_memory("WMQUERY")
+        assert len(res) == 3 and not any(r.get("_weak") for r in res)
+
+    def test_limit_caps_total(self, db, fake_embed):
+        self._setup(db, fake_embed, self.BASE)
+        res = db.search_memory("WMQUERY", limit=2)
+        assert [r["content"] for r in res] == ["WMstrong record", "WMa record"]
+
+    def test_one_row_per_parent_document(self, db, fake_embed):
+        db.cfg.update(chunk_threshold=400, chunk_overlap=100)
+        fake_embed["WMDOC"] = at_cos(0.80, 7)
+        ids = self._setup(db, fake_embed, [("WMstrong", at_cos(0.95, 1)),
+                                           ("WMb", at_cos(0.70, 3))])
+        doc = db.save_memory("WMDOC " + "本文です。" * 200)
+        assert doc["saved"] and doc["chunks"] >= 2
+        res = db.search_memory("WMQUERY")
+        assert [r["id"] for r in res] == [ids["WMstrong"], doc["parent_id"], ids["WMb"]]
+        assert res[1].get("_tag", "").startswith("[doc×")
+
+    def test_parent_in_results_not_added_again(self, db, fake_embed):
+        fake_embed["WMDOC"] = at_cos(0.95, 7)
+        ids = self._setup(db, fake_embed, [("WMa", at_cos(0.80, 2))])
+        doc = db.save_memory("WMDOC " + "本文です。" * 200)
+        res = db.search_memory("WMQUERY")
+        assert [r["id"] for r in res] == [doc["parent_id"], ids["WMa"]]
+
+    def test_zero_filter_score_never_added(self, db, fake_embed):
+        self._setup(db, fake_embed, [("WMstrong", at_cos(0.95, 1)), ("WMorth", axis(9))])
+        assert [r["content"] for r in db.search_memory("WMQUERY")] == ["WMstrong record"]
+
+    def test_weak_rows_not_refreshed(self, db, fake_embed, redis_client):
+        import n3mc_mcp.database as D
+        ids = self._setup(db, fake_embed, self.BASE[:2],
+                          ttl_refresh_on_search=True, ttl_refresh_top_k=5)
+        strong, weak = f"mem:{ids['WMstrong']}", f"mem:{ids['WMa']}"
+        weak_guard = f"mem:sha:{D._sha1('WMa record')}"
+        assert redis_client.exists(weak_guard)
+        for k in (strong, weak, weak_guard):
+            redis_client.expire(k, 100)
+        res = db.search_memory("WMQUERY")
+        assert [bool(r.get("_weak")) for r in res] == [False, True]
+        assert redis_client.ttl(strong) > 1000
+        assert redis_client.ttl(weak) <= 100 and redis_client.ttl(weak_guard) <= 100
+        assert int(redis_client.hget(strong, "access_count") or 0) == 1
+        assert int(redis_client.hget(weak, "access_count") or 0) == 0
+
+    def test_empty_query_adds_no_weak_rows(self, db, fake_embed):
+        self._setup(db, fake_embed, self.BASE)
+        assert not any(r.get("_weak") for r in db.search_memory(""))
+        assert not any(r.get("_weak") for r in db.search_memory("   "))
+
+    def test_default_config(self):
+        assert C.DEFAULTS["min_results"] == 3
+
+
+class TestWeakRender:
+    @staticmethod
+    def _r(content, weak):
+        return {"id": content, "content": content, "score": 0.5, "_weak": weak,
+                "timestamp": "2026-01-01T00:00:00+00:00"}
+
+    def test_weak_after_normal_rows(self):
+        from n3mc_mcp import server as S
+        md = S._render_search([self._r("top one", False), self._r("weak one", True)])
+        assert S.WEAK_HEADING == WEAK_H
+        assert md.index("top one") < md.index(WEAK_H) < md.index("weak one")
+
+    def test_no_normal_rows(self):
+        from n3mc_mcp import server as S
+        md = S._render_search([self._r("weak one", True)])
+        assert md.index("_No memories found._") < md.index(WEAK_H)
+        assert "newest `saved` time" not in md
+
+    def test_no_weak_heading_without_weak_rows(self):
+        from n3mc_mcp import server as S
+        assert WEAK_H not in S._render_search([self._r("top one", False)])
+        assert S._render_search([]).strip() == "_No memories found._"
+
+    def test_instructions_and_tool_text(self):
+        from n3mc_mcp import instructions as I
+        assert "12. WEAK MATCHES" in I.INSTRUCTIONS
+        assert "Use one only when it is actually relevant" in I.INSTRUCTIONS
+
+
+class TestConfigRangesV172:
+    @pytest.mark.parametrize("value", [-1, 1.5])
+    def test_min_results_out_of_range_ignored(self, cfg_dir, value):
+        cfg_dir.write_text(json.dumps({"owner_id": "o", "local_id": "l",
+                                       "min_results": value}), encoding="utf-8")
+        cfg = C.load_config()
+        assert cfg["min_results"] == 3
+        assert any(n.startswith("config_type") and "min_results" in n for n in cfg["_notices"])
+
+    def test_min_results_zero_accepted(self, cfg_dir):
+        cfg_dir.write_text(json.dumps({"owner_id": "o", "local_id": "l",
+                                       "min_results": 0}), encoding="utf-8")
+        cfg = C.load_config()
+        assert cfg["min_results"] == 0
+        assert not any("min_results" in n for n in cfg.get("_notices", []))

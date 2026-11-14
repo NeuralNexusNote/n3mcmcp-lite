@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.7.1 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.7.2 [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版（公開予定）** との差別化を明確化しています。
@@ -256,7 +256,7 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 
 **パイプラインのアトミック性**：3 コマンド（`HSET`・`EXPIRE`・`SET`）を 1 パイプラインで送信するため、「レコードはあるが TTL なし」「sha ガードはあるがレコードなし」のような部分失敗の交錯状態は発生しない。長文の経路も v1.7.1 から同じ規則に従う：すべてのチャンクの埋め込みを計算し終え、`docsha:` ガードを `SET … NX EX` で取ったあとで、親ドキュメントと**すべての**チャンクを **1 つの**パイプラインで書く。そのパイプラインが失敗したら、ガードを削除し直す（§3.8 (B)）。パイプラインは `transaction=True`（`MULTI`/`EXEC`）で送る。
 
-**ガードはレコードの TTL に従う（v1.7.1）**：検索ヒットでレコードの TTL を設定し直すとき（§3.11／§3.14 手順 6）、そのレコードの重複ガードも同じパイプラインで設定し直す — 単独レコードなら `SET mem:sha:<sha1> <id> EX <ttl_seconds>`、親ドキュメントなら `SET docsha:<sha1> <parent_id> EX <ttl_seconds>`。`<sha1>` は保存済みの本文から、`save_memory` と同じ関数（NFKC 正規化したテキストの SHA-1）で計算し直すので、以前のバージョンで保存したレコードにもフィールドの追加は要らない。チャンクには自分のガードがなく、親のガードは親と一緒に設定し直される。
+**ガードはレコードの TTL に従う（v1.7.1）**：検索ヒットでレコードの TTL を設定し直すとき（§3.11／§3.14 手順 7）、そのレコードの重複ガードも同じパイプラインで設定し直す — 単独レコードなら `SET mem:sha:<sha1> <id> EX <ttl_seconds>`、親ドキュメントなら `SET docsha:<sha1> <parent_id> EX <ttl_seconds>`。`<sha1>` は保存済みの本文から、`save_memory` と同じ関数（NFKC 正規化したテキストの SHA-1）で計算し直すので、以前のバージョンで保存したレコードにもフィールドの追加は要らない。チャンクには自分のガードがなく、親のガードは親と一緒に設定し直される。
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LM7）**：v1.7.0 は `mem:<id>` / `doc:<id>` しか設定し直さなかった。検索に出続ける記録は生き続けるが、そのガードは保存から 7 日で失効し、その後は同じ内容をもう一度保存できて、記録が 2 つになった — 「レコードとガードは同時に失効する」に反する。
 
@@ -267,7 +267,7 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 **以下は絶対に禁止（「性能」や「永続化」目的であっても）：**
 - `EXPIRE` なしの書き込み（＝無限 TTL）。
 - Lite メモリ寿命の延長のみを目的として、コンテナ削除後も生き残る Redis RDB / AOF 永続化設定を有効にすること。（ユーザーが自分の都合で Redis 設定を選ぶのは自由だが、仕様上はそれに依存しない。）
-- 読み込み時の無条件 TTL 再延長（`search_memory` 時の `TOUCH` や `EXPIRE`）。ただし設定 `ttl_refresh_on_search`（§6、既定 `true`）による上位 K 件への TTL 再設定は**設計上の例外**であり禁止対象外。同設定は `ttl_seconds` を上限として TTL を再起動するのみで、設定値を超えた延長は行わない。
+- 読み込み時の無条件 TTL 再延長（`search_memory` 時の `TOUCH` や `EXPIRE`）。ただし設定 `ttl_refresh_on_search`（§6、既定 `true`）による上位 K 件への TTL 再設定は**設計上の例外**であり禁止対象外。同設定は `ttl_seconds` を上限として TTL を再起動するのみで、設定値を超えた延長は行わない。**弱い候補（§3.14 手順 6、v1.7.2）は TTL を再設定しない**：関連度の下限を通っていないので、表示されたことで延命させてはならない。
 - 1 保存呼び出しを超える範囲でのライトバッファリング / 遅延パイプライン。
 
 **理由**：Lite の差別化は明示的な揮発性である。回避するとプロダクト区分が崩れる。
@@ -359,7 +359,7 @@ access_boost = min(access_count_max_boost, access_count × access_count_weight)
 ```
 
 - `stored_importance`：`save_memory` 時に指定（既定 `1.0`、範囲 `0.5〜2.0`）。
-- `access_boost`：**CPU のみで自動算出される頻度ブースト**。`search_memory` がその記憶を上位 `ttl_refresh_top_k` 件に含めるたび `access_count` が +1 され、次回以降の検索で `access_count × access_count_weight`（既定 `0.02`）だけ `b_local` を押し上げる（上限 `access_count_max_boost = 0.5`）。LLM の介在なく「よく使われる記憶ほど上位に来る」自己調整ループが成立する。
+- `access_boost`：**CPU のみで自動算出される頻度ブースト**。`search_memory` がその記憶を上位 `ttl_refresh_top_k` 件に含めるたび（弱い候補は除く、§3.14 手順 6）`access_count` が +1 され、次回以降の検索で `access_count × access_count_weight`（既定 `0.02`）だけ `b_local` を押し上げる（上限 `access_count_max_boost = 0.5`）。LLM の介在なく「よく使われる記憶ほど上位に来る」自己調整ループが成立する。
 
 設定で `access_count_enabled: false` にすればブーストを無効化できる（`stored_importance` のみで重み付け）。
 
@@ -420,7 +420,7 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 | 値 | 式 | 用途 |
 |---|---|---|
 | `score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local × b_session` + リランク加点 | 結果の並び順と、表示する `score=` |
-| `filter_score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × b_local` + リランク加点 | `min_score`（§3.6）と相対カット（§3.14 手順 5） |
+| `filter_score` | `(cos_sim × 0.7 + keyword_relevance × 0.3) × b_local` + リランク加点 | `min_score`（§3.6）と相対カット（§3.14 手順 5）、弱い候補の並び順（§3.14 手順 6、v1.7.2） |
 
 `time_decay` と `b_session` が決めるのは**どの記録を先に出すか**であって、記録を出すかどうかではない：3 日前の記録や、サーバー再起動より前に保存した記録（別の `session_id`）も、トップのヒットと同じくらい関連していれば、一覧の下のほうに出る。リランク加点は両方の値に加える。
 
@@ -586,7 +586,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
   - 同じ `parent_id` が既出 → 重複として破棄（最高スコアのヒットのみ残す）
   - 初出 → `doc:<parent_id>` を HGET し、`content` を親の全文に置換、ID も親 ID に差し替える。
 - 後続の語彙リランク（トークン coverage + フレーズボーナス）はこの時点で**親の全文 verbatim** を対象に動作する。これにより、クエリ句がヒットチャンクではなく同一文書の別チャンクに現れる場合でも親ドキュメントのランクが正しくブーストされる。
-- `ttl_refresh_on_search` が有効なとき、TTL リフレッシュはリランク**後の**上位 K 件に適用される：各ヒットの `mem:<chunk_id>`（または独立 `mem:<id>`）キーの `access_count` が +1 され、親ドキュメントに解決されたヒットでは `doc:<parent_id>` の TTL と、**`chunk_ids` に列挙された全兄弟チャンク `mem:<chunk_id>` の TTL を一括で同時リフレッシュする**（最高スコアの 1 チャンクだけでなく、その文書を構成する全チャンクが揃って延命する）。これにより、ある兄弟チャンク固有の語句で後続検索した場合の検索性が窓全体で保たれる（最高スコアチャンクのみを延長すると、他チャンクが窓途中で失効して検索ヒット経路が痩せる問題を解消）。`access_count` のインクリメントは実際にヒットしたチャンクにのみ適用し、サイレントに延命される兄弟チャンクには加算しない。`chunk_ids` フィールドを持たない旧 doc（アップグレード前に保存）は最高スコアチャンク 1 個＋親のみの延長に graceful にフォールバックする。
+- `ttl_refresh_on_search` が有効なとき、TTL リフレッシュはリランク**後の**上位 K 件に適用される（弱い候補は飛ばす。TTL も `access_count` も変えない、§3.14 手順 6）：各ヒットの `mem:<chunk_id>`（または独立 `mem:<id>`）キーの `access_count` が +1 され、親ドキュメントに解決されたヒットでは `doc:<parent_id>` の TTL と、**`chunk_ids` に列挙された全兄弟チャンク `mem:<chunk_id>` の TTL を一括で同時リフレッシュする**（最高スコアの 1 チャンクだけでなく、その文書を構成する全チャンクが揃って延命する）。これにより、ある兄弟チャンク固有の語句で後続検索した場合の検索性が窓全体で保たれる（最高スコアチャンクのみを延長すると、他チャンクが窓途中で失効して検索ヒット経路が痩せる問題を解消）。`access_count` のインクリメントは実際にヒットしたチャンクにのみ適用し、サイレントに延命される兄弟チャンクには加算しない。`chunk_ids` フィールドを持たない旧 doc（アップグレード前に保存）は最高スコアチャンク 1 個＋親のみの延長に graceful にフォールバックする。
 - 最終出力は markdown 先頭に `[doc×N]`（N=`chunk_count`）タグ付きで表示される。
 
 `list_memories` 側の整合：
@@ -746,7 +746,7 @@ verbatim 契約を破る可能性を最小化するための設計判断であ�
 するため、復旧対象となる過去データが存在しない。復旧ルーチンを足したところで
 ユーザーが既に ephemeral と受け入れたデータの上でしか動かない。
 
-### 3.14 検索結果の整形（v1.7.0）
+### 3.14 検索結果の整形（v1.7.0。v1.7.2 から弱い候補で補充）
 
 v1.6.x は KNN の候補をすべて順位付けしていた。`multilingual-e5` では無関係なレコードでもほぼどのクエリに対してもコサイン 0.80〜0.85 になるため、`search_memory` は関連の薄い行を長々と返し、事実や文書の更新版が古い版より下に来ることがあった（古い版は `access_count` を蓄積している）。そこで `search_memory` は候補を次の順で整形する：
 
@@ -759,11 +759,21 @@ v1.6.x は KNN の候補をすべて順位付けしていた。`multilingual-e5`
    - 各グループ内で行を `(timestamp_epoch, id)` の新しい順に並べ替える（`id` は UUIDv7 なので、同じ秒に保存した行も順序が付く）。**各位置のスコアはそのまま** — 動くのは行だけなので、最新版がグループ内の最高スコアを引き継ぐ。**2 件以上のグループの全員**に `_version_group`（1 から始まるグループ番号）を付ける。最新版がもともと先頭で何も動かなかったときも付ける（下の相対カットで旧版が残るように）。何も削除しない。`chunk_ids` がなかった時期に保存した親ドキュメントは代表がないので、グループにしない。
    - 0.98 は `multilingual-e5-base` での計測値：同じ設定の作り直し → 1.0、形が同じで値が違う設定 → 0.88〜0.91、1 つの長い返答内の別項目 → 最大 0.95。
 5. **相対カット** — **`filter_score`** が最も高い `filter_score` × `relative_min_score_ratio`（既定 `0.6`）未満の結果を落とす（v1.7.1）。ただし `_version_group` の印が付いた行は除く（旧版を新版の隣に残すため）。`0.0` で無効化。手順 4 は各位置の `score` をそのままにして行を動かすが、`filter_score` も同じように位置と一緒に残る。
-6. 上位 `ttl_refresh_top_k` 件の **TTL 更新 / access_count**（§3.11）を行い、`limit` 件に切り詰める。**`access_count` はまだ存在するキーでだけ増やす（v1.7.1、Lite レビュー LL4）**：先に `EXPIRE` を実行し、`EXPIRE` が 1 を返したキーでだけ `HINCRBY` する（パイプライン 2 つ、または Lua スクリプト 1 つ）。そうしないと、検索と更新の間に失効したキーが `HINCRBY` によって、`access_count` だけを持ち TTL のないハッシュとして作り直される。
+6. **弱い候補による最低件数の補充（v1.7.2、Lite レビュー LA1）** — 手順 5 の後に残った結果が `min(min_results, limit)` 件に満たないとき（`limit` は `search_memory` の引数、なければ `search_result_limit`）、**この検索で取得したが手順 2・3・5 で落ちた候補**から、足りない分を足す。
+   - 弱い候補になるのは、手順 2 の `vector_min_cos` で落ちたベクトル候補（**実際の `cos_sim` で計算する**。BM25 のみの行としての `0.0` ではない）と、`min_score`（手順 3）・相対カット（手順 5）で落ちた結果。手順 2 で落ちて BM25 にもヒットした行は、実際の `cos_sim` と `keyword_relevance` を持つ 1 件の候補とする。`filter_score` と `score` は、普通の行と同じ親ドキュメントの解決（§3.11）と語彙リランクを通して §3.6 の式で計算する。`filter_score` が `1e-6` 未満（類似度もキーワードも寄与なし。float32 のベクトルのコサイン距離では、直交するベクトルでも約 `1e-7` が残るので、ちょうど `0` とは比べない）の候補は足さない。`since` / `until` の範囲は普通の行と同じく効く（弱い候補も同じ事前フィルタ済みのクエリから来る）。
+   - **`filter_score` の高い順**に取る（同じ値なら `(timestamp_epoch, id)` の新しいほうが先）。`score` は `score=` に表示するが、弱い候補の並び順には使わない。
+   - **親ドキュメントごとに 1 行**。すでに結果にある行と合わせて数える：解決先の親ドキュメントがすでに結果にある（または弱い候補としてすでに足した）候補や、同じ独立 `id` の候補は飛ばして次を見る。
+   - 合計が `min(min_results, limit)` に達するか、候補がなくなったら止める。足した行にはすべて `_weak` の印を付ける。弱い候補は常に普通の行のすべてより後に来る。
+   - **弱い候補は TTL を再設定しない**（手順 7）：`mem:` / `doc:` / ガードのキーに `EXPIRE` をかけず、`access_count` も増やさない。§3.4 は読んだだけで寿命を延ばすことを禁じている。件数を埋めるために見せた関係の薄い記録を、それで延命させてはならない。
+   - `min_results: 0` ではこの手順を行わない。**空のクエリ、または空白だけのクエリでも行わない**（弱い候補は足さない）：空のクエリでもベクトル検索は空文字列を埋め込んで行を返すので、中身のないクエリに補充しても雑音が増えるだけである。
+   - 弱い候補は手順 4 と 5 に関わらない（版の並べ替えで動かさず、相対カットの 1 位の値にも数えない）。
+7. 上位 `ttl_refresh_top_k` 件の**普通の行**の **TTL 更新 / access_count**（§3.11。`_weak` の行は飛ばす）を行い、`limit` 件に切り詰める。**`access_count` はまだ存在するキーでだけ増やす（v1.7.1、Lite レビュー LL4）**：先に `EXPIRE` を実行し、`EXPIRE` が 1 を返したキーでだけ `HINCRBY` する（パイプライン 2 つ、または Lua スクリプト 1 つ）。そうしないと、検索と更新の間に失効したキーが `HINCRBY` によって、`access_count` だけを持ち TTL のないハッシュとして作り直される。
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LH1、決定 LD1）**：v1.7.0 は最終スコアで比べていたが、それにはすでに `time_decay`（半減期 3 日）と `b_session`（別セッションは 0.6）が掛かっている。関連度が同じなら、トップのヒットより約 2.2 日古い記録（0.5^(2.2/3) ≈ 0.6）と、別セッションの記録はすべてカットを下回った — しかも既定の `session_id` はサーバープロセスごとの新しい UUID なので、MCP サーバーが最後に再起動する前に保存した記録はすべて別セッション扱いになる。再現：現セッションの新しい記録が cos 0.86（スコア 0.602、カット 0.361）のとき、同じセッションの 3 日前の記録 cos 0.95（0.332）と、別セッションの 1 日前の記録 cos 0.99（0.330）・0.95（0.317）がすべて落ちた。Lite は 7 日のワーキングメモリなのに、最近のヒット 1 件が 2 日より古いものをすべて隠していた。
 
-**出力形式**（`search_memory` の markdown、v1.7.0）：
+> **注: 弱い候補を足す理由（v1.7.2、Lite レビュー LA1）**：実モデルでの測定（記録 50 件、質問 26 問、別セッションから検索）では、**どの質問でも結果は最大 1 件**（平均 0.9 件）だった。recall@1 と recall@3 がどちらも 22/26 で、1 位が外れると正解は出ず、26 問中 2 問は何も返らなかった。3 件まで補うと、LLM は次の候補を別の見出しの下で見られる。**欠点**：検索のたびに最大 3 行が増え、その大半は関係の薄い記録で、無関係な質問でも必ず返る。Free（同じ記録と質問）では、補充で recall@3 が 23/26 から 24/26 になり、1 問あたりおよそ 2 件の弱い候補が加わった。Lite ではまだ測っていない — 実装の後に測り直すこと。見出し、`min_results` の名前、指示の文面は N3MC Free と共通にする。
+
+**出力形式**（`search_memory` の markdown、v1.7.0。弱い候補は v1.7.2 で追加）：
 
 ```markdown
 > ⚠️ N3MC notice: <only if a notice is pending, §6, or the embedding model is unavailable, §3.9>
@@ -772,11 +782,18 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 ### [doc×3] [<id>] turn=<turn_id> score=0.812 saved=2026-11-13 10:34 (UTC+0900)
 <content>
+
+#### Possibly related (weak matches — may be unrelated)
+
+### [<id>] turn=<turn_id> score=0.412 saved=2026-11-12 21:15 (UTC+0900)
+<content>
 ```
 
 - `saved=` は保存された UTC タイムスタンプを**サーバーのローカル時刻**に変換し、オフセットを付けたもの（`_fmt_saved`）。
 - 版についての一文は、ヒットが 1 件以上あれば最初のヒットの上に 1 回だけ出す。
 - `turn=` は行に `turn_id` が無ければ省略。`[doc×N]` は親ドキュメントのみ。
+- **弱い候補（v1.7.2）**：`_weak` の行は、普通の行のすべての後に、`#### Possibly related (weak matches — may be unrelated)` の見出しの下に、同じ `### …` の形で出す。見出しは弱い候補が 1 件以上あるときだけ出す。
+- **普通の行が 0 件で弱い候補があるとき（v1.7.2）**：空の結果の文面 `_No memories found._` を出し、その後に弱い候補の見出しと行を出す。この場合、版についての一文は出さない。どちらも 0 件のときは、これまでどおり `_No memories found._` だけ。
 
 ---
 
@@ -802,7 +819,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 | 名前            | 入力                                      | 振る舞い                                                                 |
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
-| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。結果は [§3.14](#314-検索結果の整形v170) の通りに整形・表示される（ベクトル下限、新しい版を先頭へ、相対カット、`saved=` 時刻）。`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
+| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。結果は [§3.14](#314-検索結果の整形v170) の通りに整形・表示される（ベクトル下限、新しい版を先頭へ、相対カット、`saved=` 時刻）。**下限を通った行が `min_results`（既定 3）件に満たないときは、落ちた行のうち近いものを `#### Possibly related (weak matches — may be unrelated)` の下に足す（v1.7.2）。ツールの説明では LLM に「弱い候補は関連度の下限を通っておらず、関係がないことが多い。質問に実際に関係があるときだけ使い、関係がなければ無視して触れない」と伝える。**`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | 本文長 ≤ `chunk_threshold` なら完全一致の重複判定のみ（§3.8）を行った後、HSET + EXPIRE し `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}` を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー、および後続 `search_memory` の `b_session` マッチ対象）。 |
 | `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。親は `[doc×N]` タグ付き。チャンクは隠蔽（FT.SEARCH `*` クエリ後に Python 側で `parent_id` 空文字列フィルタ、§3.12 参照）。**索引をページ単位で読む（v1.7.1）**：新しい順（`timestamp_epoch` の降順）に 200 件ずつ（`LIMIT <offset> 200`）取り出し、このオーナーの独立メモリが `limit` 件集まるか索引が尽きるまでページを進める。（v1.7.0 は `max(limit × 5, 200)` 行を 1 回だけ読んでいた。260 チャンクの文書のあとではその塊がチャンクだけになり、その直前に保存した独立メモリが一覧に出なかった — Lite レビュー LM6。） |
 | `delete_memory` | `id: string`                              | 設定の `owner_id` のレコードに限る（別のオーナーの ID → `{"status":"not_found","id":...}`、v1.7.1）。ID が親（`doc:<uuid>`）なら親＋`docsha:`＋その `chunk_ids` に列挙された全チャンクを連鎖削除（§3.11）。それ以外は `mem:<uuid>` とその sha ガードをアトミック削除。 |
@@ -872,6 +889,8 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 11. **版と通知** — `search_memory` の結果に同じ内容の版が複数現れたら、`saved=` 時刻が最も新しいものが現行版である。それに基づいて答える（変更が重要なら変更に触れる）。結果が `> ⚠️ N3MC notice:` で始まる場合は、その内容をユーザーの言語で伝える（例：`config.json` が読めない）。
 
+12. **弱い候補（v1.7.2）** — `#### Possibly related (weak matches — may be unrelated)` の下の記録は関連度の下限を通っておらず、検索が空にならないように足しただけのもの。質問に実際に関係があるときだけ使う。関係がなければ無視し、触れない（「関係のない記憶が見つかった」とも言わない）。
+
 完全文面は [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py)。
 
 ---
@@ -894,6 +913,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
   "min_score":                0.2,
   "vector_min_cos":           0.85,
   "relative_min_score_ratio": 0.6,
+  "min_results":              3,
   "version_order_enabled":    true,
   "version_sim_threshold":    0.98,
   "version_min_chars":        100,
@@ -920,8 +940,9 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 7 日）。下げるのは問題ないが、1 週間を大きく超える値に上げると Lite の目的が崩れるためレビュー時に指摘される。
 - `search_result_limit` — `search_memory` が返す最大件数。
 - `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 検索結果の整形（[§3.14](#314-検索結果の整形v170)）。`vector_min_cos`（0.85）と `version_sim_threshold`（0.98）は `multilingual-e5-base` で計測した値。別の `embedding_model` では計測し直すこと。`vector_min_cos` の妥当な範囲は 0.80〜0.88（低くすると再現率が上がり関連の薄い行も増える、高くすると結果が短くなり関連行も落ちやすい）。変更は MCP サーバープロセスの再起動時に反映される（MCP クライアントを再起動する）。
+- `min_results`（v1.7.2） — 下限を通った結果がこの件数に満たないとき、足りない分を**弱い候補**（下限で落ちた候補）で補う。別の見出しの下に出し、TTL は再設定しない（既定 `3`、[§3.14](#314-検索結果の整形v170) の手順 6）。`0` で補充しない。MCP サーバーのプロセスを起動し直すと効く。
 - `dedup_threshold` と `context_char_limit`（v1.6.x）は**廃止** — 既存の `config.json` にあっても無視される（削除する必要はない）。
-- `min_score` — このスコア未満の結果を除外（既定 `0.2`）。`0.0` で無効化。**フィルタは語彙リランク（[§3.6](#36-ランキング式)）の後に適用される** — フレーズ一致・coverage の加点を受けた最終スコアで判定するため、融合スコアが閾値直下でもリランク加点で救済されうる。
+- `min_score` — `filter_score`（`time_decay` と `b_session` を掛けないスコア、[§3.6](#36-ランキング式)）がこの値未満の結果を除外（既定 `0.2`）。`0.0` で無効化。**フィルタは語彙リランク（[§3.6](#36-ランキング式)）の後に適用される** — フレーズ一致・coverage の加点を受けたスコアで判定するため、融合スコアが閾値直下でもリランク加点で救済されうる。
 - `search_query_max_chars` — クエリから使う最大文字数（既定 `2000`；埋め込みモデルが ~512 トークンで飽和）。
 - `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズとオーバーラップ（既定 400 / 100 文字）。本文長がこの閾値を超えた場合に親ドキュメント＋チャンク化（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）に入る。
 - `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — アクセス頻度ブーストの有効化・係数・上限（[§3.6](#36-ランキング式)）。`false` で完全無効化、`stored_importance` のみが重みになる。
@@ -950,7 +971,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 | `search_result_limit`, `search_query_max_chars`, `embedding_dim` | 整数 | ≥ 1 |
 | `chunk_threshold` | 整数 | ≥ 50 |
 | `chunk_overlap` | 整数 | ≥ 0 かつ < `chunk_threshold`（`chunk_threshold` を確認したあとの有効な値）。設定値 — キーがないか拒否されたときは既定の 100 — が `chunk_threshold` 未満でなければ、`chunk_threshold // 4` を使う（`chunk_threshold` だけを 100 以下に下げても保存が壊れてはならない） |
-| `ttl_refresh_top_k`, `version_min_chars` | 整数 | ≥ 0 |
+| `ttl_refresh_top_k`, `version_min_chars`, `min_results`（v1.7.2） | 整数 | ≥ 0 |
 | `half_life_days` | 数値 | > 0 |
 | `bm25_min_threshold`, `access_count_weight`, `access_count_max_boost`, `rerank_weight`, `rerank_phrase_weight` | 数値 | ≥ 0 |
 | `min_score`, `vector_min_cos`, `relative_min_score_ratio`, `version_sim_threshold`, `b_session_match`, `b_session_mismatch` | 数値 | 0〜1 |
@@ -1178,7 +1199,7 @@ n3mcmcp-lite/
 | `TestParentDocRecall` | 架空都市「不知火」設定の一字一句復元、チャンク→親集約、`[doc×N]` 表示、親→チャンク削除カスケード | 親ドキュメント（§3.11） |
 | `TestEncodingSafetyE2E` | 孤立サロゲート混じりの content で `save_memory` が例外を投げない、全サロゲート入力は空内容エラー、孤立サロゲート混じりのクエリで `search_memory` が正常応答 | エンコーディング安全策 E2E（§3.13） |
 
-### Layer 4: `tests/test_regressions.py`（v1.7.0）
+### Layer 4: `tests/test_regressions.py`（v1.7.0〜v1.7.2）
 
 埋め込みは決定的なフェイク（モデル不要）。*Redis* と記したクラスは `N3MC_REDIS_TEST_URL` を要する。
 
@@ -1188,13 +1209,13 @@ n3mcmcp-lite/
 | `TestExactOnlyDedup` | 値だけ新しいほぼ同一の短い事実が保存される。数か所を変えて作り直した長文文書が保存される。完全一致の重複は引き続き拒否される（*Redis*） |
 | `TestTimeWindow` | クエリにより近い新しい行が `limit × 5` 件より多くあっても、`since` / `until` が範囲内の行を返す（*Redis*） |
 | `TestShaping` | `vector_min_cos` が低コサインのベクトル候補を落とす。相対カット。最新版が先頭に移り、その位置のスコアを引き継ぐ。`_version_group` の行は相対カットで残る。短い行（< `version_min_chars`）はグループ化されない |
-| `TestRender` | ローカル時刻の `saved=`、版についての一文、各通知が 1 回だけ出る。**v1.7.1**：最初の検索のあとで加わった通知は次の検索で出る |
+| `TestRender` | ローカル時刻の `saved=`、版についての一文、各通知が 1 回だけ出る。**v1.7.1**：最初の検索のあとで加わった通知は次の検索で出る。**v1.7.2**：弱い候補が普通の行のすべての後に `#### Possibly related (weak matches — may be unrelated)` の下に出る、普通の行が 0 件なら `_No memories found._` の後に弱い候補の見出しが出て版の一文は出ない、弱い候補がなければその見出しは出ない |
 | `TestConfig` | 読めない `config.json` が変更されない。型の誤った項目が無視され報告される。bool は数値として受け付けない |
 | `TestTestSafety` | `conftest` がライブの `redis_url` と同じテスト URL を拒否する。**v1.7.1**：ライブの `config.json` を BOM 付きでも読める。データがあって目印のない DB はフラッシュしない |
 | `TestFilterScore`（v1.7.1） | 現セッションの新しい記録が cos 0.86 で先頭にあるとき、cos 0.95〜0.99 の同じセッションの 3 日前の記録と別セッションの 1 日前の記録が、相対カットと `min_score` を生き残る。並び順は引き続き最終スコアによる |
 | `TestRedisTimeouts`（v1.7.1、*Redis*） | クライアントが `socket_timeout=5` で作られる。接続を受け付けて応答しないサーバーソケットで、`ensure_connected()` が約 5 秒以内にバックエンドエラーで戻る。つなぎ直しで古いクライアントが閉じられる |
 | `TestConfigCreate`（v1.7.1） | 複数のプロセスが同時に `config.json` を作成しても `owner_id` は 1 つになる（どのプロセスもファイルの ID を使う）。更新は一時ファイルと `os.replace` を通る。旧来の場所からの引き継ぎは排他的作成の規則（一時ファイル＋`os.link`）を使う |
-| `TestConfigRanges`（v1.7.1） | `ttl_seconds` の `604800.5` / `0`、`embedding_dim` の `768.0`、`chunk_overlap >= chunk_threshold`、`chunk_threshold` 10、`half_life_days` 0、`min_score` 1.5 が `config_type` 付きで無視される。区切りのない本文で `chunk_text(text, 100, 100)` が終わる |
+| `TestConfigRanges`（v1.7.1） | `ttl_seconds` の `604800.5` / `0`、`embedding_dim` の `768.0`、`chunk_overlap >= chunk_threshold`、`chunk_threshold` 10、`half_life_days` 0、`min_score` 1.5 が `config_type` 付きで無視される（**v1.7.2**：`min_results` の `-1` と `1.5` も同じ。`0` は受け付ける）。区切りのない本文で `chunk_text(text, 100, 100)` が終わる |
 | `TestLongSaveAtomic`（v1.7.1、*Redis*） | 長文の保存の途中で埋め込みが失敗しても `doc:` / `docsha:` のキーが残らず、そのあと同じ本文を保存できる。ガードは `SET NX` で取り、親とすべてのチャンクは 1 つのパイプラインで書かれる |
 | `TestIndexFailure`（v1.7.1） | `FT.CREATE` が `unknown command` で失敗しても `_main()` が終わらない。ツールは「Redis Stack が必要」の案内を返す。次の呼び出しで索引を再試行する。既存の索引の `DIM` が違えば `index_dim_mismatch` が加わる |
 | `TestEnforceEphemeral`（v1.7.1、*Redis*） | 空の DB や `mem:` / `doc:` / `docsha:` のキーだけの DB では `CONFIG SET` される。ほかのキーがある DB ではされず、`shared_redis` が加わる。拒否された `CONFIG` は接続を失敗させずに `config_refused` を加える |
@@ -1209,6 +1230,7 @@ n3mcmcp-lite/
 | `TestAccessCountNoGhost`（v1.7.1、*Redis*） | 検索と TTL 更新の間に失効したキーが `HINCRBY` で作り直されない |
 | `TestHangulFiller`（v1.7.1） | `U+3164`、`U+115F`、`U+1160`、`U+FFA0`、`U+2800` だけの本文は見える文字なしとして拒否される。見える文字と一緒なら verbatim に保存される |
 | `TestPluginHook`（追加分、v1.7.1） | `settings.json` を書く直前に読み直し、アトミックに置き換える。フォールバックの文面に "or the permission script failed" が入る |
+| `TestWeakMatches`（v1.7.2、*Redis*） | 下限を通った行が 1 件で `min_results: 3` なら、弱い候補が 2 件その後に足され、`filter_score` の順に並び、`_weak` の印が付く、`vector_min_cos` 未満の候補は実際の cos で足される、`min_results: 0` では何も足さない、十分な件数が通ったときは足さない、`limit` が `min_results` より小さければ合計はその上限まで、1 つの親ドキュメントの 2 つのチャンクのヒットは弱い候補 1 行になり、すでに結果にある親は足さない、`filter_score` が `1e-6` 未満の候補は足さない、**弱い候補の `mem:` / `doc:` / ガードのキーの TTL と `access_count` は変わらない**（普通の行は更新される）、空のクエリ、または空白だけのクエリでは弱い候補を足さない、既定の設定は `min_results: 3` |
 
 ### 実行例
 

@@ -487,6 +487,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "min_score":                0.2,
   "vector_min_cos":           0.85,
   "relative_min_score_ratio": 0.6,
+  "min_results":              3,
   "version_order_enabled":    true,
   "version_sim_threshold":    0.98,
   "version_min_chars":        100,
@@ -511,6 +512,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
 - `ttl_seconds` — TTL on every new memory and sha-guard (default 7 d).
 - `vector_min_cos` — how close (cosine) a record must be to the query to become a vector candidate (default `0.85`). Lower it (e.g. 0.80–0.83) to recall records even when the wording differs, at the cost of more loosely related rows; raise it (e.g. 0.88) for shorter results, at the cost of dropping related rows more easily. A sensible range is 0.80–0.88; 0.85 was measured with `multilingual-e5-base`, so re-measure it if you change `embedding_model`.
 - `relative_min_score_ratio` — drop results scoring below this ratio × the top score (default `0.6`; `0.0` disables).
+- `min_results` (since 1.10.1) — when fewer results than this pass the floors, `search_memory` adds the closest of the rows it dropped, up to this total, under a separate heading `#### Possibly related (weak matches — may be unrelated)` (default `3`; `0` turns it off). The connected LLM is told to use them only when they are actually relevant. Weak rows never get their 7-day TTL reset, so showing them does not keep them alive. This keeps a question from getting no memory at all, at the cost of up to 3 extra, mostly unrelated rows per search.
 - `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — when an updated version of a document or long entry is saved, both versions are kept; results whose content is ≥ 0.98 similar are treated as versions and listed newest first. Each hit shows its `saved=` time.
 - Settings take effect when the MCP server restarts (restart your MCP client). If `config.json` has a typo and cannot be read, it is left untouched and the server runs on defaults; the first `search_memory` result says so. Write numbers without quotes.
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (chars). Bodies longer than the threshold trigger the parent-document + chunks path for verbatim recall.

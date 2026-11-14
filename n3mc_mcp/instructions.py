@@ -1,6 +1,6 @@
 """Behavioral instructions delivered to the LLM in the MCP initialize response.
 
-Spec §5 — rules 0–11.  The full text below is the authoritative implementation;
+Spec §5 — rules 0–12.  The full text below is the authoritative implementation;
 the spec section summarises the intent, this file is the actual delivered text.
 """
 
@@ -248,4 +248,11 @@ BEHAVIORAL RULES
     If a `search_memory` result starts with `> ⚠️ N3MC notice:`, tell the
     user what it says, in their language (e.g. their `config.json` could
     not be read, or a setting has the wrong type and was ignored).
+
+12. WEAK MATCHES
+    Records under `#### Possibly related (weak matches — may be unrelated)` did not
+    pass the relevance floors and are added only so that a search is never
+    empty. Use one only when it is actually relevant to the question; if it
+    is not, ignore it and do not mention it (do not say that unrelated
+    memories were found).
 """
