@@ -143,7 +143,7 @@ The server refuses to start if Redis is unreachable, and the Claude Code plugin 
 
 ## Features
 
-- 💾 **Fully local** — Your conversations stay in your own Redis instance. Nothing sent to the cloud.
+- 💾 **Your own Redis** — Your memories are kept in the Redis you run (on your PC by default), not in any cloud service. Only the memories recalled for a turn are sent to the AI service, as part of the conversation ([details](#your-memory-stays-on-machines-you-control)).
 - 🔍 **Semantic search** — Finds relevant past conversations even when the exact words differ.
 - 🌐 **Multilingual out of the box** — CPU-only, no LLM/GPU required. NFKC fold (`ｱﾙﾌｧ`↔`アルファ`, `１２３`↔`123`, ligatures), bigram coverage for Japanese / Chinese / Korean / Thai / Lao / Myanmar / Khmer, diacritic cross-match for Latin scripts (`café`↔`cafe`).
 - 🛡️ **Encoding safety** — stdio UTF-8 reconfigure on Windows (cp932 → UTF-8), lone-surrogate sanitization on every input. Same defenses as the Free build.
@@ -195,6 +195,25 @@ than competing with it**.
 - **Conversation context and history** (discussion threads, past decisions) → N3MemoryCore accumulates automatically (7-day window; pair with a persistent memory backend if you need longer retention)
 
 ---
+
+## Your Memory Stays on Machines You Control
+
+An AI that remembers you is convenient, but it is natural to ask where those memories are kept. N3MC Lite keeps them in the Redis Stack you run: by default the one on your own PC, or a Redis server you choose.
+
+- **Your Redis, not an N3MC cloud** — Memories are stored in the Redis set by `redis_url` (default `redis://localhost:6379/0`; the `N3MC_REDIS_URL` environment variable takes precedence — see [Configuration](#configuration)). There is no N3MC account and no N3MC cloud service. Each entry expires 7 days after it was saved (`ttl_seconds`).
+- **Almost nothing on disk** — Besides Redis, N3MC writes only a small `config.json` (see [Data location](#data-location)). When the Redis holds nothing but N3MC data, the server turns off Redis's own saving to disk (RDB/AOF) at startup, so `docker restart redis-stack` wipes every memory. In a Redis that also holds other data, it leaves those settings alone and shows a `shared_redis` notice.
+- **Embeddings are made on your PC** — The embedding model (`intfloat/multilingual-e5-base`) runs locally on the CPU, and the search runs inside your Redis. Searching calls no external API.
+- **N3MC opens no port** — The MCP server talks to your AI client over stdio (standard input/output) and does not listen on any network port. The only connection it makes itself is to the Redis at `redis_url`. N3MC adds no password of its own: who can reach Redis (port 6379 in the `docker run` command above) depends on your Redis and firewall settings.
+- **No telemetry** — N3MC sends no usage data anywhere. The code is open, so you can check this yourself.
+- **You can see and remove everything** — `list_memories` shows the newest entries; `delete_memory` and `delete_memories_by_session` remove them (see [Tools exposed](#tools-exposed)).
+
+What does go over the network:
+
+- **Installing** — `pip` and `uvx` download the package and its dependencies from PyPI; the Claude Code marketplace path fetches the plugin from the `NeuralNexusNote/n3mcmcp-lite` GitHub repository.
+- **The Redis Stack image** — The first `docker run` downloads `redis/redis-stack-server` from Docker Hub.
+- **The embedding model download** — On the first start, `intfloat/multilingual-e5-base` (~440 MB) is downloaded from Hugging Face.
+- **A Redis on another machine** — If you point `redis_url` / `N3MC_REDIS_URL` at another machine (for example a team server), every memory you save and every search goes over the network to that machine.
+- **What the AI reads** — The results of `search_memory` become part of the conversation, so they are sent, together with your message, to the AI service behind your MCP client (Anthropic, for Claude Code). N3MC does not upload your Redis contents anywhere, but the parts the AI uses in a turn are part of that conversation.
 
 ## Use cases — when working memory is the right tool
 
