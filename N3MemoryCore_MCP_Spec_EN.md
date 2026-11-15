@@ -103,7 +103,7 @@ Re-running the `docker run` command after the container exists fails with `Confl
 #### Method A: Generate from the spec (primary, recommended)
 
 1. **Start Redis Stack** (above).
-2. **Hand the spec to an AI and ask it to implement**: give `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`) to Claude and ask "implement n3mcmcp-lite per this spec." The AI generates the package layout, RediSearch index, MCP tool registration, and stdio launch. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
+2. **Hand the spec to an AI and ask it to implement**: open the AI in an **empty folder** (for example `~/n3mcmcp-lite`) with only this spec in it — the AI first checks the folder, Python and Redis ([§1](#1-vision), "Setup checks") and stops with instructions if something is missing. Then give `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`) to Claude and ask "implement n3mcmcp-lite per this spec." The AI generates the package layout, RediSearch index, MCP tool registration, and stdio launch. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
 3. **Install the result**: run `pip install -e .` in the project root, then register the server in your MCP client's config ([§8](#8-mcp-client-configuration)).
 4. **Restart the client.** The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
 
@@ -141,7 +141,34 @@ Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector +
 
 The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; the forthcoming **Pro build (coming soon)** will swap the storage layer from Redis to SQLite + sqlite-vec while preserving the MCP surface.
 
-> **⚠️ Python check**: Before installing, run `python --version` to verify Python 3.10+ is available.
+> **⚠️ Setup checks (Method A — do these first, in this order, before writing any file)**: checks 1–3 stop the setup when they fail; check 4 fixes the problem itself. These checks exist because a setup on a second PC (2026-11-16) started in a folder that already held a copy of an earlier setup from another PC, with Docker stopped, only Python 3.15 installed and `.mcp.json` pointing at the other PC's Python; the implementing session could neither build nor start the server. Stop at the first of checks 1–3 that fails and show the user what to do.
+
+> **1. Install folder check**: Method A writes the code into the folder the AI is open in (the current working directory): `pyproject.toml`, `README.md`, `tests/`, `n3mc_mcp/` and the other files of §2. That folder stays in use after setup: with `pip install -e .` the MCP client runs the code from it, so deleting or moving it later stops the server.
+> 1. Show the user the absolute path of the current working directory and this message: "N3MC Lite will be installed in this folder: <absolute path>. The code will stay here; deleting or moving this folder later stops the memory server. Continue? (yes/no)". **Wait for the user's answer.** Continue only on a clear yes.
+> 2. Before asking, look at the folder. If it contains anything other than this specification file (`N3MemoryCore_MCP_Spec_EN.md` / `_JP.md`), `.claude/`, `.git/` and the files of an earlier setup of this product (`n3mc_mcp/`, `tests/`, `.mcp.json`, `pyproject.toml` whose `name` is `n3memorycore-mcp-lite`), **do not ask: abort** and display: "This folder already contains other files (for example a project of yours). Setting up here could overwrite them. Create an empty folder such as `~/n3mcmcp-lite`, open the AI there, and run this setup again." Never overwrite or mix into an existing project.
+> 3. If the folder holds an earlier setup, say so in the message (with the version in its `pyproject.toml`) and ask whether to regenerate the code from this specification or keep it. An earlier setup may have been copied from another PC: any absolute path in `.mcp.json` or `.claude/settings*.json` that does not exist on this PC must be replaced with this PC's path when the server is registered (§8); never keep a path that does not exist.
+> 4. Do not install into the home folder itself (`~`) or a system folder.
+
+> **2. Python check**: run `python --version` or `python3 --version` to verify Python 3.10+ is available. Python **3.12** is the tested version (see the header). If not found, display: "Python 3.10 or higher is required. Install Python 3.12 from https://www.python.org/" and **abort setup**.
+>
+> **Windows note**: On Windows, `python` / `python3` may exist only as Microsoft Store shortcuts (App Execution Aliases under `%LOCALAPPDATA%\Microsoft\WindowsApps`). They open the Store or print a "Python was not found" message instead of a version. Treat this as "Python not found". Also try `py -0p` (the python.org launcher lists every installed version) before concluding. When aborting on Windows, add these steps to the message:
+> 1. Install Python 3.12 from https://www.python.org/ and check "Add python.exe to PATH" in the installer, or run `winget install Python.Python.3.12`.
+> 2. If `python` still opens the Microsoft Store, turn off the `python.exe` and `python3.exe` entries in Settings → Apps → Advanced app settings → App execution aliases.
+> 3. **Restart required.** The AI client (Claude Code, Claude Desktop) keeps the `PATH` it started with, so it cannot see a Python installed afterwards. Closing the window is not enough: the app can keep running in the background (for example in the system tray). Sign out of Windows once and sign in again: Start menu → your account icon (bottom left) → **Sign out**. Restarting the PC also works.
+> 4. After signing in, open a new terminal and confirm that `python --version` prints 3.10 or later.
+> 5. Start the AI client, open the same folder, and ask it to run this setup again.
+>
+> Write this message for a beginner: one action per step, plain words, and say clearly that the sign-out (or restart) is required.
+>
+> **Newer Python than tested**: when only a Python newer than 3.12 is installed, some dependencies may not yet publish ready-built packages for it, and `pip install -e .` then tries to compile them from source and fails (for example with a message asking for Microsoft C++ Build Tools). If that happens, do not install build tools: tell the user to install Python 3.12 as above, then create the environment with that version (`py -3.12 -m venv .venv` on Windows) and install into it.
+>
+> Do not install Python yourself; installing Python is left to the user.
+
+> **3. Redis check**: run `docker ps`. If Docker cannot be reached (Docker Desktop is not running), ask the user to start Docker Desktop and wait until it is running. Then check `docker ps -a --filter name=redis-stack`: if the container does not exist **on this PC**, create it with the `docker run` line in [Quick Start](#quick-start) (a container made on another PC does not exist here); if it exists but is stopped, run `docker start redis-stack`. Continue only when `redis-stack` is running. If the user set `N3MC_REDIS_URL` to another Redis, check that it answers instead and skip Docker.
+>
+> **4. Windows: Visual C++ runtime (install automatically, do not ask)**: `sentence-transformers` uses PyTorch, which on Windows needs the Microsoft Visual C++ Redistributable (x64). Without it, importing `torch` fails (for example `OSError: [WinError 126]` or `[WinError 1114]` naming `c10.dll`). Before `pip install -e .`, check `reg query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" /v Installed`. If the key is missing or not `0x1`, install it without asking: `winget install --id Microsoft.VCRedist.2015+.x64 --silent --accept-package-agreements --accept-source-agreements`. Windows shows its administrator prompt (UAC); tell the user in one line to approve it. Do the same if `import torch` later fails with one of the errors above. If `winget` is not available, show the user the official installer https://aka.ms/vs/17/release/vc_redist.x64.exe and wait. This is a runtime, not a compiler: it does not replace Python 3.12 when a dependency fails to build (check 2).
+>
+> Git is not required. If the code was received as a copy instead of a `git clone`, continue without git.
 
 > **⚠️ First-run download**: `sentence-transformers` downloads the `multilingual-e5-base` model (~440 MB) on first tool use. The server will appear unresponsive during this time — this is expected. Subsequent starts complete in seconds once cached.
 
