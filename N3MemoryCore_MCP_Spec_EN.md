@@ -1359,7 +1359,7 @@ All three extensions are additive — none of them require changes to the Redis 
 | 1. Implementation | Paste the prompt to kick off the build | **Sonnet** (fast) |
 | 2. Debugging | Paste three prompts **in order** to verify | **Sonnet** |
 | 3. Evidence Report | **Restart Claude Code first**, then paste the prompt to run §10 | **Sonnet** or **Opus** |
-| 4. Quality review | Paste the review prompt | **Opus** (deep reasoning) |
+| 4. Quality review | **Start a new session**, then paste the review prompt | **Opus** (deep reasoning) |
 
 > **⚠️ A full Claude Code restart is required before Phase 3**
 >
@@ -1466,6 +1466,11 @@ Once the Evidence Report is green, proceed to Phase 4 (quality review).
 ---
 
 ### Phase 4: Quality review (Opus)
+
+> **⚠️ Review in a new session**: Do not review in the session that implemented and debugged the code. Exit Claude Code, start it again in the same folder, and begin a new session with the model set to **Opus**.
+> - The implementing session's context holds its own decisions and explanations, so a review there tends to confirm them instead of checking the code against this specification afresh.
+> - A restarted Claude Code also starts the MCP server again from the current code, so the review sees the server as a user will.
+> - In the new session, memory searches may return notes saved during the implementation; that is expected. Base the review on the code, this specification and the results of commands actually run.
 
 Switch the model to **Opus** and paste:
 
