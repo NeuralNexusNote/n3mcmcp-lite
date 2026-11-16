@@ -443,6 +443,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             raw_imp = arguments.get("importance", 1.0)
             try:
                 importance_val = float(raw_imp)
+                if importance_val != importance_val:   # NaN passes the clamp as 2.0
+                    raise ValueError(raw_imp)
             except (ValueError, TypeError):
                 return [TextContent(
                     type="text",
@@ -467,7 +469,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         elif name == "list_memories":
             limit_raw = arguments.get("limit", 20)
-            memories  = _db.list_memories(int(limit_raw) if limit_raw else 20)
+            # §4.3: a limit below 1 is 1 (a negative slice cut rows from the end).
+            memories  = _db.list_memories(max(1, int(limit_raw)) if limit_raw else 20)
             if not memories:
                 text = "_No memories stored._"
             else:

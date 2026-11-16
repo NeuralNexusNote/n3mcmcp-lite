@@ -1693,6 +1693,41 @@ class TestNudgeOnErrors:
         self._ok(_call("no_such_tool", {}), "Error: unknown tool")
 
 
+# ── review 2026-11-16: tail of a long body, NaN importance, negative limit ──
+
+@requires_redis
+class TestReview20261116:
+    def test_tail_of_long_body_is_searchable(self, db, redis_client, fake_embed):
+        """§3.11: the last characters of a long body are in a chunk, so BM25
+        finds the document by them (they used to be in no chunk)."""
+        body = "word " * 78 + "\n" + "PIN: 4471-ZX."
+        res = db.save_memory(body)
+        assert res["status"] == "saved"
+        hits = db._bm25_search("4471", db.cfg["owner_id"], 20)
+        assert len(hits) == 1
+        chunk = redis_client.hget(next(iter(hits)), "content").decode()
+        assert chunk.endswith("PIN: 4471-ZX.")
+        # the parent is still the verbatim body
+        assert redis_client.hget(f"doc:{res['parent_id']}", "content").decode() == body
+
+    def test_nan_importance_is_rejected(self, db, redis_client, monkeypatch):
+        import n3mc_mcp.server as S
+        monkeypatch.setattr(S, "_db", db)
+        for bad in ("nan", "NaN", float("nan")):
+            text = _call("save_memory", {"content": "nan importance probe", "importance": bad})
+            assert text.startswith('{"saved": false, "status": "error"'), text
+            assert "importance must be numeric" in text
+        assert _data_keys(redis_client) == []
+
+    def test_negative_list_limit_is_one(self, db, fake_embed, monkeypatch):
+        import n3mc_mcp.server as S
+        monkeypatch.setattr(S, "_db", db)
+        for i in range(3):
+            db.save_memory(f"list limit record number {i}")
+        text = _call("list_memories", {"limit": -5})
+        assert text.count("list limit record number") == 1
+
+
 # ── LL5 Hangul fillers / braille blank ───────────────────────────────────────
 
 BLANK_LETTERS = ["ㅤ", "ᅟ", "ᅠ", "ﾠ", "⠀"]

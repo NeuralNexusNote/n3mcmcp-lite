@@ -485,7 +485,7 @@ def purify(text: str) -> str:
 
 # ── chunking ─────────────────────────────────────────────────────────────────
 
-_MIN_CHUNK_CHARS = 20  # tail chunks smaller than this are dropped (parent stores verbatim)
+_MIN_CHUNK_CHARS = 20  # a tail shorter than this is appended to the previous chunk (§3.11)
 
 # Ordered by priority: prefer splitting at the earliest (highest-priority)
 # natural boundary found within the lookback window. Language-agnostic:
@@ -513,21 +513,28 @@ def chunk_text(text: str, threshold: int, overlap: int) -> list[str]:
     character(s) — no artificial overlap is added because the break is already
     a clean semantic boundary.
 
-    Tail chunks shorter than _MIN_CHUNK_CHARS are discarded: the parent document
-    stores the full body verbatim, so a tiny tail chunk adds near-zero search
-    value while producing a low-quality embedding.
+    A tail shorter than _MIN_CHUNK_CHARS is not made a chunk of its own (a
+    tiny chunk gives a low-quality embedding): it is appended to the previous
+    chunk, so every character of the body is in at least one chunk and the end
+    of a long body stays searchable (spec §3.11). That chunk may then be up to
+    _MIN_CHUNK_CHARS - 1 characters longer than *threshold*.
     """
     if len(text) <= threshold:
         return [text]
     chunks: list[str] = []
     start = 0
+    prev_end = 0   # index just past the last character already in a chunk
     while start < len(text):
         end = min(start + threshold, len(text))
         if end == len(text):
-            # Last (tail) chunk: only add if large enough or it's the only chunk.
+            # Last (tail) chunk: its own chunk if large enough (or the only
+            # one); otherwise the part not yet in a chunk is appended to the
+            # previous chunk — never dropped (spec §3.11).
             chunk = text[start:end]
             if len(chunk) >= _MIN_CHUNK_CHARS or not chunks:
                 chunks.append(chunk)
+            else:
+                chunks[-1] += text[prev_end:end]
             break
         # Search for the best natural break within the lookback window.
         lookback_start = max(start + 1, end - overlap)
@@ -540,10 +547,12 @@ def chunk_text(text: str, threshold: int, overlap: int) -> list[str]:
         if cut != -1:
             # Soft cut: clean semantic boundary — start fresh after it.
             chunks.append(text[start:cut])
+            prev_end = cut
             start = max(start + 1, cut)
         else:
             # Hard cut: no break found — overlap next window for context.
             chunks.append(text[start:end])
+            prev_end = end
             # v1.7.1 (LM2): always advance, even if overlap >= threshold.
             start = max(start + 1, end - overlap)
     return chunks
