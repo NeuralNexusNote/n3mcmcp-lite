@@ -104,7 +104,7 @@ Re-running the `docker run` command after the container exists fails with `Confl
 
 1. **Start Redis Stack** (above).
 2. **Hand the spec to an AI and ask it to implement**: open the AI in an **empty folder** (for example `~/n3mcmcp-lite`) with only this spec in it — the AI first checks the folder, Python and Redis ([§1](#1-vision), "Setup checks") and stops with instructions if something is missing. Then give `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`) to Claude and ask "implement n3mcmcp-lite per this spec." The AI generates the package layout, RediSearch index, MCP tool registration, and stdio launch. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
-3. **Install the result**: run `pip install -e .` in the project root, then register the server in your MCP client's config ([§8](#8-mcp-client-configuration)).
+3. **Install and register (done by the AI)**: the AI runs `pip install -e .` in the project root, registers the server in Claude Code (and Claude Desktop, if present) with this PC's absolute path, and checks that it starts ([§8 "Automatic registration after code generation"](#automatic-registration-after-code-generation-method-a--required)). You do not edit any config file.
 4. **Restart the client.** The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
 
 #### Method B: Install the package (bonus)
@@ -1106,6 +1106,20 @@ The plugin ships a `plugin.json` that launches the server via `uvx --from n3memo
 
 Restart the client after editing the config. Ensure Redis Stack is running *before* the client starts the server — otherwise the first tool call returns the "start Redis Stack" hint.
 
+### Automatic registration after code generation (Method A — required)
+
+**Method A ends with the server registered and verified by the AI. The user's only remaining step is a full restart.** Do not ask the user to edit any config file, and do not finish Phase 1 with a working package that no client is connected to. Do this right after `pip install -e .` succeeds:
+
+1. **Find the entry point on this PC.** Take the scripts folder of the Python that ran `pip install -e .` (`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`, or the venv's `Scripts\` / `bin/`) and check that `n3mc-workingmemory.exe` (Windows) or `n3mc-workingmemory` exists there. Use that **absolute path**, not the bare command name: Claude Code may start the server with a `PATH` that does not contain the scripts folder.
+2. **Remove stale registrations.** Run `claude mcp remove n3mc-workingmemory -s user` (a "not found" error is fine). In the install folder, if `.mcp.json` has an `n3mc-workingmemory` entry whose command does not exist on this PC (for example a path from another PC), remove that entry and keep the other servers.
+3. **Register for Claude Code (user scope)**: `claude mcp add -s user n3mc-workingmemory -- "<absolute path>"`. User scope makes the working memory available in every folder. If the `claude` command is not on `PATH`, add the same server to the top-level `mcpServers` object of `~/.claude.json` instead — `{"type": "stdio", "command": "<absolute path>", "args": []}` — after copying the file to a backup, keeping every other key, and writing it atomically (temporary file in the same folder, then replace).
+4. **Pre-approve the tools**: add `mcp__n3mc-workingmemory__*` to `permissions.allow` in `~/.claude/settings.json` (same merge rules as [Auto-approve tool calls](#auto-approve-tool-calls-claude-code-only): back up, re-read before writing, keep existing rules, write atomically).
+5. **Claude Desktop**: if `%APPDATA%\Claude\claude_desktop_config.json` (Windows) exists, add the same server there too, with the same backup and merge rules.
+6. **Verify before telling the user to restart.** Start the registered command once yourself, send an MCP `initialize` request followed by `tools/list` over stdio, check that the seven tools of §4.3 are listed, then stop the process. The first `initialize` can take about 17 s while the model loads (§3.9). If `claude` is available, `claude mcp get n3mc-workingmemory` must show the absolute path from step 1. If any check fails, fix it and repeat; do not hand over a registration that does not start.
+7. **Finish with one message**: "Setup is complete. Fully exit Claude Code (and Claude Desktop) and open it again — the memory server connects on the next start." Add the Windows full-exit steps from Appendix B ("Fully restart Claude Code between Phase 1 and Phase 2").
+
+> **⚠️ Why (2026-11-16)**: a code-generation setup on a second PC ended with a package installed but no working registration: the folder's `.mcp.json` pointed at `C:\Users\<other PC user>\…\Python312\Scripts\n3mc-workingmemory.exe`, which did not exist there. Up to this version, Method A said only "register the server (§8)", and §8 showed the bare command name, which depends on `PATH`. Code generation is the primary install path for Lite, so it must end in a connected server without manual configuration.
+
 ### Auto-approve tool calls (Claude Code only)
 
 By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3mc-workingmemory` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
@@ -1411,6 +1425,9 @@ Please build n3mcmcp-lite from this spec (N3MemoryCore_MCP_Spec_EN.md).
 Redis Stack is already running in Docker. Run it as an MCP stdio server
 and register the seven tools (save_memory / search_memory / list_memories
 / delete_memory / delete_memories_by_session / repair_memory / recall_thread).
+When it is installed, register the server in Claude Code yourself and check
+that it starts (§8 "Automatic registration after code generation"), so that
+I only need to restart.
 ```
 
 Sonnet handles package scaffolding, RediSearch index creation, MCP tool registration, and stdio launch automatically. When it finishes, move on to phase 2 ("it runs" ≠ "it matches the spec" — do not stop here).
