@@ -25,6 +25,22 @@
 > 🇯🇵 **[日本語版はこちら](./README_JP.md)**
 > 🛡️ **[Development Philosophy](./PHILOSOPHY.md)**
 
+## Lite or Free? Which one to use
+
+There are two free N3MemoryCore builds. **Lite (this repository) assumes you can start Docker and edit MCP client settings. If you only use Claude Code and this is your first time, [N3MC Free](https://github.com/NeuralNexusNote/n3mc-free) is easier.**
+
+| | **N3MC MCP Lite** (this repository) | **[N3MC Free](https://github.com/NeuralNexusNote/n3mc-free)** |
+|---|---|---|
+| Works with | MCP clients: Claude Code, Claude Desktop, Cursor, Windsurf, … | Claude Code only |
+| What gets saved | What the AI decides to save (`save_memory`) | Every message, automatically (hooks) |
+| How long it is kept | 7 days, then deleted automatically | Until you delete it |
+| What you need | Python 3.10+, Docker (Redis Stack), and the MCP client settings | Python 3.10+ |
+| Setup | Start Redis Stack, install, then register the server in your MCP client | `pip install n3memorycore-free`, then `n3mc --init` |
+| Good for | Users who know MCP and Docker; short-lived working memory for a project | Beginners; long-term memory for Claude Code |
+
+- **Choose Lite** if you use an MCP client other than Claude Code, or you want memory that forgets by itself after a short project.
+- **Choose Free** if you use Claude Code and want it to remember your conversations without Docker or MCP settings.
+
 ---
 
 ## 🚀 Quickstart — connect to Claude Code in 3 steps
