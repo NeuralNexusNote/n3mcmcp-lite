@@ -511,12 +511,15 @@ import types as _types
 
 @pytest.fixture
 def failing_model(monkeypatch):
-    """sentence_transformers.SentenceTransformer that always fails; counts calls."""
+    """sentence_transformers.SentenceTransformer that always fails; counts the
+    online (download) attempts — the cache-only attempt before each is not
+    counted (§3.9 step 4)."""
     calls = {"n": 0}
 
     class Boom:
         def __init__(self, *a, **k):
-            calls["n"] += 1
+            if not k.get("local_files_only"):
+                calls["n"] += 1
             raise OSError("We couldn't connect to 'https://huggingface.co' (offline)")
 
     fake = _types.ModuleType("sentence_transformers")
@@ -546,6 +549,34 @@ class TestModelUnavailable:
         msg = P.model_unavailable_message()
         assert "keyword-only" in msg and "huggingface" in msg.lower()
         assert P._model_name in msg
+
+    def _fake_st(self, monkeypatch, cached: bool):
+        """SentenceTransformer whose cache-only build works only if *cached*."""
+        seen: list[bool] = []
+
+        class Fake:
+            def __init__(self, name, **k):
+                seen.append(bool(k.get("local_files_only")))
+                if k.get("local_files_only") and not cached:
+                    raise OSError("not in the local cache")
+
+        fake = _types.ModuleType("sentence_transformers")
+        fake.SentenceTransformer = Fake
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+        monkeypatch.setattr(P, "_model", None)
+        monkeypatch.setattr(P, "_model_error", None)
+        monkeypatch.setattr(P, "_model_failed_at", 0.0)
+        return seen
+
+    def test_cached_model_is_built_without_the_hub(self, monkeypatch):
+        seen = self._fake_st(monkeypatch, cached=True)
+        assert P.get_model() is not None
+        assert seen == [True]                                # cache only, no online call
+
+    def test_uncached_model_falls_back_to_download(self, monkeypatch):
+        seen = self._fake_st(monkeypatch, cached=False)
+        assert P.get_model() is not None
+        assert seen == [True, False]                         # cache first, then online
 
     def test_search_output_carries_notice_every_time(self, monkeypatch):
         import asyncio

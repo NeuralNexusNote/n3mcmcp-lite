@@ -9,7 +9,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The embedding model is built from the local Hugging Face cache first**
+  (§3.9 step 4, JP/EN spec): `local_files_only=True` with the Hub marked
+  offline, falling back to the normal (downloading) construction only when
+  that fails. Found by the §10-1 Evidence Report: the first `search_memory`
+  after `initialize` waited for a construction that asked the Hub about
+  every cached file, and took 5.7–5.9 s against the 3.0 s target; it now
+  takes 1.8–2.0 s (Windows 11, 2026-11-16). No network call at start when
+  the model is cached.
 
 ## [1.10.2] — 2026-11-16
 

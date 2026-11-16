@@ -249,8 +249,7 @@ def get_model(wait=_DEFAULT_WAIT):
                 return None
             try:
                 with _silenced_stdout():
-                    from sentence_transformers import SentenceTransformer
-                    _model = SentenceTransformer(_model_name)
+                    _model = _build_model()
                 _model_error = None
             except Exception as e:
                 _model_error = f"{type(e).__name__}: {e}"
@@ -263,6 +262,36 @@ def get_model(wait=_DEFAULT_WAIT):
     finally:
         _model_lock.release()
     return _model
+
+
+def _build_model():
+    """Spec §3.9 step 4: build the model, from the local Hugging Face cache
+    first. With the files already cached, the online path still asks the Hub
+    whether each file changed, which took 5.5 s against 2.2 s cache-only
+    (Windows 11, 2026-11-16) — the wait of the first tool call. Only when the
+    cache-only build fails (first start, partial cache) is the model built
+    online, which downloads it.
+
+    During the cache-only attempt the Hub is also marked offline: even with
+    local_files_only, transformers 5.x asks the Hub for the model's info while
+    loading the tokenizer (~0.2 s or more, and a network call at every start).
+    """
+    from sentence_transformers import SentenceTransformer
+    try:
+        import huggingface_hub.constants as hub_constants
+    except Exception:
+        hub_constants = None
+    was_offline = getattr(hub_constants, "HF_HUB_OFFLINE", None)
+    try:
+        if hub_constants is not None:
+            hub_constants.HF_HUB_OFFLINE = True
+        return SentenceTransformer(_model_name, local_files_only=True)
+    except Exception:
+        pass
+    finally:
+        if hub_constants is not None:
+            hub_constants.HF_HUB_OFFLINE = was_offline
+    return SentenceTransformer(_model_name)
 
 
 def model_status() -> tuple[bool, Optional[str]]:
