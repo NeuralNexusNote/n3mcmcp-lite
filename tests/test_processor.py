@@ -183,6 +183,41 @@ class TestChunkText:
         chunks = chunk_text(text, threshold=400, overlap=100)
         assert len(chunks) == 1
 
+    def test_short_tail_is_appended_not_dropped(self):
+        # §3.11: a tail under 20 chars after a soft break joins the previous
+        # chunk (it used to be dropped, so the end of the body was in no chunk).
+        tail = "PIN: 4471-ZX."
+        text = "word " * 78 + "\n" + tail          # 391 + 13 = 404 chars
+        chunks = chunk_text(text, threshold=400, overlap=100)
+        assert len(chunks) == 1
+        assert chunks[0] == text
+        assert len(chunks[0]) < 400 + 20
+
+    def test_short_tail_after_hard_cut_is_not_duplicated(self):
+        text = "a" * 400 + "b" * 5                # no soft break, overlap 10
+        chunks = chunk_text(text, threshold=400, overlap=10)
+        assert chunks == [text]
+
+    @pytest.mark.parametrize("overlap", [0, 10, 100])
+    def test_every_character_is_in_a_chunk(self, overlap):
+        # Numbered parts, so every chunk occurs exactly once in its body.
+        bodies = [
+            "".join(f"第{i}節は一般的な説明です。" for i in range(40)) + "\n合言葉は青い鯨。",
+            "".join(f"Sentence number {i} is here. " for i in range(30)) + "\nEnd: ok.",
+            "".join(f"{i:05d}" for i in range(203)) + "xyz",          # no soft break
+            "".join(f"line {i} of text\n" for i in range(70)) + "z",
+        ]
+        for body in bodies:
+            chunks = chunk_text(body, threshold=400, overlap=overlap)
+            pos = 0
+            for c in chunks:
+                assert body.count(c) == 1
+                at = body.find(c)
+                assert at <= pos, "gap before this chunk"
+                pos = max(pos, at + len(c))
+            assert pos == len(body)
+            assert all(len(c) < 400 + 20 for c in chunks)
+
 
 # ── TestCjkBigramExpand ──────────────────────────────────────────────────────
 

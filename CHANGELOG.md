@@ -19,6 +19,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   takes 1.8–2.0 s (Windows 11, 2026-11-16). No network call at start when
   the model is cached.
 
+### Fixed
+- **The end of a long body is searchable** (§3.11, JP/EN spec): when the
+  last window of a chunked body was shorter than 20 characters, the code
+  dropped it, so after a soft break the last few characters (for example
+  `PIN: 4471-ZX.` on its own last line) were in no chunk and neither BM25
+  nor the vector search could find the document by them. The tail is now
+  appended to the previous chunk (which may be up to 19 characters longer
+  than `chunk_threshold`); every character of the body is in a chunk. The
+  parent document always held the full body. Documents saved before this
+  change keep their chunks until they expire.
+- **`save_memory` rejects a `NaN` importance** (§4.3): `"nan"` passed the
+  0.5–2.0 clamp and was stored as `2.0`, the highest importance. It now
+  returns the same error as a non-numeric value and nothing is saved.
+- **`list_memories` treats a `limit` below 1 as 1** (§4.3): a negative value
+  cut rows from the end of the list instead.
+
 ## [1.10.2] — 2026-11-16
 
 Spec v1.7.2 → v1.7.3 (JP/EN): writes to an existing record are checked and
