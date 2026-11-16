@@ -529,7 +529,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
-  "access_count_enabled":     true,
+  "access_count_enabled":     false,
   "access_count_weight":      0.02,
   "access_count_max_boost":   0.5,
   "ttl_refresh_on_search":    true,
@@ -551,7 +551,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
 - `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — when an updated version of a document or long entry is saved, both versions are kept; results whose content is ≥ 0.98 similar are treated as versions and listed newest first. Each hit shows its `saved=` time.
 - Settings take effect when the MCP server restarts (restart your MCP client). If `config.json` has a typo and cannot be read, it is left untouched and the server runs on defaults; the first `search_memory` result says so. Write numbers without quotes.
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (chars). Bodies longer than the threshold trigger the parent-document + chunks path for verbatim recall.
-- `access_count_*` — access-frequency auto-importance; top-K search hits receive a capped boost on future queries.
+- `access_count_*` — access-frequency auto-importance; top-K search hits receive a capped boost on future queries. **Off by default since 2026-11-17** (`access_count_enabled: false`); the hits are still counted.
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
 - `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (CPU-only).
 - `b_session_match` / `b_session_mismatch` — multiplicative ranking boost for rows whose stored `session_id` matches (default `1.0`) vs. rows from other projects (`0.6`). Pass the same `session_id` to `save_memory` and `search_memory` to surface a project's memories above unrelated cross-project rows in the same Redis instance. Set both to `1.0` to disable the bias.
@@ -620,11 +620,14 @@ is meaningful in the Lite build: a fresh memory scores 1.0, a 3-day-old
 one exactly 0.5, and a 7-day-old (near-expiry) entry ≈ 0.20 — pushing
 recent context ahead in the ranking.
 
-**Auto-importance (access-frequency boost)**: each time `search_memory`
+**Auto-importance (access-frequency boost, off by default since
+2026-11-17)**: when `access_count_enabled` is `true`, each time `search_memory`
 returns a memory in its top 5 hits, that memory's `access_count` is
 incremented by 1 and `b_local` rises by 0.02 on future queries (capped at
 +0.5). No LLM judgement required — frequently-useful memories naturally
-float to the top through CPU-only self-tuning.
+float to the top through CPU-only self-tuning. It is off by default because,
+measured in N3MC-Pro, it lowered recall@3 (often-returned memories rose above
+more relevant ones).
 
 ## Development
 

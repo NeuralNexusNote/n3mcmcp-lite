@@ -78,6 +78,13 @@ class TestQueryCleaning:
         assert P.drop_lone_cjk_tokens("記憶 憶装 装置 は") == "記憶 憶装 装置"
         assert P.drop_lone_cjk_tokens("は") == "は"
 
+    def test_hiragana_only_tokens_dropped_only_with_others(self):
+        # 2026-11-17: hiragana-only pairs appear in most Japanese records
+        assert P.drop_lone_cjk_tokens(P.prepare_query("記憶ですか")) == "記憶 憶で"
+        assert P.drop_lone_cjk_tokens(P.prepare_query("ですか")) == "です すか"
+        assert P.drop_lone_cjk_tokens(P.prepare_query("来週の株価はどうなる")) ==             "来週 週の の株 株価 価は"
+        assert P.drop_lone_cjk_tokens(P.prepare_query("ラーメン")) == "ラー ーメ メン"
+
     def test_ngram_uses_same_cleaning(self):
         assert P.content_ngram("「記憶装置」") == P.prepare_query("「記憶装置」")
 
