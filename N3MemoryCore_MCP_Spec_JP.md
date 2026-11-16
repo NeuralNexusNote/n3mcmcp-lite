@@ -102,7 +102,7 @@ docker start redis-stack
 
 1. **Redis Stack を起動**（上記）。
 2. **本仕様書を AI に読み込ませて実装を依頼**：この指示書だけを入れた**空のフォルダ**(たとえば `~/n3mcmcp-lite`)で AI を開きます。AI は最初にフォルダ・Python・Redis を確かめ([§1](#1-ビジョン) の「セットアップ前の確認」)、足りないものがあれば手順を示して止まります。そのうえで `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）を Claude 等に渡し、「この指示書に従って n3mcmcp-lite を実装してください」と依頼します。AI がパッケージ構成・RediSearch インデックス作成・MCP ツール登録・stdio 起動まで生成します。段階的な **実装 → デバッグ → 自律評価 → 品質レビュー** の 4 フェーズ・ワークフローは [付録 B](#付録-b推奨-ai-支援ワークフロー) を参照。
-3. **生成物を導入**：プロジェクトルートで `pip install -e .` した後、MCP クライアント設定にサーバーを登録（[§8](#8-mcp-クライアント設定)）。
+3. **導入と登録(AI が行う)**：AI がプロジェクトルートで `pip install -e .` を実行し、この PC の絶対パスで Claude Code(あれば Claude Desktop にも)にサーバーを登録して、起動することを確かめます([§8「コード生成の後の自動登録」](#コード生成の後の自動登録方法-a--必須))。設定ファイルを自分で編集する必要はありません。
 4. **クライアントを再起動**。初回ツール呼び出しは ~400 MB の埋め込みモデルのダウンロードとロードで 30–60 秒かかります。
 
 #### 方法 B：パッケージ導入（おまけ）
@@ -1096,6 +1096,20 @@ Redis 状態は Redis コンテナが置く場所（既定では無名 Docker �
 
 設定編集後はクライアントを再起動。Redis Stack は **クライアントがサーバーを起動する前に** 稼働させておくこと — さもないと初回ツール呼び出しは「Redis Stack を起動してください」のヒントを返す。
 
+### コード生成の後の自動登録(方法 A — 必須)
+
+**方法 A は、AI がサーバーを登録し、起動を確かめたところで終わる。利用者に残る作業は、完全な再起動だけである。**利用者に設定ファイルを編集させてはならない。どのクライアントにもつながっていないパッケージのままフェーズ 1 を終えてはならない。`pip install -e .` が成功したら、すぐに次を行え。
+
+1. **この PC の実行ファイルを見つける。**`pip install -e .` を実行した Python の scripts フォルダ(`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`、venv なら `Scripts\` / `bin/`)に、`n3mc-workingmemory.exe`(Windows)か `n3mc-workingmemory` があることを確かめよ。登録にはコマンド名ではなく、その**絶対パス**を使え。Claude Code は、scripts フォルダを含まない `PATH` でサーバーを起動することがある。
+2. **古い登録を消す。**`claude mcp remove n3mc-workingmemory -s user` を実行せよ(「見つからない」というエラーは問題ない)。インストール先のフォルダの `.mcp.json` に、この PC に存在しないコマンド(たとえば別の PC のパス)を指す `n3mc-workingmemory` があれば、その項目を消し、ほかのサーバーは残せ。
+3. **Claude Code に登録する(user スコープ)**:`claude mcp add -s user n3mc-workingmemory -- "<絶対パス>"`。user スコープにすると、どのフォルダでも作業メモリが使える。`claude` コマンドが `PATH` に無いときは、代わりに `~/.claude.json` の最上位の `mcpServers` に同じサーバー(`{"type": "stdio", "command": "<絶対パス>", "args": []}`)を足せ。その前にファイルをバックアップし、ほかのキーはすべて残し、同じフォルダの一時ファイルに書いてから置き換える形で書け。
+4. **ツールを事前に許可する**:`~/.claude/settings.json` の `permissions.allow` に `mcp__n3mc-workingmemory__*` を足せ([ツール自動許可](#ツール自動許可claude-code-固有)と同じ決まり。バックアップし、書く直前に読み直し、既存の規則は残し、置き換える形で書く)。
+5. **Claude Desktop**:`%APPDATA%\Claude\claude_desktop_config.json`(Windows)があれば、同じバックアップと合わせ方で、そこにも同じサーバーを足せ。
+6. **再起動を頼む前に確かめる。**登録したコマンドを自分で一度起動し、stdio で MCP の `initialize` を送ってから `tools/list` を送り、§4.3 の 7 つのツールがそろうことを確かめてから、プロセスを止めよ。最初の `initialize` は、モデルの読み込みで 17 秒ほどかかることがある(§3.9)。`claude` が使えるなら、`claude mcp get n3mc-workingmemory` が手順 1 の絶対パスを表示することも確かめよ。どれかが失敗したら、直してやり直せ。起動しない登録のまま渡してはならない。
+7. **最後にメッセージを 1 つだけ出す**:「セットアップが終わりました。Claude Code(と Claude Desktop)を完全に終了して、開き直してください。次に起動したときに記憶のサーバーがつながります。」。付録 B の「フェーズ 1 → フェーズ 2 の間に Claude Code を完全再起動してください」にある、Windows で完全に終了する手順を添えよ。
+
+> **⚠️ 理由(2026-11-16)**:別の PC でのコード生成によるセットアップが、パッケージは入ったのに登録が動かない状態で終わった。フォルダの `.mcp.json` は `C:\Users\<別の PC のユーザー>\…\Python312\Scripts\n3mc-workingmemory.exe` を指しており、その PC には存在しなかった。この版までの方法 A は「サーバーを登録する(§8)」としか書いておらず、§8 の例は `PATH` に頼るコマンド名だけだった。Lite の主なインストール方法はコード生成なので、手作業の設定なしで、つながったサーバーで終わらなければならない。
+
 ### ツール自動許可（Claude Code 固有）
 
 Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを出す。**「AI が意識せず保存・検索する」自動ループを成立させるには、ツールを事前許可する必要がある** — そうしないと `save_memory` / `search_memory` のたびに Yes/No ダイアログで AI が停止する（ユーザーが席を外していれば動作不能）。
@@ -1399,8 +1413,10 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 ```
 この指示書（N3MemoryCore_MCP_Spec_JP.md）に従って n3mcmcp-lite を実装してください。
 Redis Stack は docker で起動済みです。MCP stdio サーバーとして動かし、
-6 つのツール（save_memory / search_memory / list_memories / delete_memory /
-delete_memories_by_session / repair_memory）を登録してください。
+7 つのツール（save_memory / search_memory / list_memories / delete_memory /
+delete_memories_by_session / repair_memory / recall_thread）を登録してください。
+インストールが終わったら、サーバーを Claude Code に自分で登録し、起動することを
+確かめてください（§8「コード生成の後の自動登録」）。私は再起動するだけにしてください。
 ```
 
 Sonnet がパッケージ構成・RediSearch インデックス作成・MCP ツール登録・stdio 起動まで自動で行います。完了したらフェーズ 2 に進んでください（「動いた」≠「仕様通り」なので、ここで終わりにしないでください）。
