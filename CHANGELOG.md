@@ -10,6 +10,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Changed
+- **Hiragana-only query tokens are dropped** (§3.7, JP/EN spec, 2026-11-17):
+  bigrams made only of hiragana (`して`, `ます`, `どう`) are dropped from
+  the BM25 query when another token remains, like single CJK characters.
+  They appear in most Japanese records, so under OR an unrelated question
+  matched through them (`来週の株価はどうなる` matched
+  `今日の天気はどうですか` through `はど` and `どう`). Measured in
+  N3MC-Pro's bigram index (2026-11-16).
+- **The access-frequency boost is off by default** (§3.6, §6, JP/EN spec,
+  README, 2026-11-17): `access_count_enabled` now defaults to `false`.
+  Measured in N3MC-Pro with every search counted as here, turning the
+  boost back on lowered recall@3 by 0.051 (20 questions worse, 8 better).
+  `access_count` is still incremented with the TTL refresh. An existing
+  `config.json` keeps the value it has.
 - **The embedding model is built from the local Hugging Face cache first**
   (§3.9 step 4, JP/EN spec): `local_files_only=True` with the Hub marked
   offline, falling back to the normal (downloading) construction only when

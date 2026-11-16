@@ -107,6 +107,12 @@ class TestAccessCountBoost:
         cfg = {"access_count_enabled": False, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
         assert b_local(1.0, 100, cfg) == pytest.approx(1.0)
 
+    def test_boost_off_by_default(self):
+        # 2026-11-17: the frequency boost is off unless the config turns it on
+        from n3mc_mcp.config import DEFAULTS
+        assert DEFAULTS["access_count_enabled"] is False
+        assert b_local(1.0, 100, {}) == pytest.approx(1.0)
+
     def test_max_boost_capped(self):
         cfg = {"access_count_enabled": True, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
         val = b_local(1.0, 10000, cfg)

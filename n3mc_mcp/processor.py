@@ -459,12 +459,21 @@ def drop_lone_cjk_tokens(fts_query: str) -> str:
     the terms ORed (v1.7.1) such a particle would match almost every Japanese
     record (before v1.7.1, ANDed, it zeroed the whole BM25 leg). Lone
     tokens are dropped when at least one other token remains (a query that
-    is a single character is kept as is). Applied by Database._bm25_search
+    is a single character is kept as is). Hiragana-only tokens (`して`,
+    `ます`) are dropped the same way when another token remains (2026-11-17).
+    Applied by Database._bm25_search
     on top of `prepare_query`, whose output stays exactly as in spec §3.7.
     """
     tokens = fts_query.split()
-    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))]
-    return " ".join(kept) if kept else fts_query
+    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))] or tokens
+    # 2026-11-17: hiragana-only tokens (して, ます, どう) also appear in most
+    # Japanese records; drop them too when any other token remains.
+    content = [t for t in kept if not _is_hiragana_only(t)]
+    return " ".join(content or kept)
+
+
+def _is_hiragana_only(token: str) -> bool:
+    return all(0x3040 <= ord(ch) <= 0x309F or ch == "ー" for ch in token)
 
 
 def content_ngram(text: str) -> str:
@@ -598,7 +607,7 @@ def b_local(stored_importance: float, access_count: int, cfg: dict) -> float:
     b_local = clamp(0.5, 2.0, stored_importance + access_boost)
     access_boost = min(access_count_max_boost, access_count × access_count_weight)
     """
-    if cfg.get("access_count_enabled", True):
+    if cfg.get("access_count_enabled", False):   # off by default (2026-11-17)
         boost = min(
             cfg.get("access_count_max_boost", 0.5),
             access_count * cfg.get("access_count_weight", 0.02),

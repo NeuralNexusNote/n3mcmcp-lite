@@ -422,7 +422,9 @@ access_boost = min(access_count_max_boost, access_count × access_count_weight)
 - `stored_importance`：`save_memory` 時に指定（既定 `1.0`、範囲 `0.5〜2.0`）。
 - `access_boost`：**CPU のみで自動算出される頻度ブースト**。`search_memory` がその記憶を上位 `ttl_refresh_top_k` 件に含めるたび（弱い候補は除く、§3.14 手順 6）`access_count` が +1 され、次回以降の検索で `access_count × access_count_weight`（既定 `0.02`）だけ `b_local` を押し上げる（上限 `access_count_max_boost = 0.5`）。LLM の介在なく「よく使われる記憶ほど上位に来る」自己調整ループが成立する。
 
-設定で `access_count_enabled: false` にすればブーストを無効化できる（`stored_importance` のみで重み付け）。
+**2026-11-17 から、ブーストは既定で無効**（`access_count_enabled: false`。`stored_importance` のみで重み付け）。`true` にすれば有効になる。`access_count` は TTL の再設定と一緒にこれまでどおり増えるので、あとで有効にしても、それまで数えた回数から始まる。
+
+> **⚠️ 既定で無効にした理由（2026-11-17）**: N3MC-Pro（2026-11-16、ラベル付きの質問 138 問。ここと同じく検索のたびに数える）で、参照回数の加点を戻すと recall@3 が 0.051 下がった（95% 区間 −0.101〜+0.000）。悪くなった質問が 20、良くなった質問が 8。よく返った記録が、関係の薄い質問でも、より関係の深い記録の上に来ていた。Lite のデータでは測っていない。今ある `config.json` は、その値のまま残る。新しい既定にそろえるには `"access_count_enabled": false` にする。
 
 `b_session` は **セッション一致係数**（Pro と同一の挙動）：
 
@@ -515,8 +517,12 @@ def drop_lone_cjk_tokens(q: str) -> str:
     # BM25 query only: drop single-character CJK tokens (particles such as
     # は / の / を left over by bigram expansion) when other tokens remain.
     tokens = q.split()
-    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))]
-    return ' '.join(kept) if kept else q
+    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))] or tokens
+    # 2026-11-17: hiragana-only tokens (して / ます / どう) too, when
+    # another token remains.
+    content = [t for t in kept if not all(
+        0x3040 <= ord(c) <= 0x309F or c == 'ー' for c in t)]
+    return ' '.join(content or kept)
 ```
 
 `_bm25_search` は `drop_lone_cjk_tokens(prepare_query(query))` を使い、**残った語を OR で結ぶ**（v1.7.1、決定 LD3）：
@@ -528,6 +534,8 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
 ```
 
 記録は**どれか 1 つ**の語を含めばヒットする。BM25 は多くの語・珍しい語を含む記録ほど高く採点し、語彙リランクがすべての語の coverage を加えるので、AND が担っていた順位付けはこれで果たされる。バイグラム展開のあとに残る 1 文字の CJK（`「記憶装置」は？` → `記憶 憶装 装置 は`）はたいてい助詞で、OR ではほぼすべての日本語の記録にヒットしてしまうので、引き続き落とす。1 文字の CJK だけのクエリは、そのまま使う。
+
+**ひらがなだけの語（2026-11-17）**: ひらがなだけでできたバイグラム（`して`、`ます`、`どう`）も、ほかの語が残るなら同じように落とす。日本語のほとんどの記録に出るので、OR では無関係な質問がこれで当たっていた（`来週の株価はどうなる` が `はど` と `どう` で `今日の天気はどうですか` に当たった）。同じ決まりを N3MC-Pro のバイグラムの索引で測った（2026-11-16）。ひらがなだけの語しかないクエリは、そのまま使う。Lite はもともと CJK のバイグラムを索引しているので、SQLite 版の 2026-11-17 のほかの全文検索の変更（3 文字ずつに分ける、2 つ目の索引）は当てはまらない。
 
 > **⚠️ OR にする理由（v1.7.1、Lite レビュー LM8）**：RediSearch は `@field:(a b c)` の中の語を AND で結ぶ。`quick fox` では記録が見つかったが、`quick fox elephant`、`what did the quick fox do`、`記憶装置 大阪` では、すべての語を含む記録がないので何も見つからず、スコアのキーワード部分（30 %）が 0 になっていた。Free も同じ変更をした（決定 D4）。
 
@@ -982,7 +990,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
-  "access_count_enabled":     true,
+  "access_count_enabled":     false,
   "access_count_weight":      0.02,
   "access_count_max_boost":   0.5,
   "ttl_refresh_on_search":    true,
@@ -1007,7 +1015,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `min_score` — `filter_score`（`time_decay` と `b_session` を掛けないスコア、[§3.6](#36-ランキング式)）がこの値未満の結果を除外（既定 `0.2`）。`0.0` で無効化。**フィルタは語彙リランク（[§3.6](#36-ランキング式)）の後に適用される** — フレーズ一致・coverage の加点を受けたスコアで判定するため、融合スコアが閾値直下でもリランク加点で救済されうる。
 - `search_query_max_chars` — クエリから使う最大文字数（既定 `2000`；埋め込みモデルが ~512 トークンで飽和）。
 - `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズとオーバーラップ（既定 400 / 100 文字）。本文長がこの閾値を超えた場合に親ドキュメント＋チャンク化（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）に入る。
-- `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — アクセス頻度ブーストの有効化・係数・上限（[§3.6](#36-ランキング式)）。`false` で完全無効化、`stored_importance` のみが重みになる。
+- `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — アクセス頻度ブーストの有効化・係数・上限（[§3.6](#36-ランキング式)）。**2026-11-17 から既定は `false`**: `stored_importance` のみが重みになる。`true` でブーストが有効になる。
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索上位 K 件に対する TTL 再設定と `access_count` インクリメント。再設定は既存エントリの TTL をリセットするのみで、新規エントリの寿命を超えて延長することはない。チャンクがヒットして親ドキュメントを展開する際は、`mem:<chunk_id>` の TTL と同時に `doc:<parent_id>` の TTL も更新されるため、verbatim recall 能力はチャンクと同期して維持される。
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — 融合スコア後の軽量語彙リランカー（[§3.6](#36-ランキング式)）。`false` で従来スコア素通し。
 - `b_session_match` / `b_session_mismatch` — ランキング式の `b_session` 係数（[§3.6](#36-ランキング式)）。検索リクエストの `effective_session`（呼び出し時引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUID）と行の保存時 `session_id` を比較し、一致なら `b_session_match`（既定 `1.0`）、それ以外なら `b_session_mismatch`（既定 `0.6`）を最終スコアに乗算する。両方を `1.0` に設定すれば実質無効化（全行対称）。

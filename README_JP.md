@@ -514,7 +514,7 @@ Microsoft Store 版の Claude デスクトップアプリは、起動した MCP 
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
-  "access_count_enabled":     true,
+  "access_count_enabled":     false,
   "access_count_weight":      0.02,
   "access_count_max_boost":   0.5,
   "ttl_refresh_on_search":    true,
@@ -536,7 +536,7 @@ Microsoft Store 版の Claude デスクトップアプリは、起動した MCP 
 - `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 文書や長いエントリの新しい版を保存すると、古い版も残る。内容が 0.98 以上似ている結果は同じ内容の版とみなし、新しい順に並べる。各結果に `saved=`（保存日時）が付く。
 - 設定は MCP サーバーが起動し直したときに効く（MCP クライアントを再起動する）。書き間違えて読めないときは、ファイルはそのまま残り、既定値で動く。そのことは最初の `search_memory` の結果に表示される。数値は引用符を付けずに書く。
 - `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズと重複（文字数）。閾値超の本文は親ドキュメント＋チャンク経路に入り、verbatim 復元される。
-- `access_count_*` — アクセス頻度ベース自動 importance。検索の上位 K 件にヒットすると次回以降の検索でブースト（上限あり）。
+- `access_count_*` — アクセス頻度ベース自動 importance。検索の上位 K 件にヒットすると次回以降の検索でブースト（上限あり）。**2026-11-17 から既定は無効**（`access_count_enabled: false`）。回数は引き続き数える。
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索ごとに上位 K 件の TTL をリセット（リセットのみ。新規保存以上には伸びない）。
 - `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — 軽量な後段リランカー（CPU のみ）。
 - `b_session_match` / `b_session_mismatch` — 行の `session_id` が一致したときのスコア倍率（既定 `1.0`）と不一致のときの倍率（`0.6`）。`save_memory` と `search_memory` に同じ `session_id` を渡すことで、同じ Redis 内の他プロジェクトのノイズより現在プロジェクトの記憶を上位に押し上げる。両方を `1.0` にすればこのバイアスを完全に無効化できる。
@@ -606,11 +606,14 @@ b_session = b_session_match (既定 1.0)   if 行の session_id == 実効 sessio
 7 日経過（失効直前）で ≈ 0.20 となり、直近の文脈がランキング上位に
 押し出されます。
 
-**自動重要度ブースト（アクセス頻度型）**：`search_memory` が
+**自動重要度ブースト（アクセス頻度型。2026-11-17 から既定は無効）**：
+`access_count_enabled` を `true` にすると、`search_memory` が
 ある記憶を上位 5 件で返すたび、その記憶の `access_count` が +1 され、
 次回以降の検索で `b_local` が 0.02 ずつ押し上げられます（上限 +0.5）。
 LLM による重要度判定は不要で、「よく使う記憶ほど自然に上位に来る」
-自己調整ループが CPU 計算のみで成立します。
+自己調整ループが CPU 計算のみで成立します。既定で無効にしたのは、N3MC-Pro で
+測ったところ recall@3 が下がった（よく返った記憶が、より関係の深い記憶の上に
+来た）ためです。
 
 ## 開発
 

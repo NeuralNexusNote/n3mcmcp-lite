@@ -48,7 +48,7 @@ DEFAULTS: dict[str, Any] = {
     "search_query_max_chars":   2000,
     "chunk_threshold":          400,
     "chunk_overlap":            100,
-    "access_count_enabled":     True,
+    "access_count_enabled":     False,  # frequency boost; off since 2026-11-17
     "access_count_weight":      0.02,
     "access_count_max_boost":   0.5,
     "ttl_refresh_on_search":    True,

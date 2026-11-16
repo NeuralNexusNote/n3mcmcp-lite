@@ -427,7 +427,9 @@ access_boost = min(access_count_max_boost, access_count × access_count_weight)
 - `stored_importance`: provided at `save_memory` time (default `1.0`, range `0.5–2.0`).
 - `access_boost`: **automatic CPU-only frequency boost**. Every `search_memory` call increments `access_count` by 1 for each memory returned in the top `ttl_refresh_top_k` hits (weak matches excluded, §3.14 step 6). On subsequent queries that memory receives an additive boost of `access_count × access_count_weight` (default `0.02`), capped at `access_count_max_boost` (default `0.5`). This creates a self-adjusting "frequently-used memories rank higher" loop with zero LLM involvement.
 
-Set `access_count_enabled: false` in config to disable the boost (the formula falls back to `stored_importance` only).
+**The boost is off by default since 2026-11-17** (`access_count_enabled: false`; the formula uses `stored_importance` only). Set it to `true` to turn it on. `access_count` is still incremented with the TTL refresh, so turning the boost on later starts from the counts kept meanwhile.
+
+> **⚠️ Why off by default (2026-11-17)**: measured in N3MC-Pro (2026-11-16, 138 labeled questions, with every search counted as here), turning the access-count boost back on lowered recall@3 by 0.051 (95% interval −0.101 to +0.000): 20 questions got worse and 8 better. Often-returned records rose above more relevant ones for loosely related questions. It was not measured on Lite's own data. An existing `config.json` keeps the value it has; set `"access_count_enabled": false` to follow the new default.
 
 `b_session` is the **session-match coefficient** (same contract as Pro):
 
@@ -519,8 +521,12 @@ def drop_lone_cjk_tokens(q: str) -> str:
     # BM25 query only: drop single-character CJK tokens (particles such as
     # は / の / を left over by bigram expansion) when other tokens remain.
     tokens = q.split()
-    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))]
-    return ' '.join(kept) if kept else q
+    kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))] or tokens
+    # 2026-11-17: hiragana-only tokens (して / ます / どう) too, when
+    # another token remains.
+    content = [t for t in kept if not all(
+        0x3040 <= ord(c) <= 0x309F or c == 'ー' for c in t)]
+    return ' '.join(content or kept)
 ```
 
 `_bm25_search` uses `drop_lone_cjk_tokens(prepare_query(query))` and **joins the remaining terms with OR** (v1.7.1, decision LD3):
@@ -532,6 +538,8 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
 ```
 
 A record matches when it contains **any** term; BM25 scores records with more and rarer terms higher, and the lexical rerank adds the coverage of all terms, so the ranking does what the AND used to do. A single CJK character left after bigram expansion (`「記憶装置」は？` → `記憶 憶装 装置 は`) is usually a particle and would match almost every Japanese record under OR, so it is still dropped. A query that consists only of single CJK characters is kept as is.
+
+**Hiragana-only tokens (2026-11-17)**: bigrams made only of hiragana (`して`, `ます`, `どう`) are dropped the same way when another token remains. They appear in most Japanese records, so under OR an unrelated question matched through them (`来週の株価はどうなる` matched `今日の天気はどうですか` through `はど` and `どう`). The same rule was measured in N3MC-Pro's bigram index (2026-11-16). A query made only of hiragana-only tokens is kept as is. Lite already indexes CJK bigrams, so the other 2026-11-17 FTS changes of the SQLite editions (3-character grams, a second index) do not apply.
 
 > **⚠️ Why OR (v1.7.1, Lite review LM8)**: RediSearch joins the terms inside `@field:(a b c)` with AND. `quick fox` found a record, but `quick fox elephant`, `what did the quick fox do` and `記憶装置 大阪` found nothing, because no record contained every term; the keyword part (30 %) of the score was then 0. Free made the same change (decision D4).
 
@@ -994,7 +1002,7 @@ Complete schema (missing fields auto-filled with defaults below):
   "search_query_max_chars":   2000,
   "chunk_threshold":          400,
   "chunk_overlap":            100,
-  "access_count_enabled":     true,
+  "access_count_enabled":     false,
   "access_count_weight":      0.02,
   "access_count_max_boost":   0.5,
   "ttl_refresh_on_search":    true,
@@ -1019,7 +1027,7 @@ Complete schema (missing fields auto-filled with defaults below):
 - `min_score` — excludes results whose `filter_score` (the score without `time_decay` and `b_session`, [§3.6](#36-ranking-formula)) is below this value (default `0.2`). Set to `0.0` to disable. **The filter is applied after lexical rerank ([§3.6](#36-ranking-formula))** — it judges the score including phrase/coverage boosts, so a candidate just below the threshold at fusion time can be rescued by the rerank boost.
 - `search_query_max_chars` — max characters used from a query (default `2000`; embedding model caps at ~512 tokens).
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (defaults 400 / 100 chars). Bodies longer than the threshold trigger the parent-document + chunks path (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)).
-- `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — enable flag, per-hit weight, and cap for the frequency boost (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` disables the feature entirely and the formula falls back to `stored_importance` only.
+- `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — enable flag, per-hit weight, and cap for the frequency boost (see [§3.6](#36-ranking-formula)). **Default `false` since 2026-11-17**: the formula uses `stored_importance` only; `true` turns the boost on.
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL-reset and `access_count` increment for the top-K hits after each search. Reset-only (no lifetime extension beyond a fresh save). When a chunk hit expands to its parent document, the `doc:<parent_id>` key's TTL is also refreshed alongside the chunk's `mem:` key, keeping verbatim recall ability alive in sync with the chunks.
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` passes the fused score through unchanged.
 - `b_session_match` / `b_session_mismatch` — the `b_session` factor in the ranking formula (see [§3.6](#36-ranking-formula)). For each row, the search compares the request's `effective_session` (per-call argument → `N3MC_SESSION_ID` env var → per-process startup UUID) against the row's stored `session_id`: matches multiply the score by `b_session_match` (default `1.0`), mismatches by `b_session_mismatch` (default `0.6`). Set both to `1.0` to disable the bias entirely (all rows symmetric).
