@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.7.2 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.7.3 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
@@ -45,6 +45,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 **Volatility contract:**
 - Every write to Redis sets a TTL equal to `ttl_seconds` (default 604 800 = 7 d).
 - Both the primary record (`mem:<uuid>`) and its exact-duplicate guard key (`mem:sha:<sha1>`) share the same TTL and expire together — also after a search hit refreshes the record's TTL (the guard is refreshed with it, v1.7.1).
+- No write ever creates a key without a TTL. A write to a record that already exists (`access_count`, a re-embedded vector, a guard reset) happens only while the record still exists, checked and written in one atomic step (v1.7.3, §3.3).
 - Expiration is delegated to Redis; no background cleanup job runs.
 - Restarting the Redis container with its volume removed wipes all memory immediately.
 
@@ -247,6 +248,7 @@ n3memorycore-mcp-lite/
 > | 25 | Persistence turned off on any Redis | Someone else's Redis on `localhost:6379` silently loses its RDB/AOF and its data at the next restart | Only when the DB is empty or holds only N3MC keys; otherwise notice `shared_redis` | [§3.4](#34-ephemerality-no-modifications-or-optimizations-allowed) |
 > | 26 | Tool calls wait for the model lock without limit | During the first-run download (minutes) every tool call blocks and may hit the client's tool timeout | Wait at most 20 s, then continue keyword-only with a notice | [§3.9](#39-startup-sequence--self-recovery) |
 > | 27 | TTL refresh skips the dedup guards; BM25 terms ANDed; unreadable `since` ignored | Frequently used records can be saved twice after 7 days; sentence-like queries get no keyword hits; `since="yesterday"` searches everything | Refresh guards with the record; join terms with OR; reject unreadable time bounds | [§3.3](#33-redis-connection--ttl), [§3.7](#37-text-tokenization--punctuation-handling), [§4.3.1](#431-retrieval-extension-tools) |
+> | 28 | "Does the key exist?" and the write sent as separate commands | A record deleted (`delete_memory` from another process) or expired between the check and the write comes back as a hash holding only `access_count` or `embedding`, **with no TTL** — it never expires and nothing deletes it; a guard reset after the record was deleted blocks saving the same content for 7 days | Check and write in **one Lua script** (`EXISTS` then `HINCRBY` / `HSET` / `SET … EX`) | [§3.3](#33-redis-connection--ttl) |
 
 ### 3.1 ID Hierarchy
 
@@ -285,9 +287,41 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 
 **Pipeline atomicity**: the three commands (`HSET`, `EXPIRE`, `SET`) ship as one pipeline, so partial-failure interleavings that could produce a record without a TTL or a sha-guard without a record are not possible. The long-content path follows the same rule since v1.7.1: after every chunk embedding has been computed and the `docsha:` guard has been taken with `SET … NX EX`, the parent document and **all** chunks are written in **one** pipeline; if that pipeline fails, the guard is deleted again (§3.8 (B)). Pipelines are sent with `transaction=True` (`MULTI`/`EXEC`).
 
-**Guards follow their record's TTL (v1.7.1)**: whenever a record's TTL is reset by a search hit (§3.11 / §3.14 step 7), the dedup guard of that record is reset in the same pipeline — `SET mem:sha:<sha1> <id> EX <ttl_seconds>` for a standalone record, `SET docsha:<sha1> <parent_id> EX <ttl_seconds>` for a parent document. The `<sha1>` is recomputed from the stored content with the same function `save_memory` uses (SHA-1 of the NFKC-normalized text), so records saved by earlier versions need no extra field. A chunk has no guard of its own; its parent's guard is reset when the parent is.
+**Guards follow their record's TTL (v1.7.1)**: whenever a record's TTL is reset by a search hit (§3.11 / §3.14 step 7), the dedup guard of that record is reset with it — `SET mem:sha:<sha1> <id> EX <ttl_seconds>` for a standalone record, `SET docsha:<sha1> <parent_id> EX <ttl_seconds>` for a parent document — **only while the record still exists**, using the conditional script `SET_GUARD_IF_EXISTS` below (v1.7.3). The `<sha1>` is recomputed from the stored content with the same function `save_memory` uses (SHA-1 of the NFKC-normalized text), so records saved by earlier versions need no extra field. A chunk has no guard of its own; its parent's guard is reset when the parent is.
 
 > **⚠️ Why (v1.7.1, Lite review LM7)**: v1.7.0 reset only `mem:<id>` / `doc:<id>`. A record that kept coming up in searches lived on, but its guard expired 7 days after the save, after which the same content could be saved again and the record existed twice — contradicting "the record and its guard expire together".
+
+**Conditional writes to an existing record (v1.7.3)**: `HINCRBY`, `HSET` and `SET` create their key when it does not exist. Every write that `save_memory` does not make itself — the `access_count` increment (§3.14 step 7), the guard reset above, and the re-embedded vector of `repair_memory` (§3.10) — therefore runs as **one Lua script that checks the record and writes in the same atomic step**. The scripts (`KEYS` / `ARGV` as in `EVAL`):
+
+```lua
+-- INCR_IF_EXISTS   KEYS[1] = mem:<id>        ARGV[1] = field, ARGV[2] = increment
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
+end
+return false
+
+-- HSET_IF_EXISTS   KEYS[1] = mem:<id>        ARGV[1] = field, ARGV[2] = value
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+  return 1
+end
+return 0
+
+-- SET_GUARD_IF_EXISTS   KEYS[1] = record key (mem:<id> or doc:<parent_id>)
+--                       KEYS[2] = guard key  (mem:sha:<sha1> or docsha:<sha1>)
+--                       ARGV[1] = record id, ARGV[2] = ttl_seconds
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+  return 1
+end
+return 0
+```
+
+- `HINCRBY` and `HSET` on an existing key keep its TTL; the scripts never call `EXPIRE` and never create the record.
+- Register the scripts once (redis-py `register_script`) and run them through the pipeline (`script(keys=…, args=…, client=pipe)`); redis-py loads a script the server does not know yet. A script is atomic on its own — a pipeline of scripts needs no `MULTI`.
+- Plain `EXPIRE` needs no script: it never creates a key.
+
+> **⚠️ Why (v1.7.3, data-flow trace DF1 / DF2)**: v1.7.1 checked first and wrote later — `EXPIRE` in one pipeline and `HINCRBY` + the guard `SET` in a second (§3.14 step 7), `EXISTS` then `HSET` in `repair_memory`. Reproduced on a test Redis: (DF1) a record deleted by `delete_memory` between the two pipelines came back as `mem:<id>` holding only `access_count`, with no TTL, and its `mem:sha:` guard was written again, so the same content was rejected as `duplicate` for 7 days although no record existed; (DF2) a record that expired between `EXISTS` and `HSET` came back holding only `embedding`, with no TTL. Such a hash has no `owner_id`, so no search shows it and no delete removes it — it stays in Redis forever, which breaks "every write sets a TTL" (§3.4). The gap is milliseconds wide, but the Desktop app and the terminal `claude` run separate server processes against the same Redis.
 
 ### 3.4 Ephemerality (No Modifications or Optimizations Allowed)
 
@@ -597,7 +631,7 @@ Step 1 must complete before the server accepts tool calls. Steps 2, 3 and 4 are 
 
 The `repair_memory` tool in the Lite build is a **thin idempotent operation**: it calls `ensure_index()` again and, since v1.7.1, **adds missing vectors**. There are no migration markers and no FTS rebuild — Redis records that exist are already indexed by the RediSearch side-channel, and expired records are simply gone.
 
-**Re-embedding (v1.7.1, Lite review LL1)**: entries saved while the model was unavailable (§3.9 step 4) have no `embedding` field and are found by BM25 only. When the model is available, `repair_memory` `SCAN`s `mem:*` (skipping `mem:sha:*`), and for up to 200 hashes of the configured `owner_id` without `embedding` computes `embed(content)` (passage prefix) and `HSET`s the field — without changing the TTL. If the model is unavailable it re-embeds nothing; the response keeps `"message": "index ensured"` and adds `"warning": "embedding_unavailable"` with the model's `detail` (§3.9 step 4).
+**Re-embedding (v1.7.1, Lite review LL1)**: entries saved while the model was unavailable (§3.9 step 4) have no `embedding` field and are found by BM25 only. When the model is available, `repair_memory` `SCAN`s `mem:*` (skipping `mem:sha:*`), and for up to 200 hashes of the configured `owner_id` without `embedding` computes `embed(content)` (passage prefix) and writes the field with the conditional script `HSET_IF_EXISTS` (§3.3, v1.7.3) — without changing the TTL. A record that expired between the `SCAN` and the write is skipped (the script returns 0) and is not counted in `reembedded`; a plain `HSET` would recreate it as a hash holding only `embedding`, with no TTL. If the model is unavailable it re-embeds nothing; the response keeps `"message": "index ensured"` and adds `"warning": "embedding_unavailable"` with the model's `detail` (§3.9 step 4).
 
 Return shape: `{"status": "ok", "message": "index ensured", "reembedded": N, "remaining": M}` (`remaining` = entries still without a vector after this call, counted while scanning; call again if > 0), or `{"status": "error", "message": "<detail>"}` on failure.
 
@@ -807,7 +841,7 @@ v1.6.x ranked every KNN candidate. With `multilingual-e5`, even unrelated record
    - **Weak rows are not refreshed** (step 7): no `EXPIRE` on their `mem:` / `doc:` / guard keys and no `access_count` increment. §3.4 forbids extending a record's life just because it was read; a weakly related record shown to fill the list must not be kept alive by it.
    - `min_results: 0` disables this step. **An empty or whitespace-only query skips it** (no weak rows): the vector search still returns rows for an empty query (it embeds the empty string), and filling a list for a query with no content would only add noise.
    - Weak rows take no part in steps 4 and 5 (they are not moved by version ordering and do not count toward the relative cut's top score).
-7. **TTL refresh / access_count** for the top `ttl_refresh_top_k` **normal** rows (§3.11; rows marked `_weak` are skipped), then truncate to `limit`. **Increment `access_count` only on a key that still exists (v1.7.1, Lite review LL4)**: run `EXPIRE` first and `HINCRBY` only where `EXPIRE` returned 1 (two pipelines, or one Lua script). A key that expired between the search and the refresh would otherwise be recreated by `HINCRBY` as a hash holding only `access_count` and no TTL.
+7. **TTL refresh / access_count** for the top `ttl_refresh_top_k` **normal** rows (§3.11; rows marked `_weak` are skipped), then truncate to `limit`. **Increment `access_count` only on a key that still exists (v1.7.1, Lite review LL4)**: run `EXPIRE` first (pipeline 1) and, only where `EXPIRE` returned 1, the conditional scripts of §3.3 (pipeline 2, v1.7.3): `INCR_IF_EXISTS` for `access_count` on the hit, and `SET_GUARD_IF_EXISTS` for the guard (record key `mem:<id>` for a standalone record, `doc:<parent_id>` for a parent document). A key that expired between the search and the refresh would otherwise be recreated by `HINCRBY` as a hash holding only `access_count` and no TTL. The check on `EXPIRE`'s reply alone is not enough: a record deleted between the two pipelines is caught only by the script (v1.7.3, DF1).
 
 > **⚠️ Why (v1.7.1, Lite review LH1; decision LD1)**: v1.7.0 compared the final score, which already contains `time_decay` (3-day half-life) and `b_session` (0.6 for another session). With equal relevance, a record about 2.2 days older than the top hit (0.5^(2.2/3) ≈ 0.6) and every record from another session fell under the cut — and because the default `session_id` is a new UUID per server process, every record saved before the MCP server last restarted counts as another session. Reproduced: with a fresh current-session record at cos 0.86 (score 0.602, cut 0.361), a 3-day-old same-session record at cos 0.95 (0.332) and 1-day-old other-session records at cos 0.99 (0.330) and 0.95 (0.317) were all dropped. Lite is a 7-day working memory; one recent hit hid everything older than two days.
 
@@ -846,7 +880,7 @@ stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `std
 ### 4.2 `initialize` response
 
 The server advertises:
-- `protocolVersion: "2024-11-05"`
+- `protocolVersion` — **negotiated by the MCP SDK (v1.7.3)**: the version the client sent in `initialize` when the SDK supports it (`mcp` 1.27: `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`), otherwise the SDK's latest. Do not pin it in code. (Up to v1.7.2 this line read `"2024-11-05"`; a client that asks for `2025-06-18` gets `2025-06-18`.)
 - `serverInfo: { name: "n3mc-workingmemory", version: <package __version__> }`
 - `capabilities.tools` with `listChanged: false`
 - `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
@@ -862,11 +896,11 @@ Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §
 | `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Results are shaped and rendered as in [§3.14](#314-search-result-shaping-v170) (vector floor, newest version first, relative cut, `saved=` times). **When fewer than `min_results` (default 3) rows pass the floors, the closest dropped rows are added under `#### Possibly related (weak matches — may be unrelated)` (v1.7.2); the tool description tells the LLM: weak matches did not pass the relevance floors and are often unrelated — use one only when it is actually relevant to the question; if it is not, ignore it and do not mention it.** The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | Body ≤ `chunk_threshold`: exact dedup only (§3.8), then HSET + EXPIRE. Returns `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking. When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
 | `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). **Pages through the index (v1.7.1)**: fetch newest first in pages of 200 (`LIMIT <offset> 200`, sorted by `timestamp_epoch` desc) and keep paging until `limit` standalone memories of this owner are collected or the index is exhausted. (v1.7.0 read one block of `max(limit × 5, 200)` rows; after a 260-chunk document the block held only chunks, and a standalone memory saved just before it was not listed — Lite review LM6.) |
-| `delete_memory` | `id: string`                              | Only records of the configured `owner_id` (another owner's id → `{"status":"not_found","id":...}`, v1.7.1). If the id is a parent (`doc:<uuid>`), cascade-deletes the parent, `docsha:`, and every chunk listed in its `chunk_ids` (§3.11). Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
+| `delete_memory` | `id: string`                              | Only records of the configured `owner_id` (another owner's id → `{"status":"not_found","id":...}`, v1.7.1). **The id may be given bare (`<uuid>`, as `search_memory` / `list_memories` print it) or with one leading `doc:` or `mem:` prefix; one such prefix is removed first (v1.7.3, §3.12 bare-UUID rule), and the response's `id` is the bare UUID.** If the id is a parent (`doc:<uuid>` exists), cascade-deletes the parent, `docsha:`, and every chunk listed in its `chunk_ids` (§3.11). Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
 | `delete_memories_by_session` | `session_id: string`         | Bulk-delete every standalone memory, parent document, child chunk, and sha guard tied to the given `session_id`, scoped to the configured `owner_id`. Response: `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. When nothing matches: `{"status":"not_found", "session_id": ..., "deleted": 0}` (a re-call is a safe no-op). **Irreversible — confirm `session_id` with the user before calling.** Lite-only (see [§10 Test 6](#10-self-evaluation-evidence-report)). |
 | `repair_memory` | —                                         | `ensure_index()` and adding missing vectors (up to 200 per call); see [§3.10](#310-repair). |
 
-All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
+All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. **This includes every error response (v1.7.3)**: the `Error: …` text of §4.4 (an unreadable `since` / `until`, an unexpected exception, the backend error of `search_memory` / `list_memories` / `recall_thread`) and the JSON with `"status": "error"` (e.g. a non-numeric `importance`). The error text stays first, so the `Error: ` prefix of §4.4 is unchanged. (v1.7.2 sent these without the reminder.) Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
 
 ### 4.3.1 Retrieval Extension Tools
 
@@ -881,7 +915,7 @@ All tool responses are a single `TextContent` element. `save_memory` / `delete_m
 
 **Time zone (v1.7.1)**: a date-only value or a datetime without an offset is read in the **server's local time zone** — the same clock as `saved=` in the output ([§3.14](#314-search-result-shaping-v170)) — and converted to epoch seconds. A value with an offset (`2026-11-13T09:00:00+09:00`, `…Z`) is used as given. `T` or a space may separate date and time.
 
-**Unreadable values (v1.7.1)**: if `since` or `until` is given but cannot be parsed (`yesterday`, `2026/11/13`, `2026-13-01`), the search is not run and the response is a `TextContent` `Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 or 2026-11-13T09:00:00+09:00 (got '<value>')` (`until` likewise). If `since` is later than `until`: `Error: since is later than until`. An empty string means "no bound".
+**Unreadable values (v1.7.1)**: if `since` or `until` is given but cannot be parsed (`yesterday`, `2026/11/13`, `2026-13-01`), the search is not run and the response is a `TextContent` `Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 or 2026-11-13T09:00:00+09:00 (got '<value>')` (`until` likewise). If `since` is later than `until`: `Error: since is later than until`. Since v1.7.3 the §4.3 reminder follows either text. An empty string means "no bound".
 
 > **⚠️ Why (v1.7.1, Lite review LM9)**: v1.7.0 treated an unparsable value as "no filter", so `since="yesterday"` returned results from the whole store and the LLM answered as if they were filtered. It also read offset-less values as UTC while `saved=` shows local time, so on a UTC+9 host `since="2026-11-13"` dropped what `saved=` showed as saved between 00:00 and 08:59 that day. Free made the same change (v1.5.0).
 
@@ -893,7 +927,7 @@ Either bound may be specified alone. These do not alter the ranking formula. The
 
 | Name | Inputs | Behavior |
 | --- | --- | --- |
-| `recall_thread` | `turn_id: string, before?: int (default 2), after?: int (default 2)` | Returns markdown that interleaves the entry with the given `turn_id` plus the `before` preceding and `after` following entries, sorted ascending by save timestamp. The Lite implementation scans all stored entries (parent documents, standalone memories, and chunks) sharing the same `turn_id` and returns them in chronological order. When nothing matches, returns the JSON string `{"status":"not_found","turn_id":...}`. |
+| `recall_thread` | `turn_id: string, before?: int (default 2), after?: int (default 2)` | Returns markdown that interleaves the entry with the given `turn_id` plus the `before` preceding and `after` following entries, sorted ascending by save timestamp. The Lite implementation scans all stored entries (parent documents, standalone memories, and chunks) sharing the same `turn_id` and returns them in chronological order. **A chunk whose parent document still exists is skipped** (the parent carries the full verbatim body, tagged `[doc×N]`); **a chunk whose parent is gone (an orphan, §3.11) is listed as its own entry with its chunk text** — the same graceful degrade as `search_memory` (v1.7.3; v1.7.2 skipped every chunk, so a turn whose parent had expired came back `not_found` while `search_memory` still showed its chunks). When nothing matches, returns the JSON string `{"status":"not_found","turn_id":...}`. |
 
 **Operational rule**: The connected LLM SHOULD pass a hit's `turn_id` to `recall_thread` when the snippet returned by `search_memory` is insufficient to answer. End users do not need to invoke this tool directly.
 
@@ -1250,7 +1284,7 @@ n3mcmcp-lite/
 | `TestParentDocRecall` | Verbatim recall of fictional "Shiranui" city doc, chunk→parent collapse, `[doc×N]` rendering, parent→chunk cascade delete | Parent document (§3.11) |
 | `TestEncodingSafetyE2E` | `save_memory` with surrogate-laced content does not raise, surrogate-only payload returns empty-content error, `search_memory` with surrogate-laced query returns cleanly | Encoding safety end-to-end (§3.13) |
 
-### Layer 4: `tests/test_regressions.py` (v1.7.0 – v1.7.2)
+### Layer 4: `tests/test_regressions.py` (v1.7.0 – v1.7.3)
 
 Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC_REDIS_TEST_URL`.
 
@@ -1278,7 +1312,11 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestRepairReembed` (v1.7.1, *Redis*) | Entries saved without `embedding` get one from `repair_memory` (at most 200 per call, TTL unchanged, `reembedded` / `remaining` reported) |
 | `TestDeleteOwner` (v1.7.1, *Redis*) | `delete_memory` on another owner's id returns `not_found` and deletes nothing; a parent's chunks are deleted from `chunk_ids` |
 | `TestGuardNx` (v1.7.1, *Redis*) | Two simultaneous saves of the same content store one record; a failed write after taking the guard releases it |
-| `TestAccessCountNoGhost` (v1.7.1, *Redis*) | A key that expires between the search and the TTL refresh is not recreated by `HINCRBY` |
+| `TestAccessCountNoGhost` (v1.7.1, *Redis*) | A key that expires between the search and the TTL refresh is not recreated by `HINCRBY`; **v1.7.3**: a standalone record and a parent document deleted between pipeline 1 and pipeline 2 of the refresh leave no key at all (no `access_count`-only hash, no `mem:sha:` / `docsha:` guard) |
+| `TestRecallOrphanChunks` (v1.7.3, *Redis*) | With the parent alive, `recall_thread` lists the parent once (`[doc×N]`, full body) and no chunk; after `doc:<id>` is deleted, each chunk of that turn is listed with its chunk text instead of `not_found` |
+| `TestDeleteIdPrefix` (v1.7.3, *Redis*) | `delete_memory` with `doc:<uuid>` cascades like the bare parent id; `mem:<uuid>` deletes a standalone record and its guard; the response `id` is the bare UUID; `doc:doc:<uuid>` (two prefixes) is `not_found` |
+| `TestNudgeOnErrors` (v1.7.3) | The non-numeric `importance` JSON, `Error:` for an unreadable `since`, an unexpected exception and the backend error of `search_memory` each start with their error text and end with the reminder |
+| `TestConditionalWrites` (v1.7.3, *Redis*) | `INCR_IF_EXISTS`, `HSET_IF_EXISTS` and `SET_GUARD_IF_EXISTS` write and keep the TTL when the record exists, and create nothing when it does not; `repair_memory` on a record that disappears after the `SCAN` creates no key and does not count it in `reembedded`; after save, search, refresh and repair every key in the test DB (except the test marker) has a TTL |
 | `TestHangulFiller` (v1.7.1) | `U+3164`, `U+115F`, `U+1160`, `U+FFA0`, `U+2800` alone are rejected as no visible characters; with a visible character they are stored verbatim |
 | `TestPluginHook` (additions, v1.7.1) | `settings.json` is re-read just before writing and replaced atomically; the fallback text names "or the permission script failed" |
 | `TestWeakMatches` (v1.7.2, *Redis*) | With one row passing the floors and `min_results: 3`, two weak rows are added after it, ordered by `filter_score` and marked `_weak`; a candidate below `vector_min_cos` is added with its actual cos; `min_results: 0` adds nothing; nothing is added when enough rows pass; a `limit` smaller than `min_results` caps the total; two chunk hits of one parent document give one weak row, and a parent already in the results is not added again; a candidate with `filter_score` below `1e-6` is never added; **the TTL and `access_count` of a weak row's `mem:` / `doc:` / guard keys do not change** while a normal row's are refreshed; an empty or whitespace-only query adds no weak rows; the default config has `min_results: 3` |

@@ -1310,15 +1310,17 @@ class TestTimeBoundsStrict:
     def test_unreadable_bound_is_an_error(self, cfg, value, monkeypatch):
         self._db(cfg, monkeypatch)
         out = _call("search_memory", {"query": "x", "since": value})
-        assert out == ("Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 "
-                       f"or 2026-11-13T09:00:00+09:00 (got '{value}')")
+        # v1.7.3: the §4.3 reminder follows the error text.
+        assert out.split(TestNudgeOnErrors.REMINDER)[0] == (
+            "Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 "
+            f"or 2026-11-13T09:00:00+09:00 (got '{value}')")
         out = _call("search_memory", {"query": "x", "until": value})
         assert out.startswith("Error: until must be an ISO 8601 date or datetime")
 
     def test_since_after_until(self, cfg, monkeypatch):
         self._db(cfg, monkeypatch)
         out = _call("search_memory", {"query": "x", "since": "2026-11-14", "until": "2026-11-13"})
-        assert out == "Error: since is later than until"
+        assert out.split(TestNudgeOnErrors.REMINDER)[0] == "Error: since is later than until"
 
     def test_local_time_for_offsetless_values(self, monkeypatch):
         import n3mc_mcp.database as D
@@ -1449,6 +1451,215 @@ class TestAccessCountNoGhost:
         assert db.search_memory("ghost")
         assert not redis_client.exists(key)
         assert not list(redis_client.scan_iter("mem:sha:*"))
+
+    # v1.7.3 (DF1): deleted between refresh pipeline 1 (EXPIRE) and pipeline 2.
+    def _delete_between_pipelines(self, db, monkeypatch, delete):
+        real_pipeline = db._client.pipeline
+        real_refresh = db._refresh_ttl
+        made = []
+
+        def pipeline(*a, **kw):
+            p = real_pipeline(*a, **kw)
+            made.append(p)
+            if len(made) == 2:          # pipeline 2 is being built
+                delete()
+            return p
+
+        def refresh(rows):
+            monkeypatch.setattr(db._client, "pipeline", pipeline)
+            try:
+                return real_refresh(rows)
+            finally:
+                monkeypatch.setattr(db._client, "pipeline", real_pipeline)
+        monkeypatch.setattr(db, "_refresh_ttl", refresh)
+
+    def test_standalone_deleted_between_pipelines(self, db, redis_client, fake_embed, monkeypatch):
+        db.cfg.update(ttl_refresh_on_search=True)
+        fake_embed["between"] = axis(0)
+        res = db.save_memory("deleted between pipelines")
+        self._delete_between_pipelines(
+            db, monkeypatch, lambda: db.delete_memory(res["id"]))
+        assert db.search_memory("between")
+        assert _data_keys(redis_client) == []
+
+    def test_parent_deleted_between_pipelines(self, db, redis_client, fake_embed, monkeypatch):
+        db.cfg.update(ttl_refresh_on_search=True)
+        fake_embed["between"] = axis(0)
+        doc = db.save_memory("between pipelines document. " * 40)
+        self._delete_between_pipelines(
+            db, monkeypatch, lambda: db.delete_memory(doc["parent_id"]))
+        assert db.search_memory("between")
+        assert _data_keys(redis_client) == []
+
+
+def _data_keys(r) -> list:
+    """Every key of the test DB except the test marker."""
+    from tests.conftest import TEST_DB_MARKER
+    return sorted(k for k in r.scan_iter(count=1000) if k != TEST_DB_MARKER.encode())
+
+
+# ── v1.7.3 DF1 / DF2 conditional writes (§3.3) ───────────────────────────────
+
+@requires_redis
+class TestConditionalWrites:
+    def test_scripts_write_only_existing_keys(self, db, redis_client, fake_embed):
+        res = db.save_memory("conditional target")
+        key = f"mem:{res['id']}"
+        redis_client.expire(key, 1000)
+        assert db._script("INCR_IF_EXISTS")(keys=[key], args=["access_count", 1]) == 1
+        assert db._script("HSET_IF_EXISTS")(keys=[key], args=["embedding", b"x"]) == 1
+        assert db._script("SET_GUARD_IF_EXISTS")(keys=[key, "mem:sha:g1"], args=[b"id", 500]) == 1
+        assert redis_client.hget(key, "access_count") == b"1"
+        assert redis_client.hget(key, "embedding") == b"x"
+        assert 0 < redis_client.ttl(key) <= 1000
+        assert 0 < redis_client.ttl("mem:sha:g1") <= 500
+
+        gone = "mem:does-not-exist"
+        assert db._script("INCR_IF_EXISTS")(keys=[gone], args=["access_count", 1]) is None
+        assert db._script("HSET_IF_EXISTS")(keys=[gone], args=["embedding", b"x"]) == 0
+        assert db._script("SET_GUARD_IF_EXISTS")(keys=[gone, "mem:sha:g2"], args=[b"id", 500]) == 0
+        assert not redis_client.exists(gone)
+        assert not redis_client.exists("mem:sha:g2")
+
+    def test_repair_skips_vanished_record(self, db, redis_client, fake_embed, monkeypatch):
+        import n3mc_mcp.database as D
+        good = D.embed
+        monkeypatch.setattr(D, "embed", lambda text, is_query=False: None)
+        res = db.save_memory("vanishes before the vector is written")
+        monkeypatch.setattr(D, "embed", good)
+        key = f"mem:{res['id']}".encode()
+
+        def embed_then_expire(text, is_query=False):
+            redis_client.delete(key)          # TTL fires after the SCAN
+            return good(text, is_query)
+        monkeypatch.setattr(D, "embed", embed_then_expire)
+        out = db.repair_memory()
+        assert (out["reembedded"], out["remaining"]) == (0, 0)
+        assert not redis_client.exists(key)
+        assert all(redis_client.ttl(k) > 0 for k in _data_keys(redis_client))
+
+    def test_repair_no_check_then_write(self, db, redis_client, fake_embed, monkeypatch):
+        """A record that expires right after an EXISTS check must not come
+        back: the existence check belongs inside the write (one script)."""
+        import n3mc_mcp.database as D
+        good = D.embed
+        monkeypatch.setattr(D, "embed", lambda text, is_query=False: None)
+        res = db.save_memory("expires right after a check")
+        monkeypatch.setattr(D, "embed", good)
+        key = f"mem:{res['id']}".encode()
+        real_exists = db._client.exists
+
+        def exists_then_expire(*keys):
+            out = real_exists(*keys)
+            if key in [k if isinstance(k, bytes) else str(k).encode() for k in keys]:
+                redis_client.delete(key)
+            return out
+        monkeypatch.setattr(db._client, "exists", exists_then_expire)
+        db.repair_memory()
+        assert all(redis_client.ttl(k) > 0 for k in _data_keys(redis_client)), [
+            k for k in _data_keys(redis_client) if redis_client.ttl(k) <= 0]
+
+    def test_every_key_has_ttl(self, db, redis_client, fake_embed, monkeypatch):
+        import n3mc_mcp.database as D
+        db.cfg.update(ttl_refresh_on_search=True)
+        fake_embed["ttl"] = axis(0)
+        db.save_memory("ttl audit short record")
+        db.save_memory("ttl audit document body. " * 40)
+        good = D.embed
+        monkeypatch.setattr(D, "embed", lambda text, is_query=False: None)
+        db.save_memory("ttl audit record without vector")
+        monkeypatch.setattr(D, "embed", good)
+        assert db.search_memory("ttl audit")
+        db.repair_memory()
+        keys = _data_keys(redis_client)
+        assert keys
+        assert all(redis_client.ttl(k) > 0 for k in keys), [
+            k for k in keys if redis_client.ttl(k) <= 0]
+
+
+# ── v1.7.3 §4.3.1 recall_thread lists orphan chunks ─────────────────────────
+
+@requires_redis
+class TestRecallOrphanChunks:
+    def test_parent_alive_then_gone(self, db, redis_client, fake_embed):
+        body = ("orphan thread document body. " * 40).strip()  # save strips
+        doc = db.save_memory(body, turn_id="T-orphan")
+        entries = db.recall_thread("T-orphan", 0, 0)
+        assert [(e["id"], e["tag"]) for e in entries] == [
+            (doc["parent_id"], f"[doc×{doc['chunks']}]")]
+        assert entries[0]["content"] == body
+
+        redis_client.delete(f"doc:{doc['parent_id']}")
+        entries = db.recall_thread("T-orphan", 0, 0)
+        assert sorted(e["id"] for e in entries) == sorted(doc["ids"])
+        assert all(e["tag"] == "" and e["content"] and e["content"] in body
+                   for e in entries)
+
+    def test_tool_not_found_only_when_nothing_left(self, db, redis_client, fake_embed, monkeypatch):
+        import n3mc_mcp.server as S
+        monkeypatch.setattr(S, "_db", db)
+        doc = db.save_memory("orphan tool document body. " * 40, turn_id="T-tool")
+        redis_client.delete(f"doc:{doc['parent_id']}")
+        out = _call("recall_thread", {"turn_id": "T-tool"})
+        assert not out.startswith('{"status": "not_found"')
+        assert "orphan tool document body." in out
+
+
+# ── v1.7.3 §4.3 delete_memory id prefix ──────────────────────────────────────
+
+@requires_redis
+class TestDeleteIdPrefix:
+    def test_doc_prefix_cascades(self, db, redis_client, fake_embed):
+        doc = db.save_memory("prefixed delete document. " * 40)
+        res = db.delete_memory(f"doc:{doc['parent_id']}")
+        assert res == {"status": "deleted", "id": doc["parent_id"],
+                       "chunks_deleted": doc["chunks"]}
+        assert _data_keys(redis_client) == []
+
+    def test_mem_prefix_deletes_standalone(self, db, redis_client, fake_embed):
+        res = db.save_memory("prefixed delete record")
+        out = db.delete_memory(f"mem:{res['id']}")
+        assert out == {"status": "deleted", "id": res["id"]}
+        assert _data_keys(redis_client) == []
+
+    def test_two_prefixes_not_found(self, db, redis_client, fake_embed):
+        doc = db.save_memory("double prefix document. " * 40)
+        out = db.delete_memory(f"doc:doc:{doc['parent_id']}")
+        assert out["status"] == "not_found"
+        assert redis_client.exists(f"doc:{doc['parent_id']}")
+
+
+# ── v1.7.3 §4.3 the reminder follows error responses too ────────────────────
+
+class TestNudgeOnErrors:
+    REMINDER = "\n\n---\n_Reminder:"
+
+    def _ok(self, text, head):
+        assert text.startswith(head), text
+        assert self.REMINDER in text, text
+
+    def test_backend_error(self, cfg, monkeypatch):
+        from n3mc_mcp.database import Database
+        import n3mc_mcp.server as S
+        d = Database(dict(cfg, redis_url=BAD_URL))
+        assert d.connect(quiet=True) is False
+        monkeypatch.setattr(S, "_db", d)
+        self._ok(_call("search_memory", {"query": "x"}), "Error: memory backend unreachable.")
+
+    @requires_redis
+    def test_tool_errors(self, db, monkeypatch):
+        import n3mc_mcp.server as S
+        monkeypatch.setattr(S, "_db", db)
+        self._ok(_call("save_memory", {"content": "x", "importance": "high"}),
+                 '{"saved": false, "status": "error"')
+        self._ok(_call("search_memory", {"query": "x", "since": "yesterday"}),
+                 "Error: since must be an ISO 8601 date or datetime")
+
+        def boom(*a, **k):
+            raise RuntimeError("unexpected")
+        monkeypatch.setattr(db, "list_memories", boom)
+        self._ok(_call("list_memories", {}), "Error: unexpected")
+        self._ok(_call("no_such_tool", {}), "Error: unknown tool")
 
 
 # ── LL5 Hangul fillers / braille blank ───────────────────────────────────────
