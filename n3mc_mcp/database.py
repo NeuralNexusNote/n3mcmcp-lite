@@ -253,6 +253,35 @@ def _time_filter_clause(since: str = "", until: str = "") -> str:
 
 # ── main class ───────────────────────────────────────────────────────────────
 
+# Spec §3.3 (v1.7.3, DF1 / DF2): writes to a record that already exists run as
+# one Lua script that checks the record and writes in the same atomic step.
+# HINCRBY / HSET / SET create their key when it is missing; checking first and
+# writing later let a record deleted or expired in between come back with no
+# TTL (or left a guard without a record).
+_LUA_SCRIPTS = {
+    "INCR_IF_EXISTS": """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
+end
+return false
+""",
+    "HSET_IF_EXISTS": """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+  return 1
+end
+return 0
+""",
+    "SET_GUARD_IF_EXISTS": """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+  return 1
+end
+return 0
+""",
+}
+
+
 class Database:
     # Spec §3.9 (v1.7.1, LH2): read/write timeout. A Redis that accepted the
     # connection but stopped answering fails within this many seconds.
@@ -266,6 +295,20 @@ class Database:
         # Spec §3.9 step 3 (v1.7.1, LM3): "index missing" state.
         self._index_ok = False
         self._index_error = ""
+        # §3.3 (v1.7.3): registered Lua scripts, per client.
+        self._scripts: dict = {}
+        self._scripts_client = None
+
+    def _script(self, name: str):
+        """The registered §3.3 script *name* for the current client (redis-py
+        `register_script`; run it with `client=pipe` to queue it in a pipeline,
+        redis-py loads it if the server does not know it yet)."""
+        if self._scripts_client is not self._client:
+            self._scripts = {}
+            self._scripts_client = self._client
+        if name not in self._scripts:
+            self._scripts[name] = self._client.register_script(_LUA_SCRIPTS[name])
+        return self._scripts[name]
 
     # ── §3.9 connection ──────────────────────────────────────────────────────
 
@@ -570,9 +613,10 @@ class Database:
                         model_down = True
                         remaining += 1
                         continue
-                    # Only if the key still exists (it may have expired).
-                    if self._client.exists(k):
-                        self._client.hset(k, b"embedding", vec)
+                    # §3.3 (v1.7.3, DF2): only while the key still exists,
+                    # checked and written in one script — a key that expired
+                    # since the SCAN is skipped, never recreated without TTL.
+                    if self._script("HSET_IF_EXISTS")(keys=[k], args=[b"embedding", vec]):
                         reembedded += 1
             if cursor == 0:
                 break
@@ -1141,12 +1185,15 @@ class Database:
         Pipeline 1: EXPIRE the hit, its parent doc and ALL sibling chunks.
         Pipeline 2 (v1.7.1): only where the EXPIRE of the hit / parent
         returned 1 (the key still exists):
-          - HINCRBY access_count on the hit (LL4 — never recreate an expired
+          - access_count +1 on the hit (LL4 — never recreate an expired
             key as a hash without TTL),
           - reset the dedup guard with the record (LM7): `mem:sha:<sha1>` for
             a standalone record, `docsha:<sha1>` for a parent document. The
             sha1 is recomputed from the stored content (same `_sha1` as
             save_memory). A chunk has no guard of its own.
+        v1.7.3 (DF1): both writes are the §3.3 conditional scripts
+        (INCR_IF_EXISTS / SET_GUARD_IF_EXISTS), so a record deleted between
+        the two pipelines is neither recreated nor given a guard again.
         """
         if not rows:
             return
@@ -1177,22 +1224,27 @@ class Database:
             slots.append((c, hit_idx, parent_idx))
         replies = pipe.execute()
 
-        pipe2 = self._client.pipeline(transaction=True)
+        # §3.3 (v1.7.3): scripts are atomic on their own — no MULTI needed.
+        pipe2 = self._client.pipeline(transaction=False)
+        incr = self._script("INCR_IF_EXISTS")
+        guard = self._script("SET_GUARD_IF_EXISTS")
         queued = 0
         for c, hit_idx, parent_idx in slots:
             if hit_idx is not None and replies[hit_idx]:
                 # access_count only on the chunk that actually matched.
-                pipe2.hincrby(c["key"], "access_count", 1)
+                incr(keys=[c["key"]], args=["access_count", 1], client=pipe2)
                 queued += 1
             content = c.get("content") or ""
             if parent_idx is not None:
                 if replies[parent_idx] and content:
                     pid = c.get("id", "")
-                    pipe2.set(f"docsha:{_sha1(content)}", pid.encode(), ex=ttl)
+                    guard(keys=[c["_parent_key"], f"docsha:{_sha1(content)}"],
+                          args=[pid.encode(), ttl], client=pipe2)
                     queued += 1
             elif not c.get("parent_id") and hit_idx is not None and replies[hit_idx] and content:
                 mid = c.get("id", "")
-                pipe2.set(f"mem:sha:{_sha1(content)}", mid.encode(), ex=ttl)
+                guard(keys=[c["key"], f"mem:sha:{_sha1(content)}"],
+                      args=[mid.encode(), ttl], client=pipe2)
                 queued += 1
         if queued:
             pipe2.execute()
@@ -1521,6 +1573,13 @@ class Database:
             return {"status": "error", "reason": self.hint()}
 
         owner_id = self.cfg["owner_id"]
+        # §4.3 (v1.7.3): accept `<uuid>`, `doc:<uuid>` or `mem:<uuid>` — one
+        # leading prefix is removed (§3.12 bare-UUID rule).
+        mem_id = (mem_id or "").strip()
+        for prefix in ("doc:", "mem:"):
+            if mem_id.startswith(prefix):
+                mem_id = mem_id[len(prefix):]
+                break
         doc_key = f"doc:{mem_id}"
         d = self._client.hgetall(doc_key)
         if d:
@@ -1763,12 +1822,13 @@ class Database:
 
         owner_id = self.cfg["owner_id"]
         all_entries: list[dict] = []
+        # v1.7.3: chunks are held back until the doc:* scan shows whether
+        # their parent still exists (then the parent carries the full body)
+        # or is gone (an orphan, listed with its own chunk text — §3.11).
+        chunk_entries: list[tuple[str, dict]] = []
+        doc_ids: set[str] = set()
 
-        # mem: entries — standalone memories only (parent_id == "").
-        # Chunks (parent_id != "") are skipped: their parent doc is already
-        # collected in the doc:* scan below, which returns the full verbatim body.
-        # This mirrors search_memory's chunk→parent resolution so recall_thread
-        # never surfaces fragmented chunk text.
+        # mem: entries — standalone memories, and chunks (held back).
         cursor = 0
         while True:
             cursor, keys = self._client.scan(cursor, match="mem:*", count=200)
@@ -1788,17 +1848,18 @@ class Database:
                     continue
                 if oid != owner_id:
                     continue
-                if pid:
-                    # Skip chunks — parent doc carries the full body.
-                    continue
-                all_entries.append({
+                entry = {
                     "id":              (d[2].decode() if d[2] else ""),
                     "content":         (d[3].decode("utf-8") if d[3] else ""),
                     "timestamp":       (d[4].decode() if d[4] else ""),
                     "timestamp_epoch": _to_float(d[5].decode() if d[5] else "0", 0.0),
                     "turn_id":         (d[6].decode() if d[6] else ""),
                     "tag":             "",
-                })
+                }
+                if pid:
+                    chunk_entries.append((pid, entry))
+                else:
+                    all_entries.append(entry)
             if cursor == 0:
                 break
 
@@ -1818,6 +1879,8 @@ class Database:
                     oid = d[0].decode() if d[0] else ""
                 except Exception:
                     continue
+                # Any existing parent (whatever its owner) hides its chunks.
+                doc_ids.add(raw_key[len("doc:"):])
                 if oid != owner_id:
                     continue
                 chunk_count = d[6].decode() if d[6] else "?"
@@ -1832,6 +1895,9 @@ class Database:
                 })
             if cursor == 0:
                 break
+
+        # Orphan chunks (parent gone) are listed with their own text (v1.7.3).
+        all_entries.extend(e for pid, e in chunk_entries if pid not in doc_ids)
 
         if not all_entries:
             return []

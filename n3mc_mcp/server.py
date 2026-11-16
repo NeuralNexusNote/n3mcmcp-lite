@@ -409,8 +409,10 @@ def _backend_error(name: str) -> list[TextContent]:
     elif name == "repair_memory":
         body = {"status": "error", "message": hint}
     else:  # search_memory / list_memories / recall_thread
+        # §4.3 (v1.7.3): error responses end with the reminder too.
         return [TextContent(type="text",
-                            text=f"Error: memory backend unreachable. {hint}")]
+                            text=f"Error: memory backend unreachable. {hint}"
+                            + _NUDGE_GENERIC)]
     return [TextContent(type="text",
                         text=json.dumps(body, ensure_ascii=False) + _NUDGE_GENERIC)]
 
@@ -448,7 +450,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                         "saved":  False,
                         "status": "error",
                         "reason": f"importance must be numeric (got {raw_imp!r})",
-                    }, ensure_ascii=False),
+                    }, ensure_ascii=False) + _NUDGE_GENERIC,
                 )]
             result = _db.save_memory(
                 arguments.get("content", ""),
@@ -527,7 +529,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             return [TextContent(type="text", text=text + _NUDGE_GENERIC)]
 
         else:
-            return [TextContent(type="text", text=f"Error: unknown tool '{name}'")]
+            return [TextContent(type="text",
+                                text=f"Error: unknown tool '{name}'" + _NUDGE_GENERIC)]
 
     except _CONN_ERRORS:
         # Lost during the tool: report it as the backend error, never as
@@ -535,7 +538,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         _db.mark_disconnected()
         return _backend_error(name)
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {e}")]
+        # §4.3 (v1.7.3): the `Error:` text stays first, the reminder follows.
+        return [TextContent(type="text", text=f"Error: {e}" + _NUDGE_GENERIC)]
 
 
 # ── startup (spec §3.9) ──────────────────────────────────────────────────────

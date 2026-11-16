@@ -9,7 +9,61 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The embedding model is built from the local Hugging Face cache first**
+  (§3.9 step 4, JP/EN spec): `local_files_only=True` with the Hub marked
+  offline, falling back to the normal (downloading) construction only when
+  that fails. Found by the §10-1 Evidence Report: the first `search_memory`
+  after `initialize` waited for a construction that asked the Hub about
+  every cached file, and took 5.7–5.9 s against the 3.0 s target; it now
+  takes 1.8–2.0 s (Windows 11, 2026-11-16). No network call at start when
+  the model is cached.
+
+## [1.10.2] — 2026-11-16
+
+Spec v1.7.2 → v1.7.3 (JP/EN): writes to an existing record are checked and
+made in one atomic step (findings DF1 / DF2 of a data-flow trace), and four
+gaps between §4.3 and the code found by a clause-by-clause comparison are
+closed; code regenerated from the EN spec. No change to the tool schemas or
+`config.json`.
+
+### Changed
+- **Every error response ends with the auto-save reminder** (§4.3): the
+  JSON for a non-numeric `importance`, the `Error:` text for an unreadable
+  `since` / `until`, an unexpected exception, an unknown tool and the
+  backend error of `search_memory` / `list_memories` / `recall_thread`.
+  The error text stays first. A caller that compared the whole `Error:`
+  text must now compare the part before `\n\n---\n`.
+- **`delete_memory` accepts `doc:<uuid>` and `mem:<uuid>`** besides the
+  bare UUID; one such prefix is removed. The response's `id` is the bare
+  UUID.
+
+### Fixed
+- **`recall_thread` lists orphan chunks**: a chunk whose parent document is
+  gone is listed with its own text (as `search_memory` does, §3.11). It
+  skipped every chunk, so a turn whose parent had expired came back
+  `not_found`. A chunk whose parent exists is still skipped.
+- **Spec only — `protocolVersion`** (§4.2): the spec said the server
+  advertises `2024-11-05`; the MCP SDK negotiates it (the client's version
+  when supported). The spec now says so; the code was already right.
+- **No key without a TTL after a delete during a search** (DF1): the TTL
+  refresh after a search sent `EXPIRE` in one pipeline and the
+  `access_count` increment and the guard reset in a second one. A record
+  deleted by `delete_memory` (for example from another server process on
+  the same Redis) between the two came back as a hash holding only
+  `access_count`, with no TTL, and its dedup guard was written again — the
+  same content was then rejected as `duplicate` for 7 days although no
+  record existed. Both writes are now Lua scripts that write only while
+  the record exists (`INCR_IF_EXISTS`, `SET_GUARD_IF_EXISTS`, spec §3.3).
+- **No key without a TTL from `repair_memory`** (DF2): a record that
+  expired between the existence check and the write of its new vector came
+  back holding only `embedding`, with no TTL. The check and the write are
+  now one script (`HSET_IF_EXISTS`); a vanished record is skipped and not
+  counted in `reembedded`.
+
+Such a hash has no `owner_id`, so no search showed it and no delete removed
+it; it stayed in Redis until Redis was restarted. Both gaps were
+milliseconds wide.
 
 ## [1.10.1] — 2026-11-15
 
