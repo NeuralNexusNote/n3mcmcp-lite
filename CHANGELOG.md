@@ -9,6 +9,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Tests
+- `test_foreign_key_leaves_config_and_notices` expects the host:port of the
+  Redis under test (`N3MC_REDIS_TEST_URL`) instead of a fixed `:6390`, so it
+  passes against a dedicated Redis on any port (second review of 2026-11-17,
+  T01). No change in the package. Tests: 329 passed (Windows 11, Python 3.12,
+  Redis Stack in a throw-away container on port 56390).
+
 ## [1.12.1] — 2026-11-17
 
 Spec v1.9.0 → v1.9.1 (JP/EN). The instructions the server sends to the model

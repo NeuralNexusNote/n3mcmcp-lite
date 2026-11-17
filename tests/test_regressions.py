@@ -1197,7 +1197,9 @@ class TestEnforceEphemeral:
         db.enforce_ephemeral()
         assert calls == []
         notes = [n for n in db.cfg["_notices"] if n.startswith("shared_redis")]
-        assert len(notes) == 1 and ":6390" in notes[0]
+        # T01 (second review of 2026-11-17): the host:port of the Redis under test, not a fixed port
+        from n3mc_mcp.database import _where
+        assert len(notes) == 1 and _where(db.cfg["redis_url"]) in notes[0]
         assert "docker run -d --name redis-stack" in notes[0]
 
     def test_refused_config_is_a_notice_not_a_failure(self, db, redis_client, monkeypatch):
