@@ -9,6 +9,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-11-17
+
+Spec v1.7.3 → v1.8.0 (JP/EN). The access-frequency boost is now off by
+default and hiragana-only query tokens are dropped, so search results can
+rank differently than in 1.10.2; that is why this is a minor release.
+
 ### Changed
 - **Hiragana-only query tokens are dropped** (§3.7, JP/EN spec, 2026-11-17):
   bigrams made only of hiragana (`して`, `ます`, `どう`) are dropped from
