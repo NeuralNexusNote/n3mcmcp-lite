@@ -9,6 +9,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Fixed
+- **A failed save no longer blocks the same content for 7 days** (§3.8 (A) /
+  (B) step 4, §3.13 (2); final review of 2026-11-18, L-01): any failure after
+  the `mem:sha:` / `docsha:` guard is taken — also while the record is being
+  built, not only a failed pipeline — releases the guard, and `agent_name`,
+  `session_id` and `turn_id` have lone surrogates removed like `content`.
+  Until then a lone surrogate in those fields, or a non-string `turn_id` from
+  an older MCP SDK, left the guard behind and the content was answered
+  `duplicate` although nothing was stored. Normal saves and output are
+  unchanged.
+- **The plugin's SessionStart hook writes ASCII-only JSON** (§8,
+  `ensure_ascii=True`; L-03): its stdout is cp932 on a Japanese Windows, and
+  the `uvx` hint contains Japanese. The text after JSON decoding is the same.
+
 ### Docs
 - The specification (EN / JP, §3.8 and §3.12) and the README say that one
   Redis is for one installation (one `owner_id`): if several PCs or people
@@ -16,8 +30,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   one owner saved is `duplicate` for the other until it expires, and one
   owner's records can fill the search candidates so the other's are not
   found (second review of 2026-11-17, L01 / L02). No change in behavior.
+- Spec (EN / JP): §3.3 / §3.4 describe the guard as it works (taken with
+  `SET NX` before the record's pipeline, released on failure) instead of "one
+  pipeline, so a guard without a record cannot exist"; §3.5 lists `turn_id`
+  in `mem:`, `doc:` and the index; §5 rule 7 no longer calls the Pro build
+  "coming soon"; the §6 note on several accounts no longer says they can share
+  a Redis through the same `redis_url` (L-02, L-04). README (EN / JP): the
+  "Team & organization support" line now says that memories are not shared
+  between people.
+
+### Chore
+- `tests/eval_uvx_missing.py` finds the folders to remove from `PATH` (the
+  ones that hold `uvx`) instead of naming a developer's folders;
+  `.claude/settings.json` (local permissions) is no longer tracked and is
+  ignored; `.claude-plugin/marketplace.json` `metadata.version` is the package
+  version (1.12.1, was 1.6.2) (L-05).
 
 ### Tests
+- New: `TestGuardReleasedOnAnyFailure`, `TestPluginHookAsciiStdout`,
+  `TestPublicRepoHygiene` (final review of 2026-11-18). Each fails on 1.12.1
+  except the check that plain fields are stored unchanged.
 - `test_foreign_key_leaves_config_and_notices` expects the host:port of the
   Redis under test (`N3MC_REDIS_TEST_URL`) instead of a fixed `:6390`, so it
   passes against a dedicated Redis on any port (second review of 2026-11-17,

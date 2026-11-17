@@ -281,9 +281,9 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 
 > **⚠️ 実装注意（redis-py 8.0+ / RESP3）**：redis-py 8.0 から `from_url()` の既定プロトコルが **RESP3** になった。`decode_responses=False` と RESP3 を併用すると `FT.SEARCH` の応答が **bytes キーの dict** として届き、`Result.from_resp3` のパースが失敗して**検索結果が常に 0 件**になる。**現行実装はこれを (a) `pyproject.toml` で `redis<8.0.0` をピンし、かつ (b) `FT.SEARCH` が dict 応答を返した場合のハンドリングを併用して吸収している。** 新しい redis-py を意図的に使う場合は、接続時に **`protocol=2`（RESP2）を明示**すること（`redis.from_url(url, decode_responses=False, protocol=2)`）。この設定は接続クライアント・テストフィクスチャの**両方**に適用する。
 
-**TTL**：`mem:<uuid>` への `HSET` は毎回 `EXPIRE mem:<uuid> <ttl_seconds>` と（`PIPELINE` でアトミックに）組み合わせる。兄弟である `mem:sha:<sha1>` ガードは同じパイプライン内で `SET ... EX <ttl_seconds>` にて書き込む。既定 TTL は 604 800 秒（7 日）。
+**TTL**：`mem:<uuid>` への `HSET` は毎回、同じパイプラインで `EXPIRE mem:<uuid> <ttl_seconds>` と組み合わせる。兄弟である `mem:sha:<sha1>` ガードは、そのパイプラインより**前に** `SET … NX EX <ttl_seconds>` で取る（§3.8）。TTL は同じになる。既定 TTL は 604 800 秒（7 日）。
 
-**パイプラインのアトミック性**：3 コマンド（`HSET`・`EXPIRE`・`SET`）を 1 パイプラインで送信するため、「レコードはあるが TTL なし」「sha ガードはあるがレコードなし」のような部分失敗の交錯状態は発生しない。長文の経路も v1.7.1 から同じ規則に従う：すべてのチャンクの埋め込みを計算し終え、`docsha:` ガードを `SET … NX EX` で取ったあとで、親ドキュメントと**すべての**チャンクを **1 つの**パイプラインで書く。そのパイプラインが失敗したら、ガードを削除し直す（§3.8 (B)）。パイプラインは `transaction=True`（`MULTI`/`EXEC`）で送る。
+**パイプラインのアトミック性とガード**：レコードとその `EXPIRE` は 1 つのパイプラインで送るので、「レコードはあるが TTL なし」は起きない。ガードは先に、単独で書く。同じ内容を同時に 2 回保存したとき、どちらが勝つかを `SET NX` が決める（§3.8）。そのため、短いあいだ、レコードのないガードがある。ガードを取ったあとで何かが失敗したら — レコードを組み立てるときでも、パイプラインを送るときでも — ガードを（ベストエフォートで）削除し直し、同じ内容をもう一度保存できるようにする（§3.8 (A) 手順 4、(B) 手順 4）。その削除も失敗したとき、またはその間にプロセスが止まったときだけ、ガードは TTL が切れるまで残る。長文の経路も v1.7.1 から同じ規則に従う：すべてのチャンクの埋め込みを計算し終え、`docsha:` ガードを `SET … NX EX` で取ったあとで、親ドキュメントと**すべての**チャンクを **1 つの**パイプラインで書く。パイプラインは `transaction=True`（`MULTI`/`EXEC`）で送る。（2026-11-18 の最終レビュー（L-04）までは、この段落は「ガードもレコードと同じパイプラインで送るので、レコードのないガードは起きない」と書いていた。コードは v1.7.1 から、先にガードを取っている。）
 
 **ガードはレコードの TTL に従う（v1.7.1）**：検索ヒットでレコードの TTL を設定し直すとき（§3.11／§3.14 手順 7）、そのレコードの重複ガードも一緒に設定し直す — 単独レコードなら `SET mem:sha:<sha1> <id> EX <ttl_seconds>`、親ドキュメントなら `SET docsha:<sha1> <parent_id> EX <ttl_seconds>`。ただし**レコードがまだあるときだけ**で、下の条件付きスクリプト `SET_GUARD_IF_EXISTS` を使う（v1.7.3）。`<sha1>` は保存済みの本文から、`save_memory` と同じ関数（NFKC 正規化したテキストの SHA-1）で計算し直すので、以前のバージョンで保存したレコードにもフィールドの追加は要らない。チャンクには自分のガードがなく、親のガードは親と一緒に設定し直される。
 
@@ -323,7 +323,7 @@ return 0
 
 ### 3.4 揮発性の厳守（変更・最適化禁止）
 
-`save_memory` 呼び出し時、HSET + EXPIRE + sha1 ガードを単一パイプラインで完結させる — バッチ化なし、キューイングなし。`save_memory` が応答を返す時点で、キーには有限の TTL が設定されていなければならない。
+`save_memory` 呼び出し時、sha1 ガードを取り（`SET NX EX`）、HSET + EXPIRE を 1 つのパイプラインで書く。どちらも同じ呼び出しの中で行う（§3.3、§3.8） — バッチ化なし、キューイングなし。`save_memory` が応答を返す時点で、キーには有限の TTL が設定されていなければならない。
 
 **以下は絶対に禁止（「性能」や「永続化」目的であっても）：**
 - `EXPIRE` なしの書き込み（＝無限 TTL）。
@@ -358,6 +358,7 @@ mem:<uuid>                  HASH（メモリレコード or チャンク）
     local_id        string      TAG
     agent_name        string      TAG
     session_id      string      TAG
+    turn_id         string      TAG save_memory の turn_id（ないときは空文字列）
     importance      number      0.5〜2.0（save_memory 時指定、既定 1.0）
     access_count    number      検索ヒット回数（頻度ブースト用）
     parent_id       string      TAG 親ドキュメント id（独立メモリなら空文字列）
@@ -377,6 +378,7 @@ doc:<uuid>                  HASH（親ドキュメント — 長文 verbatim 保
     local_id        string
     agent_name        string
     session_id      string
+    turn_id         string      save_memory の turn_id（ないときは空文字列）
     chunk_count     number      生成されたチャンク数
     chunk_ids       string      子チャンク id の空白区切りリスト（兄弟チャンク TTL 同時延長用）
     TTL                         ttl_seconds
@@ -394,6 +396,7 @@ n3mc_idx                    RediSearch インデックス、ON HASH PREFIX 1 mem
         local_id        TAG
         agent_name        TAG
         session_id      TAG
+        turn_id         TAG
         importance      NUMERIC
         access_count    NUMERIC
         parent_id       TAG
@@ -559,7 +562,7 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
 1. **完全一致（O(1)）** — `EXISTS mem:sha:<sha1(content)>`。キーが存在すれば `{"status": "duplicate", "saved": false}` を返す。
 2. 埋め込みを計算する。
 3. **ガードをアトミックに取る（v1.7.1）** — `SET mem:sha:<sha1> <id> NX EX <ttl_seconds>`。何も返らなければ、同じ内容の別の保存が先に取ったので `duplicate` を返す。（手順 1 は明らかな重複で埋め込みを計算しないためだけのもので、決めるのは手順 3。v1.7.0 の `EXISTS` → 書き込みでは、同じ内容を同時に 2 回保存すると両方が通っていた。）
-4. `HSET mem:<id>` + `EXPIRE` をパイプラインで送る。失敗したら、手順 3 で取ったガードを（ベストエフォートで）削除して同じ内容をもう一度保存できるようにしてから、エラーを報告する。
+4. `HSET mem:<id>` + `EXPIRE` をパイプラインで送る。手順 3 でガードを取ったあとで**何かが**失敗したら — レコードのフィールドを組み立てるときでも、パイプラインを送るときでも — ガードを（ベストエフォートで）削除して同じ内容をもう一度保存できるようにしてから、エラーを報告する。（2026-11-18 の最終レビュー（L-01）までは、パイプラインの失敗でだけ削除していた。フィールドを組み立てるときの失敗 — `agent_name`・`session_id`・`turn_id` の単独のサロゲートや、文字列でない値（入力の型を確かめない古い MCP SDK からの `turn_id: 12` など）— ではガードが残り、何も保存されていないのに、その内容は `ttl_seconds` のあいだ `duplicate` と答えられた。）
 
 **(B) マルチチャンクパス**（本文が `chunk_threshold` 超）：重複判定は**親ドキュメント全文**のレベルで行う。
 
@@ -570,7 +573,7 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
 1. 本文を分割し、**先にすべてのチャンクの埋め込みを計算する**（まだ Redis には書かない）。
 2. ガードを取る：`SET docsha:<sha1(full_text)> <parent_id> NX EX <ttl_seconds>`。何も返らなければ、既存の `parent_id` を付けて `duplicate` を返す。
 3. `doc:<parent_id>`（HSET + EXPIRE）と**すべての**チャンク（それぞれ HSET + EXPIRE。チャンクごとの sha ガード無し、各チャンクの `parent_id` フィールドに親 ID を格納）を **1 つの**パイプラインで書く。
-4. 手順 3 が失敗したら、`docsha:` を（ベストエフォートで）削除してエラーを報告する。これで書きかけのものは残らず、同じ本文をもう一度保存できる。
+4. 手順 2 でガードを取ったあとで**何かが**失敗したら — パイプラインを組み立てるときでも、送るときでも — `docsha:` を（ベストエフォートで）削除してエラーを報告する。これで書きかけのものは残らず、同じ本文をもう一度保存できる（L-01。(A) の手順 4 と同じ）。
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LM1）**：v1.7.0 は親と `docsha:` を最初のパイプラインで書き、そのあとでチャンクの埋め込みを計算してチャンクを書いていた。その間で失敗する（接続断、埋め込みの例外）と、チャンクのない親とガードが残った：文書は見つからず（検索はチャンクにしかヒットしない）、再保存は 7 日間 `duplicate` で拒否された（再現済み）。
 
@@ -741,8 +744,10 @@ for _stream_name in ("stdin", "stdout", "stderr"):
             pass
 ```
 
-**(2) 孤立サロゲートのサニタイズ** — `save_memory.content` および
-`search_memory.query` は、`.encode("utf-8")` を伴うあらゆる経路の手前で
+**(2) 孤立サロゲートのサニタイズ** — `save_memory.content`・
+`save_memory.agent_name`・`save_memory.session_id`・`save_memory.turn_id`
+（この 3 つは 2026-11-18 の最終レビュー（L-01）から。サロゲートのない値は
+変わらない）および `search_memory.query` は、`.encode("utf-8")` を伴うあらゆる経路の手前で
 `sanitize_surrogates()` を通過する。孤立 UTF-16 サロゲートハーフ
 （`U+D800`–`U+DFFF`）は、Windows サブプロセスのパイプが渡してくる UTF-8
 バイトを Python のデコーダが `errors="surrogateescape"` でマップした場合に
@@ -977,7 +982,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 4. **ツールエラー時は先にユーザーへ通知（長文生成を先走らない）** — `search_memory` / `save_memory` がサーバーエラーを返した場合（Redis 不達・接続拒否・タイムアウト・「start Redis Stack」ヒント等）、**長文生成に入る前に停止し、ユーザーの言語で端的に通知する**。理由：バックエンド不稼働時は後続の `save_memory` も全て暗黙失敗するため、長文設計ドキュメントや創作設定を作っても **セッション閉鎖時に全て失われる**（ユーザーは記憶層の故障に気付けない）。通知内容：(a) 失敗事実（例「Redis Stack が停止しているようです。メモリ保存・検索が使えません。」）、(b) ツールが返した復旧ヒント（例 `docker run -p 6379:6379 redis/redis-stack-server:latest`）、(c) メモリ無効のまま続行するか・復旧まで待つかをユーザーに確認。短い事実回答は続行してよいが、一度は保存失敗中である旨を必ず触れる。
 5. **ノイズをスキップ** — 挨拶・確認質問・機械的な了解は保存しない。
 6. **明示要求を尊重** — 「これは保存しないで」「忘れて」に従う（`delete_memory` を使用）。
-7. **ユーザーが長期保存を期待したとき 7日 TTL を伝える** — 7日 TTL は LLM からは見える（この INSTRUCTIONS ブロック／`search_memory` のツール説明／`save_memory` 応答の `ttl_seconds` フィールド）が、**人間のユーザーには見えない**。既定は 2 番ルールの通り沈黙自動保存で、毎回 TTL に言及する必要はない。ただしユーザーの発言に「長期保存を期待するシグナル」が現れた場合 — 明示的な永続化語句（"remember this forever" / "don't forget" / "save permanently" /「ずっと覚えておいて」「永続的に保存して」「絶対忘れないで」「次回も覚えていて」）、ユーザーが明らかに時間投資した長文（世界観・キャラ設定・仕様書・コード・設計ドキュメント等）、~5 日以上前に保存したコンテンツへの言及（失効が迫っている）— に限り、ユーザーの言語で**一文だけ**「Lite 版のメモリは保存から7日で自動削除される旨／永続保存が必要なら **Pro 版（sqlite-vec バックエンド、公開予定）** を、当面は別途バックアップを推奨」を添える。保存は通常通り実行し、許可は求めない。通知は**長期シグナル 1 回につき 1 度だけ**（毎ターン・毎保存では出さない）。既に同一会話内で通知済みなら繰り返さない。根拠：この規則がないと、LLM はユーザーが「永続的に保存した」と思い込んでいる内容を沈黙のうちに揮発させ、ユーザーは想起失敗で初めて損失に気付く。
+7. **ユーザーが長期保存を期待したとき 7日 TTL を伝える** — 7日 TTL は LLM からは見える（この INSTRUCTIONS ブロック／`search_memory` のツール説明／`save_memory` 応答の `ttl_seconds` フィールド）が、**人間のユーザーには見えない**。既定は 2 番ルールの通り沈黙自動保存で、毎回 TTL に言及する必要はない。ただしユーザーの発言に「長期保存を期待するシグナル」が現れた場合 — 明示的な永続化語句（"remember this forever" / "don't forget" / "save permanently" /「ずっと覚えておいて」「永続的に保存して」「絶対忘れないで」「次回も覚えていて」）、ユーザーが明らかに時間投資した長文（世界観・キャラ設定・仕様書・コード・設計ドキュメント等）、~5 日以上前に保存したコンテンツへの言及（失効が迫っている）— に限り、ユーザーの言語で**一文だけ**「Lite 版のメモリは保存から7日で自動削除される旨／永続保存が必要なら **Pro 版（sqlite-vec バックエンド）** を、そうでなければ別途バックアップを推奨」を添える。保存は通常通り実行し、許可は求めない。通知は**長期シグナル 1 回につき 1 度だけ**（毎ターン・毎保存では出さない）。既に同一会話内で通知済みなら繰り返さない。根拠：この規則がないと、LLM はユーザーが「永続的に保存した」と思い込んでいる内容を沈黙のうちに揮発させ、ユーザーは想起失敗で初めて損失に気付く。
 
 8. **`skip_code_blocks` サーバーポリシーを尊重** — `save_memory` が `{"status": "skipped_code", "saved": false}` を返した場合、サーバーはトリプルバッククォートフェンスを含むペイロードを拒否する設定になっている（[§6](#6-設定)参照）。これは FastAPI 時代の N3MemoryCore のコード除外挙動をオプトインで再現するもので、ユーザーが意図的にコードをメモリ外に置いている状態。既定の `false` では、本文はコードブロックを `[code omitted]` にして保存され、INSTRUCTIONS の文もそう伝える（v1.9.1）。**同一ペイロードの再送は禁止** — 代わりにそのコードが何をしているかの散文要約を保存するか、当該ターンの保存をスキップすること。ユーザーが「さっきの保存はどうなった？」と明示的に聞かない限り、スキップを自発的に告知する必要はない。
 
@@ -1087,7 +1092,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - **`config.json` が読めない間**（この実行はメモリ上の新しい ID を使う、上の表）は、すべての `save_memory` の応答に `"warning": "config_unreadable", "detail": "config.json could not be read, so this entry was saved under a temporary owner_id and will not be visible after the server restarts. Fix <path> and restart the MCP client."` を付ける（v1.7.1。v1.7.0 は最初の検索でしか警告しなかった — Lite レビュー LL9）。この警告は何かを保存した応答に付ける。そのエントリがベクトルなしで保存された場合は 2 つをまとめる：`"warning": "embedding_unavailable; config_unreadable"` とし、2 つの `detail` の文を空白でつなぐ。
 - **通知**：`load_config()` はこれらのメッセージを `cfg["_notices"]`（文字列のリスト）に集め、それぞれを `stderr` に出力する。各メッセージは先頭にキーを付ける（例 `config_type: …`）。接続の層は `shared_redis` / `config_refused`（§3.4）と `index_dim_mismatch`（§3.9）を同じリストに加える。サーバーは各通知を、その通知が加わったあとで**最初に成功した** `search_memory` 呼び出しの出力の先頭に**1 回だけ**（エラー応答は `Error:` で始める必要があるので、その場合は次に成功した検索まで持ち越す） `> ⚠️ N3MC notice: <message>` 行として付け、接続中の LLM がユーザーに伝えられるようにする（§5 ルール 11）。したがって、プロセスの途中で加わった通知 — たとえばつなぎ直し後の `shared_redis` — は、次に成功した検索で表示される（v1.7.1。v1.7.0 はプロセスの最初の検索でしか通知を出さなかったので、あとから加わったものは一度も表示されなかった）。原因を直してクライアントを再起動すれば消える。
 
-> **1 PC 内の複数アカウント**：OS ユーザーごとに各自の `config.json` で動く。Redis を共有したい場合は両方の設定の `redis_url` を揃える — エントリは `owner_id` TAG フィルタで分離される。
+> **1 PC 内の複数アカウント**：OS ユーザーごとに各自の `config.json` で動くので、`owner_id` もそれぞれ違う。Lite は、持ち主の違う記憶を共有しない：検索と一覧は、設定の `owner_id` の記録だけを出す（§3.12）。2 つのアカウントを 1 つの Redis に向けないこと — 重複のガードは `owner_id` を含まないので、一方が保存した本文は、もう一方では `duplicate` と答えられる（§3.8）。また、もう一方の記録が検索の候補を埋めることがある（§3.12）。アカウントごとに別の Redis を使う（別のポートの別のコンテナを、それぞれの `redis_url` に設定する）。記憶を共有できるのは、同じ `config.json`（同じ `owner_id`）を使うサーバーどうしだけである。たとえば、1 つのアカウントの Claude デスクトップアプリとターミナルの `claude`。（2026-11-18 の最終レビュー（L-02）までは、この注意書きは「両方の設定の `redis_url` を揃えれば Redis を共有できる」と書いていた。）
 
 ---
 
@@ -1204,7 +1209,7 @@ Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承
 
 4 段目は、Python の段があっても非ゼロで終わったとき（スクリプト自身のハンドラより前の例外）にも動くので、文面は両方の原因を挙げる（v1.7.1、Lite レビュー LL7。スクリプト自体は常に exit 0 で終わるので、まれ）。`systemMessage` はユーザーに警告として表示され、`additionalContext` によって接続中の LLM がその内容を説明できる。単に exit 非ゼロで終わるだけでは **足りない**：Claude Code は失敗した `SessionStart` フックを、stderr の最初の行（`python: command not found`）を載せた `SessionStart hook error` の通知としてトランスクリプトに出すだけで、何が壊れるのかも直し方も伝わらない。また `/plugin` の Errors タブに出るのはプラグインの *読み込み* エラー（不正な `hooks.json`、誤ったパス）で、フックの *実行時* の失敗ではない（[hooks docs](https://code.claude.com/docs/en/hooks.md)、[plugin troubleshooting](https://code.claude.com/docs/en/plugins/troubleshooting.md)）。v1.6.x は Errors タブ頼みで、実質的に無言だった。
 
-同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が無いと MCP launcher 側で不透明な `ENOENT` としてしか現れない。フックは `shutil.which("uvx")` を確認し、見つからない場合は同じ形の JSON（`systemMessage` + `additionalContext`）で日英両言語のインストール手順（`pipx install uv`、`curl -LsSf https://astral.sh/uv/install.sh | sh`、ドキュメントの URL）を出して exit 0 で終わる。両方に当てはまるときは、メッセージを 1 つの JSON オブジェクトにまとめる（フックの stdout は単一の JSON オブジェクトでなければならない）。
+同フックは併せて **`uvx` 事前チェック** も行う — プラグイン manifest（[`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)）が MCP サーバを `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動するため、`uvx` が無いと MCP launcher 側で不透明な `ENOENT` としてしか現れない。フックは `shutil.which("uvx")` を確認し、見つからない場合は同じ形の JSON（`systemMessage` + `additionalContext`）で日英両言語のインストール手順（`pipx install uv`、`curl -LsSf https://astral.sh/uv/install.sh | sh`、ドキュメントの URL）を出して exit 0 で終わる。両方に当てはまるときは、メッセージを 1 つの JSON オブジェクトにまとめる（フックの stdout は単一の JSON オブジェクトでなければならない）。この JSON は `json.dumps(..., ensure_ascii=True)` で書く — ASCII だけで、ASCII でない文字は `\uXXXX` のエスケープになり、JSON として読めば同じ文字に戻る。スクリプトは標準出力を UTF-8 にしていないので、日本語の Windows では cp932 になる。一方、`uvx` の案内には日本語が入っている（2026-11-18 の最終レビュー（L-03）。それまでは `ensure_ascii=False` で書いていた）。`settings.json` そのものは、これまでどおり UTF-8・`ensure_ascii=False` で書く。
 
 **プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json`）では、下記ブロックを手動で追記する（ワイルドカードの形なら `mcp__n3mc-workingmemory__*`）。**プラグインでインストールしたが Python が無い場合** は、代わりに `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（プラグイン付きの名前）を追加する。追記先は `~/.claude/settings.json`（ユーザーグローバル — 推奨）または `.claude/settings.json`（プロジェクトスコープ）：
 
@@ -1349,6 +1354,9 @@ n3mcmcp-lite/
 | `TestHangulFiller`（v1.7.1） | `U+3164`、`U+115F`、`U+1160`、`U+FFA0`、`U+2800` だけの本文は見える文字なしとして拒否される。見える文字と一緒なら verbatim に保存される |
 | `TestPluginHook`（追加分、v1.7.1） | `settings.json` を書く直前に読み直し、アトミックに置き換える。フォールバックの文面に "or the permission script failed" が入る |
 | `TestWeakMatches`（v1.7.2、*Redis*） | 下限を通った行が 1 件で `min_results: 3` なら、弱い候補が 2 件その後に足され、`filter_score` の順に並び、`_weak` の印が付く、`vector_min_cos` 未満の候補は実際の cos で足される、`min_results: 0` では何も足さない、十分な件数が通ったときは足さない、`limit` が `min_results` より小さければ合計はその上限まで、1 つの親ドキュメントの 2 つのチャンクのヒットは弱い候補 1 行になり、すでに結果にある親は足さない、`filter_score` が `1e-6` 未満の候補は足さない、**弱い候補の `mem:` / `doc:` / ガードのキーの TTL と `access_count` は変わらない**（普通の行は更新される）、空のクエリ、または空白だけのクエリでは弱い候補を足さない、既定の設定は `min_results: 3` |
+| `TestGuardReleasedOnAnyFailure`（2026-11-18 の最終レビュー、L-01、*Redis*） | 短い本文と長い本文で：`turn_id: 12` の保存は失敗し、`mem:sha:` / `docsha:` のキーを残さず、そのあと同じ本文を保存できる。`agent_name`・`session_id`・`turn_id` の単独のサロゲートは除かれ、記録は保存される。サロゲートのないフィールドは変わらずに入る |
+| `TestPluginHookAsciiStdout`（2026-11-18 の最終レビュー、L-03） | `uvx` がないとき、フックの標準出力は ASCII だけの 1 行で、`json.loads` すると `systemMessage` に日本語の案内がそのまま入っている |
+| `TestPublicRepoHygiene`（2026-11-18 の最終レビュー、L-05） | `tests/eval_uvx_missing.py` に絶対パスのユーザーのフォルダがない（外すフォルダは、`uvx` がある `PATH` の項目）。`.claude-plugin/marketplace.json` の `metadata.version` がパッケージの版と同じ |
 
 ### 実行例
 

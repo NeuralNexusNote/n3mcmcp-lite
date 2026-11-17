@@ -2142,3 +2142,70 @@ class TestCodeOmittedOnSave:
         rows = db.list_memories()
         assert any("secret_fn" in (r.get("content") or "") for r in rows)  # raw in Redis
         assert "secret_fn" not in S.purify(rows[0].get("content", ""))
+
+
+# ── final review of 2026-11-18 (L-01, L-03, L-05) ──────────────────────────
+
+_LONG_BODY = ("A long body for the guard test. " * 20).strip()       # > chunk_threshold
+
+
+@requires_redis
+class TestGuardReleasedOnAnyFailure:
+    """§3.8 (A)/(B) step 4 and §3.13 (2) (L-01): any failure after the guard is
+    taken releases it; agent_name / session_id / turn_id are sanitised."""
+
+    @pytest.mark.parametrize("body", ["a short body with a bad turn id", _LONG_BODY])
+    def test_non_string_turn_id_releases_the_guard(self, db, redis_client, fake_embed, body):
+        with pytest.raises(AttributeError):
+            db.save_memory(body, turn_id=12)        # an older MCP SDK does not check the type
+        assert not list(redis_client.scan_iter("mem:sha:*"))
+        assert not list(redis_client.scan_iter("docsha:*"))
+        assert db.save_memory(body, turn_id="t-1")["saved"] is True
+
+    @pytest.mark.parametrize("body", ["a short body with surrogates in its fields", _LONG_BODY])
+    def test_surrogates_in_fields_are_stripped(self, db, redis_client, fake_embed, body):
+        out = db.save_memory(body, agent_name="agent\udcff", session_id="proj\udcfe",
+                             turn_id="t\udcff1")
+        assert out["saved"] is True
+        key = (f"mem:{out['id']}" if "id" in out else f"doc:{out['parent_id']}").encode()
+        assert redis_client.hget(key, "agent_name") == b"agent"
+        assert redis_client.hget(key, "session_id") == b"proj"
+        assert redis_client.hget(key, "turn_id") == b"t1"
+
+    def test_plain_fields_unchanged(self, db, redis_client, fake_embed):
+        out = db.save_memory("plain fields stay as they are", agent_name="claude-code",
+                             session_id="proj-alpha", turn_id="turn-7")
+        key = f"mem:{out['id']}".encode()
+        assert redis_client.hget(key, "agent_name") == b"claude-code"
+        assert redis_client.hget(key, "session_id") == b"proj-alpha"
+        assert redis_client.hget(key, "turn_id") == b"turn-7"
+
+
+class TestPluginHookAsciiStdout:
+    """§8 (L-03): the hook's JSON on stdout is ASCII only (stdout is cp932 on
+    a Japanese Windows)."""
+
+    def test_stdout_is_ascii(self, tmp_path, monkeypatch, capsys):
+        mod = _hook_module()
+        monkeypatch.setattr(mod.Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(mod.shutil, "which", lambda name: None)   # the uvx hint (Japanese)
+        assert mod.main() == 0
+        out = capsys.readouterr().out
+        assert out.isascii() and out.count("\n") == 1
+        assert "PATH 上に見つかりません" in json.loads(out)["systemMessage"]
+
+
+class TestPublicRepoHygiene:
+    """L-05: nothing developer-specific in the public repository."""
+
+    _ROOT = _Path(__file__).resolve().parent.parent
+
+    def test_eval_script_has_no_absolute_user_path(self):
+        text = (self._ROOT / "tests" / "eval_uvx_missing.py").read_text(encoding="utf-8")
+        assert "C:\\Users\\" not in text and "/home/" not in text
+
+    def test_marketplace_version_is_the_package_version(self):
+        import n3mc_mcp
+        data = json.loads((self._ROOT / ".claude-plugin" / "marketplace.json")
+                          .read_text(encoding="utf-8"))
+        assert data["metadata"]["version"] == n3mc_mcp.__version__

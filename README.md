@@ -167,7 +167,7 @@ The server refuses to start if Redis is unreachable, and the Claude Code plugin 
 - 🔄 **Context across sessions** — Working memory that lasts **7 days** (auto-expires via Redis TTL; pair with any persistent memory backend if you need longer retention).
 - ⚡ **Works automatically** — Saving and searching happen automatically. The MCP `initialize` response ships behavioral instructions, so no user action is required.
 - 🤖 **Multi-agent ready** — Multiple AI agents share one Redis. The `b_local` and `b_session` biases prioritize each project's own memories while still surfacing the team's collective knowledge.
-- 🏢 **Team & organization support** — Deploy Redis on a shared server and point `N3MC_REDIS_URL` to it for team-wide memory sharing (⚠️ authentication must be handled at the Redis layer).
+- 🏢 **One person, one memory** — Memories are not shared between people: each `config.json` has its own `owner_id`, and search shows only that owner's records. Use one Redis per installation; clients share memories only when they use the same `config.json`.
 - 🧹 **Ephemerality is a design feature** — 7-day auto-expiry means failed attempts and abandoned designs don't bleed into the next task. `docker restart redis-stack` wipes everything instantly.
 - 💰 **Reduces token waste** — No more re-explaining past context. Memory search uses local embeddings (`intfloat/multilingual-e5-base`) and costs zero Claude tokens, and accurate context injection means fewer corrections and back-and-forth.
 

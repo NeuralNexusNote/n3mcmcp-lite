@@ -16,17 +16,20 @@ import subprocess
 import sys
 import time
 
-PY312_SCRIPTS = r"C:\Users\ttake\AppData\Local\Programs\Python\Python312\Scripts"
-PY312_BASE    = r"C:\Users\ttake\AppData\Local\Programs\Python\Python312"
+_EXTS = [""] + [e for e in os.environ.get("PATHEXT", "").split(os.pathsep) if e]
 
+
+def _provides_uvx(entry: str) -> bool:
+    """True when this PATH entry holds a `uvx` executable (any PATHEXT form)."""
+    return any(os.path.isfile(os.path.join(entry, "uvx" + ext)) for ext in _EXTS)
+
+
+# The folders to strip are found from this machine's PATH — every entry that
+# provides `uvx` — instead of a hard-coded developer path.
 # Mutate os.environ so CreateProcess (which reads parent's PATH for search) sees
 # the stripped value. Process-local; does not leak.
-clean_path_entries = []
-for entry in os.environ.get("PATH", "").split(os.pathsep):
-    norm = entry.rstrip("\\/").lower()
-    if norm == PY312_SCRIPTS.lower() or norm == PY312_BASE.lower():
-        continue
-    clean_path_entries.append(entry)
+clean_path_entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep)
+                      if entry and not _provides_uvx(entry)]
 
 # Remove any case-variant of PATH first
 for k in list(os.environ.keys()):

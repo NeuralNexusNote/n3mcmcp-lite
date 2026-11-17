@@ -16,8 +16,14 @@ each under their own license terms:
 
   - Model Context Protocol SDK (mcp)         — MIT
   - redis-py                                  — MIT
-  - Redis Stack / RediSearch (runtime only)   — Redis Source Available License
-                                                (user-provided, not bundled)
+  - Redis Stack / RediSearch (runtime only)   — RSALv2 or SSPLv1 (the user's choice)
+                                                for Redis Stack 6.2.6 and later,
+                                                which includes the 7.4.x image that
+                                                redis/redis-stack-server:latest is as
+                                                of 2026-11; RSALv1 for 6.2.4 and earlier.
+                                                The user downloads and runs it; it is
+                                                not bundled. Check the version you run at
+                                                https://redis.io/legal/licenses/
   - sentence-transformers                     — Apache-2.0
   - intfloat/multilingual-e5-base model       — MIT (Hugging Face download)
   - uuid-utils                                — MIT
