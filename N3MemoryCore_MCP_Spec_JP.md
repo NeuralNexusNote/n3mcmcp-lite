@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.8.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.8.1 [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版（公開予定）** との差別化を明確化しています。
@@ -243,7 +243,7 @@ n3memorycore-mcp-lite/
 > | 22 | 親ドキュメントをチャンクより先に書く | 2 回の書き込みの間で失敗すると、チャンクのない `doc:`＋`docsha:` が残る：検索できず、再保存も 7 日間 `duplicate` で拒否される | 先にすべてのチャンクを埋め込み、`SET NX` でガードを取り、そのあと親とチャンクを 1 つのパイプラインで書く（失敗したらガードを解放する） | [§3.8](#38-重複判定v170完全一致のみ) |
 > | 23 | 数値の設定に範囲チェックがない | `chunk_overlap >= chunk_threshold` で無限ループ。`ttl_seconds: 604800.5` や `0` で保存がすべて失敗。`embedding_dim: 768.0` で起動時にサーバーが止まる | キーごとの型と範囲の表。`chunk_text` は必ず先へ進む | [§6](#6-設定) |
 > | 24 | 起動時の `FT.CREATE` の失敗を送り出す | RediSearch のない素の Redis（または起動中の接続断）でプロセスが終わる。クライアントには落ちたサーバーしか見えない | 索引なしで動き続け、呼び出しごとに再試行し、「Redis Stack が必要」というエラーを返す | [§3.9](#39-起動シーケンスと自己回復) |
-> | 25 | どの Redis でも永続化を無効にする | `localhost:6379` で動いている他人の Redis が、黙って RDB/AOF を失い、次の再起動でデータを失う | DB が空か N3MC のキーだけのときに限る。それ以外は `shared_redis` 通知 | [§3.4](#34-揮発性の厳守変更最適化禁止) |
+> | 25 | どの Redis でも永続化を無効にする | `localhost:6379` で動いている他人の Redis が、黙って RDB/AOF を失い、次の再起動でデータを失う | 接続した DB が空か N3MC のキーだけで、**サーバーのほかの DB にキーがない**ときに限る（v1.8.1）。それ以外は `shared_redis` 通知 | [§3.4](#34-揮発性の厳守変更最適化禁止) |
 > | 26 | ツール呼び出しがモデルのロックを無制限に待つ | 初回のダウンロード中（数分）はツール呼び出しがすべて止まり、クライアントのツールタイムアウトに達しうる | 待つのは最大 20 秒。そのあとは通知付きでキーワードだけで続ける | [§3.9](#39-起動シーケンスと自己回復) |
 > | 27 | TTL の更新が重複ガードを飛ばす／BM25 の語を AND でつなぐ／読めない `since` を無視する | よく使う記録が 7 日後に 2 回保存されうる／文のようなクエリでキーワードがヒットしない／`since="yesterday"` で全件を検索する | ガードもレコードと一緒に更新する。語は OR でつなぐ。読めない時刻の範囲は拒否する | [§3.3](#33-redis-接続と-ttl)、[§3.7](#37-トークナイズと句読点処理)、[§4.3.1](#431-取り出し拡張ツールretrieval-extensions) |
 > | 28 | 「キーがあるか」の確認と書き込みを別々のコマンドで送る | 確認と書き込みの間に削除（別のプロセスの `delete_memory`）または失効したレコードが、`access_count` か `embedding` だけを持つハッシュとして **TTL なしで**作り直される — 失効せず、どの削除でも消えない。レコードの削除後にガードを設定し直すと、同じ内容を 7 日間保存できなくなる | 確認と書き込みを **1 つの Lua スクリプト**で行う（`EXISTS` のあとに `HINCRBY` / `HSET` / `SET … EX`） | [§3.3](#33-redis-接続と-ttl) |
@@ -335,12 +335,15 @@ return 0
 
 **`enforce_ephemeral()` — Redis の永続化を無効にする（v1.7.1）**：接続に成功するたびに（起動時とつなぎ直しのたび、§3.9）呼ぶ。
 
-1. 接続した DB のキーを `SCAN`（`COUNT 1000`）で調べ、`mem:`・`doc:`・`docsha:` のどれでも始まらないキーが最初に見つかった時点で止める（`mem:sha:` のキーは `mem:` で始まる）。RediSearch の索引そのものはキーではない。
-2. DB が空か、それらのキーだけなら：`CONFIG SET appendonly no` と `CONFIG SET save ""`。
-3. それ以外なら**設定を変更しない**。通知 `shared_redis` を加える（§6 の設定通知と同じく、最初に成功した `search_memory` で表示）：`shared_redis: the Redis at <host>:<port> also holds keys that are not N3MC's, so its persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a dedicated container (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) for Lite.`
-4. `CONFIG` が拒否されたら（マネージド Redis、`rename-command`、ACL）、stderr に 1 行出し、通知 `config_refused` を加える（文面の決まりは同じ：何が起きたか、永続化がまだ有効かもしれないこと、専用コンテナの案内）。これを理由に接続を失敗させてはならない。
+1. **先にほかの DB を見る（v1.8.1）**：`INFO keyspace` を実行する。接続した DB（`redis_url` の `db`、既定は 0）以外の DB にキーがあれば、手順 4 に進む。`INFO` が拒否されたときも、ほかの DB を確かめられないので手順 4 に進む。
+2. 接続した DB のキーを `SCAN`（`COUNT 1000`）で調べ、`mem:`・`doc:`・`docsha:` のどれでも始まらないキーが最初に見つかった時点で止める（`mem:sha:` のキーは `mem:` で始まる）。RediSearch の索引そのものはキーではない。
+3. 接続した DB が空か、それらのキーだけなら：`CONFIG SET appendonly no` と `CONFIG SET save ""`。
+4. それ以外（接続した DB に N3MC 以外のキーがある、ほかの DB にキーがある、`INFO` が拒否された）なら**設定を変更しない**。通知 `shared_redis` を加える（§6 の設定通知と同じく、最初に成功した `search_memory` で表示）：`shared_redis: the Redis at <host>:<port> also holds keys that are not N3MC's, so its persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a dedicated container (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) for Lite.`
+5. `CONFIG` が拒否されたら（マネージド Redis、`rename-command`、ACL）、stderr に 1 行出し、通知 `config_refused` を加える（文面の決まりは同じ：何が起きたか、永続化がまだ有効かもしれないこと、専用コンテナの案内）。これを理由に接続を失敗させてはならない。
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LM4）**：v1.7.0 は向けられた Redis が何であっても永続化設定を変え、既定の URL は `localhost:6379` である。ほかの用途で Redis を動かしていた利用者は、次の Redis 再起動でそのデータを何のメッセージもなく失った。Lite の 7 日の約束はすべてのキーの TTL で守られている。永続化を無効にするのは N3MC のデータをディスクに残さないためだけであり、ほかのプログラムのデータに手を出す理由にはならない。この動作はクイックスタートの注記にしか書かれていなかった。
+
+> **⚠️ ほかの DB も見る理由（v1.8.1、2026-11-17 のコードレビュー）**：`SCAN` は接続した DB しか見ないが、`CONFIG SET` はサーバー全体の設定を変える。v1.8.0 までは、ほかの DB に別のプログラムのデータがある Redis の DB 0 に Lite を向けると、そのすべての DB の永続化を止め、次の Redis の再起動でそのデータが失われた。
 
 ### 3.5 データレイアウト
 
@@ -807,7 +810,12 @@ verbatim に保持される**（§3.11 の親ドキュメント verbatim 契約�
   は入力形式を尊重する。
 
 つまり「`save_memory` に渡したバイト列は、サロゲートだけ落として、それ以外は
-丸ごと帰ってくる」という最小限のサニタイズ契約を採る。これは silent な変換が
+丸ごと帰ってくる」という最小限のサニタイズ契約を採る。ただし外側の `strip()`
+が 1 回だけある：MCP Pro と同じく、`save_memory` は入口で前後の空白（空白・タブ・
+改行）を 1 回落とす。`' \nAAA\n '` は `AAA` として保存され、そのまま返る。前後の
+空白だけが違う本文は、保存済みの本文の完全一致の重複になる。本文の中はすべて
+残す。（v1.8.1：これまでのどの版もこう動いていた。2026-11-17 のコードレビューで、
+上の文がそれを書いていないことが分かったので書き足した。）これは silent な変換が
 verbatim 契約を破る可能性を最小化するための設計判断である。
 
 **pre-1.2.0 のモジバケ復旧ルーチンは意図的に Lite には移植しない**。
@@ -1302,7 +1310,8 @@ n3mcmcp-lite/
 | `TestConfigRanges`（v1.7.1） | `ttl_seconds` の `604800.5` / `0`、`embedding_dim` の `768.0`、`chunk_overlap >= chunk_threshold`、`chunk_threshold` 10、`half_life_days` 0、`min_score` 1.5 が `config_type` 付きで無視される（**v1.7.2**：`min_results` の `-1` と `1.5` も同じ。`0` は受け付ける）。区切りのない本文で `chunk_text(text, 100, 100)` が終わる |
 | `TestLongSaveAtomic`（v1.7.1、*Redis*） | 長文の保存の途中で埋め込みが失敗しても `doc:` / `docsha:` のキーが残らず、そのあと同じ本文を保存できる。ガードは `SET NX` で取り、親とすべてのチャンクは 1 つのパイプラインで書かれる |
 | `TestIndexFailure`（v1.7.1） | `FT.CREATE` が `unknown command` で失敗しても `_main()` が終わらない。ツールは「Redis Stack が必要」の案内を返す。次の呼び出しで索引を再試行する。既存の索引の `DIM` が違えば `index_dim_mismatch` が加わる |
-| `TestEnforceEphemeral`（v1.7.1、*Redis*） | 空の DB や `mem:` / `doc:` / `docsha:` のキーだけの DB では `CONFIG SET` される。ほかのキーがある DB ではされず、`shared_redis` が加わる。拒否された `CONFIG` は接続を失敗させずに `config_refused` を加える |
+| `TestEnforceEphemeral`（v1.7.1、*Redis*） | 空の DB や `mem:` / `doc:` / `docsha:` のキーだけの DB では `CONFIG SET` される。ほかのキーがある DB ではされず、`shared_redis` が加わる。サーバーのほかの DB にキーがあるとき（v1.8.1）や `INFO` が拒否されたときも、設定を変えずに `shared_redis` が加わる。拒否された `CONFIG` は接続を失敗させずに `config_refused` を加える |
+| `TestSurroundingWhitespace`（v1.8.1、*Redis*） | 外側の `strip()`：`' \nAAA\n '` は `AAA` として保存される。親ドキュメントは中の改行を残し、外側の空白だけを落とす。前後の空白だけが違う本文は完全一致の重複になる。空白だけの本文は `empty content` で拒否される |
 | `TestModelWait`（v1.7.1） | ロードが `MODEL_WAIT_SECONDS`（テストでは短く差し替え）より長くロックを持つ間、`search_memory` は「still loading」の通知付きでキーワードだけで答え、`save_memory` は `detail` 付きでベクトルなしで保存する |
 | `TestListPaging`（v1.7.1、*Redis*） | 独立メモリと 260 チャンクの文書を保存したあと、`list_memories(20)` が両方を一覧に出す |
 | `TestGuardRefresh`（v1.7.1、*Redis*） | 検索ヒットで、レコードと一緒に `mem:sha:`（独立）と `docsha:`（文書）の TTL が設定し直される |

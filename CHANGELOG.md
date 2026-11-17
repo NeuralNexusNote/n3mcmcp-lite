@@ -9,6 +9,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-11-17
+
+Spec v1.8.0 → v1.8.1 (JP/EN): two findings of the code review of
+2026-11-17. The specification was changed first, then the code and tests.
+Saving and display behave as in 1.11.0 except in the case below.
+
+### Fixed
+- **Persistence was turned off although another database held data** (§3.4).
+  `enforce_ephemeral()` looked only at the connected database with `SCAN`, but
+  `CONFIG SET appendonly no` / `save ""` change the whole Redis server. A Lite
+  pointed at DB 0 of a Redis whose DB 1 held another program's data turned
+  persistence off for that data too, which was then lost at the next Redis
+  restart. `INFO keyspace` is now checked first: keys in another database, or
+  a refused `INFO`, leave the configuration unchanged with the `shared_redis`
+  notice.
+
+### Changed (specification text only)
+- **§3.13 now states the outer `strip()`** that `save_memory` has always
+  applied: leading and trailing whitespace is removed once, so `' \nAAA\n '`
+  is saved as `AAA`. The text said only lone surrogates were removed. The
+  behavior is unchanged, to keep existing installations working as before.
+
 ## [1.11.0] — 2026-11-17
 
 Spec v1.7.3 → v1.8.0 (JP/EN). The access-frequency boost is now off by
