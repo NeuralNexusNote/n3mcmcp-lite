@@ -9,6 +9,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-11-17
+
+Spec v1.8.0 → v1.9.0 (JP/EN): two findings of the code review of
+2026-11-17, and code blocks replaced on save. The specification was changed
+first, then the code and tests.
+
+### Changed
+- **Code blocks are replaced with `[code omitted]` when saved** (§3.13).
+  Since 2026-04 Lite stored them but always showed them as `[code omitted]`,
+  so no tool could return the code. What you see does not change. A word that
+  appears only inside a code block no longer finds the record, and two bodies
+  that differ only inside their code blocks are exact duplicates. Records
+  saved by 1.11.x keep their code in Redis until their 7-day TTL ends, and are
+  still shown as `[code omitted]`. `skip_code_blocks: true` still rejects the
+  whole body.
+
+### Fixed
+- **Persistence was turned off although another database held data** (§3.4).
+  `enforce_ephemeral()` looked only at the connected database with `SCAN`, but
+  `CONFIG SET appendonly no` / `save ""` change the whole Redis server. A Lite
+  pointed at DB 0 of a Redis whose DB 1 held another program's data turned
+  persistence off for that data too, which was then lost at the next Redis
+  restart. `INFO keyspace` is now checked first: keys in another database, or
+  a refused `INFO`, leave the configuration unchanged with the `shared_redis`
+  notice.
+
+### Changed (specification text only)
+- **§3.13 now states the outer `strip()`** that `save_memory` has always
+  applied: leading and trailing whitespace is removed once, so `' \nAAA\n '`
+  is saved as `AAA`. The text said only lone surrogates were removed. The
+  behavior is unchanged, to keep existing installations working as before.
+
 ## [1.11.0] — 2026-11-17
 
 Spec v1.7.3 → v1.8.0 (JP/EN). The access-frequency boost is now off by

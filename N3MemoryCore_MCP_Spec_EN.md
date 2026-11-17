@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.8.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.9.0 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
@@ -245,7 +245,7 @@ n3memorycore-mcp-lite/
 > | 22 | Parent document written before the chunks | A failure between the two writes leaves `doc:` + `docsha:` without chunks: unsearchable, and re-saving is rejected as `duplicate` for 7 days | Embed every chunk first, take the guard with `SET NX`, then write parent and chunks in one pipeline (release the guard on failure) | [§3.8](#38-duplicate-rejection-v170-exact-only) |
 > | 23 | No range check on numeric config | `chunk_overlap >= chunk_threshold` loops forever; `ttl_seconds: 604800.5` or `0` makes every save fail; `embedding_dim: 768.0` stops the server at start | Per-key type and range table; `chunk_text` always advances | [§6](#6-configuration) |
 > | 24 | `FT.CREATE` failure re-raised at start | A plain Redis without RediSearch (or a connection lost during start) ends the process; the client only sees a dead server | Stay up without an index, retry per call, return a "Redis Stack required" error | [§3.9](#39-startup-sequence--self-recovery) |
-> | 25 | Persistence turned off on any Redis | Someone else's Redis on `localhost:6379` silently loses its RDB/AOF and its data at the next restart | Only when the DB is empty or holds only N3MC keys; otherwise notice `shared_redis` | [§3.4](#34-ephemerality-no-modifications-or-optimizations-allowed) |
+> | 25 | Persistence turned off on any Redis | Someone else's Redis on `localhost:6379` silently loses its RDB/AOF and its data at the next restart | Only when the connected DB is empty or holds only N3MC keys **and no other DB of the server holds keys** (v1.8.1); otherwise notice `shared_redis` | [§3.4](#34-ephemerality-no-modifications-or-optimizations-allowed) |
 > | 26 | Tool calls wait for the model lock without limit | During the first-run download (minutes) every tool call blocks and may hit the client's tool timeout | Wait at most 20 s, then continue keyword-only with a notice | [§3.9](#39-startup-sequence--self-recovery) |
 > | 27 | TTL refresh skips the dedup guards; BM25 terms ANDed; unreadable `since` ignored | Frequently used records can be saved twice after 7 days; sentence-like queries get no keyword hits; `since="yesterday"` searches everything | Refresh guards with the record; join terms with OR; reject unreadable time bounds | [§3.3](#33-redis-connection--ttl), [§3.7](#37-text-tokenization--punctuation-handling), [§4.3.1](#431-retrieval-extension-tools) |
 > | 28 | "Does the key exist?" and the write sent as separate commands | A record deleted (`delete_memory` from another process) or expired between the check and the write comes back as a hash holding only `access_count` or `embedding`, **with no TTL** — it never expires and nothing deletes it; a guard reset after the record was deleted blocks saving the same content for 7 days | Check and write in **one Lua script** (`EXISTS` then `HINCRBY` / `HSET` / `SET … EX`) | [§3.3](#33-redis-connection--ttl) |
@@ -337,12 +337,15 @@ On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline
 
 **`enforce_ephemeral()` — turning off Redis persistence (v1.7.1)**: called after every successful connect (startup and every reconnect, §3.9).
 
-1. Look at the keys of the connected DB with `SCAN` (`COUNT 1000`), stopping at the first key that does not start with `mem:`, `doc:` or `docsha:` (`mem:sha:` keys start with `mem:`). The RediSearch index itself is not a key.
-2. If the DB is empty or holds only those keys: `CONFIG SET appendonly no` and `CONFIG SET save ""`.
-3. Otherwise **do not change the configuration**. Add the notice `shared_redis` (shown like the config notices of §6, on the first successful `search_memory`): `shared_redis: the Redis at <host>:<port> also holds keys that are not N3MC's, so its persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a dedicated container (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) for Lite.`
-4. If `CONFIG` is refused (managed Redis, `rename-command`, ACL), print one line to stderr and add the notice `config_refused` (same wording rules: what happened, that persistence may still be on, the dedicated-container hint). Never fail the connection because of it.
+1. **Other databases first (v1.8.1)**: run `INFO keyspace`. If any database other than the connected one (the `db` of `redis_url`, default 0) holds keys, go to step 3. If `INFO` is refused, also go to step 3: the other databases cannot be checked.
+2. Look at the keys of the connected DB with `SCAN` (`COUNT 1000`), stopping at the first key that does not start with `mem:`, `doc:` or `docsha:` (`mem:sha:` keys start with `mem:`). The RediSearch index itself is not a key.
+3. If the connected DB is empty or holds only those keys: `CONFIG SET appendonly no` and `CONFIG SET save ""`.
+4. Otherwise (a key that is not N3MC's in the connected DB, keys in another DB, or a refused `INFO`) **do not change the configuration**. Add the notice `shared_redis` (shown like the config notices of §6, on the first successful `search_memory`): `shared_redis: the Redis at <host>:<port> also holds keys that are not N3MC's, so its persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a dedicated container (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) for Lite.`
+5. If `CONFIG` is refused (managed Redis, `rename-command`, ACL), print one line to stderr and add the notice `config_refused` (same wording rules: what happened, that persistence may still be on, the dedicated-container hint). Never fail the connection because of it.
 
 > **⚠️ Why (v1.7.1, Lite review LM4)**: v1.7.0 changed the persistence of whatever Redis it was pointed at, and the default URL is `localhost:6379`. A user who already ran Redis for something else lost that data at the next Redis restart, without any message. Lite's 7-day promise is kept by the TTL on every key; turning persistence off only keeps N3MC data off the disk, which does not justify touching another program's data. The behaviour was also described only in the Quick Start note.
+
+> **⚠️ Why the other databases are checked (v1.8.1, code review of 2026-11-17)**: `SCAN` sees only the connected database, while `CONFIG SET` changes the whole server. Up to v1.8.0 a Lite pointed at DB 0 of a Redis whose other databases held another program's data turned persistence off for all of them, and that data was lost at the next Redis restart.
 
 ### 3.5 Data Layout
 
@@ -651,7 +654,7 @@ This is a deliberate simplification versus the forthcoming Pro build (which will
 When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the server automatically:
 
 1. Splits the body into sliding windows of `chunk_threshold` chars with `chunk_overlap` overlap (default 100). **Every window advances by at least one character** (v1.7.1): the next window starts after the soft break, or at `end - overlap` after a hard cut, but never at or before the current start (`start = max(start + 1, …)`). §6 also rejects `chunk_overlap >= chunk_threshold`; this rule makes `chunk_text` safe even if called with such values. (v1.7.0 looped forever on a body without breaks when `chunk_overlap >= chunk_threshold` — Lite review LM2.) **Every character of the body is in at least one chunk**: when the last window would be shorter than 20 characters (`_MIN_CHUNK_CHARS`), it is not made a chunk of its own (so short a text gives a poor embedding) — its text is **appended to the previous chunk**, which may then be up to 19 characters longer than `chunk_threshold`. (Up to v1.7.3 the code dropped such a tail: after a soft break, the last few characters of a long body — e.g. `PIN: 4471-ZX.` on its own last line — were in no chunk, so neither BM25 nor the vector search could find the document by them. The parent still held them.)
-2. Computes the embedding of every chunk, then (§3.8 (B)) takes the `docsha:<sha1(full_text)>` guard and writes `doc:<parent_id>` — the **full verbatim body** (no truncation, no code-block stripping — the input is stored byte-for-byte) — together with every chunk in **one pipeline**, setting each `mem:<chunk_id>`'s `parent_id` TAG field to the parent id. Per-chunk sha guards are skipped (the parent-level exact guard `docsha:` handles whole-document duplicates — see [§3.8 (B)](#38-duplicate-rejection-v170-exact-only)).
+2. Computes the embedding of every chunk, then (§3.8 (B)) takes the `docsha:<sha1(full_text)>` guard and writes `doc:<parent_id>` — the **full verbatim body** (no truncation; byte-for-byte after the two input rules of §3.13 — the outer `strip()` and, since v1.9.0, code blocks → `[code omitted]`) — together with every chunk in **one pipeline**, setting each `mem:<chunk_id>`'s `parent_id` TAG field to the parent id. Per-chunk sha guards are skipped (the parent-level exact guard `docsha:` handles whole-document duplicates — see [§3.8 (B)](#38-duplicate-rejection-v170-exact-only)).
 
 `search_memory` integration:
 
@@ -819,9 +822,33 @@ compatibility:
   responses respect the caller's input form.
 
 In short: "the bytes you pass to `save_memory` come back exactly as written,
-with only lone surrogates removed." This minimal-sanitization contract is a
+with only lone surrogates removed" — apart from one outer `strip()`: like
+MCP Pro, `save_memory` strips leading and trailing whitespace (spaces, tabs,
+newlines) once at the input boundary, so `' \nAAA\n '` is saved and returned
+as `AAA`, and a body that differs from a saved one only in surrounding
+whitespace is an exact duplicate of it. Everything inside the body is kept.
+(v1.8.1: this sentence states what every release has done; the code review of
+2026-11-17 found that the text above did not say so.) The second exception is
+code blocks (v1.9.0, below). This minimal-sanitization contract is a
 deliberate design choice that prevents silent transformations from breaking
 the verbatim guarantee.
+
+**Code blocks are replaced when saved (v1.9.0)**: right after the
+`skip_code_blocks` check (§6), `save_memory` replaces every fenced code block
+with `[code omitted]` — `purify(text)` = `re.sub(r"```[\s\S]*?(?:```|\Z)",
+"[code omitted]", text)` (an unclosed fence runs to the end; inline backtick
+spans stay). The replaced text is what is hashed for dedup, chunked, embedded,
+indexed and stored. `search_memory`, `list_memories` and `recall_thread` still
+apply `purify` to what they show, so records saved by 1.11.x or earlier (which
+kept the code in Redis until their TTL ran out) look the same.
+
+> **⚠️ Why (v1.9.0, 2026-11-17)**: since 2026-04 Lite stored code blocks but
+> always showed them as `[code omitted]`, so no tool could return the code; it
+> only took space, influenced search, and made the "verbatim" promise read
+> wrongly. N3MemoryCore remembers what was said and decided, not source code
+> (the code belongs in the project's files). What users see does not change;
+> a word that appears only inside a code block no longer finds the record, and
+> two bodies that differ only inside their code blocks are exact duplicates.
 
 **Pre-1.2.0 mojibake recovery is intentionally NOT ported** from Free. That
 routine retroactively rewrote rows that earlier Free builds had decoded
@@ -1031,7 +1058,7 @@ Complete schema (missing fields auto-filled with defaults below):
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL-reset and `access_count` increment for the top-K hits after each search. Reset-only (no lifetime extension beyond a fresh save). When a chunk hit expands to its parent document, the `doc:<parent_id>` key's TTL is also refreshed alongside the chunk's `mem:` key, keeping verbatim recall ability alive in sync with the chunks.
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` passes the fused score through unchanged.
 - `b_session_match` / `b_session_mismatch` — the `b_session` factor in the ranking formula (see [§3.6](#36-ranking-formula)). For each row, the search compares the request's `effective_session` (per-call argument → `N3MC_SESSION_ID` env var → per-process startup UUID) against the row's stored `session_id`: matches multiply the score by `b_session_match` (default `1.0`), mismatches by `b_session_mismatch` (default `0.6`). Set both to `1.0` to disable the bias entirely (all rows symmetric).
-- `skip_code_blocks` — when `true`, `save_memory` rejects any content containing a triple-backtick fence (```` ``` ````) and returns `{"status": "skipped_code", "saved": false}`. Default `false` (inherit the FastAPI-era N3MemoryCore behavior where users who did not want code in memory could opt out). Heuristic only — the fence marker is the signal; mixed prose+code is rejected wholesale, not stripped. The LLM is instructed (§5) to avoid retrying the same payload on `skipped_code` and to save a prose description instead.
+- `skip_code_blocks` — when `true`, `save_memory` rejects any content containing a triple-backtick fence (```` ``` ````) and returns `{"status": "skipped_code", "saved": false}`. Default `false` (inherit the FastAPI-era N3MemoryCore behavior where users who did not want code in memory could opt out). Heuristic only — the fence marker is the signal; mixed prose+code is rejected wholesale. With `false`, the body is saved with its code blocks replaced by `[code omitted]` (v1.9.0, §3.13). The LLM is instructed (§5) to avoid retrying the same payload on `skipped_code` and to save a prose description instead.
 - `embedding_model` / `embedding_dim` — the embedding model name (default `intfloat/multilingual-e5-base`) and its output vector dimension (default `768`). See [§3.2](#32-embeddings). Made configurable so the operator can pick the quality / resource / language tradeoff while the product stays language-neutral. `embedding_dim` MUST match the actual output dimension of `embedding_model` — the RediSearch vector index (`DIM`) is built from this value, so a mismatch breaks save and search. Changing either requires a **process restart + index flush** (Lite's 7-day TTL means stale data expires on its own if left). With the defaults unchanged, behavior is identical to prior versions.
 
 **Unreadable or mistyped `config.json` (v1.7.0)** — users edit this file by hand (e.g. to tune `vector_min_cos`), so typos are expected. **Never overwrite it.**
@@ -1312,7 +1339,9 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestConfigRanges` (v1.7.1) | `ttl_seconds` `604800.5` / `0`, `embedding_dim` `768.0`, `chunk_overlap >= chunk_threshold`, `chunk_threshold` 10, `half_life_days` 0, `min_score` 1.5 are ignored with `config_type` (**v1.7.2**: so are `min_results` `-1` and `1.5`, while `0` is accepted); `chunk_text(text, 100, 100)` on a body without breaks terminates |
 | `TestLongSaveAtomic` (v1.7.1, *Redis*) | An embedding failure in the middle of a long save leaves no `doc:` / `docsha:` key, and the same body can then be saved; the guard is taken with `SET NX` and the parent and all chunks are written in one pipeline |
 | `TestIndexFailure` (v1.7.1) | `FT.CREATE` failing with `unknown command` does not end `_main()`; tools return the "Redis Stack required" hint; the index is retried on the next call; an existing index with another `DIM` adds `index_dim_mismatch` |
-| `TestEnforceEphemeral` (v1.7.1, *Redis*) | An empty DB or one with only `mem:` / `doc:` / `docsha:` keys gets `CONFIG SET`; a DB with another key does not, and `shared_redis` is added; a refused `CONFIG` adds `config_refused` without failing the connection |
+| `TestEnforceEphemeral` (v1.7.1, *Redis*) | An empty DB or one with only `mem:` / `doc:` / `docsha:` keys gets `CONFIG SET`; a DB with another key does not, and `shared_redis` is added; keys in another DB of the server (v1.8.1) or a refused `INFO` also leave the configuration unchanged with `shared_redis`; a refused `CONFIG` adds `config_refused` without failing the connection |
+| `TestCodeOmittedOnSave` (v1.9.0, *Redis*) | A short body and a parent document are stored with `[code omitted]` in place of each fenced block (raw `HGET`), inline backticks kept; an unclosed fence is replaced to the end; two bodies that differ only inside a code block are exact duplicates; `skip_code_blocks: true` still rejects the body; a record stored with a raw fence (as by 1.11.x) is still shown as `[code omitted]` |
+| `TestSurroundingWhitespace` (v1.8.1, *Redis*) | The outer `strip()`: `' \nAAA\n '` is stored as `AAA`; a parent document keeps its interior newlines and loses only the outer whitespace; a body that differs only in surrounding whitespace is an exact duplicate; whitespace-only content is rejected with `empty content` |
 | `TestModelWait` (v1.7.1) | While the load holds the lock longer than `MODEL_WAIT_SECONDS` (patched short), `search_memory` answers keyword-only with the "still loading" notice and `save_memory` saves without a vector with `detail` |
 | `TestListPaging` (v1.7.1, *Redis*) | After a standalone memory and a 260-chunk document, `list_memories(20)` lists both |
 | `TestGuardRefresh` (v1.7.1, *Redis*) | A search hit resets the TTL of `mem:sha:` (standalone) and `docsha:` (document) together with the record |

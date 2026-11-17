@@ -145,7 +145,8 @@ This server does **not** run out of the box — you must prepare two things firs
    > source of truth for the ephemerality guarantee.
    >
    > **Use a dedicated Redis.** The server changes these settings only
-   > when the Redis holds nothing but N3MC keys. If it finds other data
+   > when the Redis holds nothing but N3MC keys — in every database number,
+   > since 1.11.1. If it finds other data
    > (a Redis you already use for something else), it leaves the
    > persistence settings alone and shows a `shared_redis` notice — so it
    > never makes another program lose data on the next Redis restart.
@@ -555,7 +556,7 @@ On first run, `config.json` is auto-generated with random UUIDs for
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
 - `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (CPU-only).
 - `b_session_match` / `b_session_mismatch` — multiplicative ranking boost for rows whose stored `session_id` matches (default `1.0`) vs. rows from other projects (`0.6`). Pass the same `session_id` to `save_memory` and `search_memory` to surface a project's memories above unrelated cross-project rows in the same Redis instance. Set both to `1.0` to disable the bias.
-- `skip_code_blocks` — when `true`, `save_memory` rejects any payload containing a triple-backtick fence (```` ``` ````) and returns `status: "skipped_code"`. Default `false`. Set to `true` if you want FastAPI-era N3MemoryCore-style code exclusion (keep code out of the memory index entirely — useful when your workflow already has git/IDE history for code and you only want prose decisions/plans in Redis).
+- `skip_code_blocks` — when `true`, `save_memory` rejects any payload containing a triple-backtick fence (```` ``` ````) and returns `status: "skipped_code"`. Default `false`: the body is saved with each code block replaced by `[code omitted]` (since 1.12.0). Set to `true` if you want FastAPI-era N3MemoryCore-style code exclusion (keep code out of the memory index entirely — useful when your workflow already has git/IDE history for code and you only want prose decisions/plans in Redis).
 
 See the spec §6 for the complete field-by-field reference.
 
@@ -572,8 +573,9 @@ the same regardless of how the user types the same word:
 | **multilingual-e5-base embedding** | Multilingual semantic space across 100+ languages | Cross-language paraphrase retrieval |
 
 These run automatically on every `save_memory` and `search_memory` call.
-The raw `content` field is never rewritten — verbatim recall (spec §3.11)
-still returns the original bytes byte-for-byte.
+None of them rewrites the stored `content`: a long body comes back whole
+(spec §3.11), as it was saved — see the two input rules under
+[Encoding safety](#encoding-safety).
 
 ## Encoding safety
 
@@ -600,8 +602,20 @@ it to the empty string and the regular empty-content rejection path
 applies — `{"status":"error","saved":false,"reason":"empty content"}`.
 Content with no visible character (only whitespace, control / format
 characters such as `\x00` or `U+200B`, separators or variation selectors) is
-rejected with `empty content (no visible characters)`. Everything else is
-stored verbatim, including NUL and zero-width characters inside visible text.
+rejected with `empty content (no visible characters)`.
+
+Two rules apply to everything that is saved:
+
+- **Outer whitespace is trimmed once** — `' \nAAA\n '` is saved as `AAA`.
+- **Code blocks are stored as `[code omitted]`** (since 1.12.0) — each
+  fenced block (```` ``` ```` … ```` ``` ````, or an unclosed fence to the end)
+  is replaced before saving; inline backticks stay. N3MemoryCore remembers
+  what was said and decided; the code belongs in your project's files.
+  Versions before 1.12.0 stored the code but always showed it as
+  `[code omitted]`, so what you see does not change.
+
+Everything else is stored verbatim, including NUL and zero-width characters
+inside visible text.
 
 ## Ranking formula
 
@@ -666,7 +680,7 @@ sits elsewhere:
 | **Data ownership** | Vendor-hosted | **Your own Redis Stack on your machine** |
 | **Client surface** | The vendor's product only | **Any MCP-compliant client** (Claude Code, Cursor, Cline, Goose, your own app) |
 | **Multi-AI collaboration** | One AI's memory | **`session_id` lets multiple agents share the same memory namespace; `delete_memories_by_session` wraps up a finished task** |
-| **Verbatim recall** | Opaque (may be summarized) | **Parent-document contract — byte-exact full text returned** |
+| **Verbatim recall** | Opaque (may be summarized) | **Parent-document contract — the full text returned as saved (code blocks as `[code omitted]`)** |
 | **Search internals** | Black box | **Hybrid BM25 + e5 vectors + CJK bigram + time decay + lightweight reranker, all parameters visible and tunable** |
 | **Inspect / control** | UI only | **`list_memories` / `delete_memory` / `delete_memories_by_session` operate on raw records** |
 | **Persistence** | Tied to the vendor's service lifetime | **In-memory Redis with 7-day TTL** — short-lived by design, but you own the container; pair with any persistent memory backend for long-term storage |
@@ -675,8 +689,8 @@ sits elsewhere:
 So the value of running N3MemoryCore Lite is **not** "more reliable
 auto-save" — it is **owning a transparent, multi-client working-memory
 layer** that several AIs can collaborate on under a shared `session_id`,
-where search behaviour is editable and verbatim recall is contractually
-guaranteed. (For long-term, persistent storage of user-invested artifacts,
+where search behaviour is editable and getting the full saved text back is
+part of the contract. (For long-term, persistent storage of user-invested artifacts,
 pair it with any persistent memory backend.)
 
 If those properties matter to your workflow, Lite earns its keep. If you

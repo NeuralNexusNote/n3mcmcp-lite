@@ -1,4 +1,4 @@
-# N3MemoryCore MCP v1.8.0 [Volatile Memory over MCP]
+# N3MemoryCore MCP v1.9.0 [Volatile Memory over MCP]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版（公開予定）** との差別化を明確化しています。
@@ -243,7 +243,7 @@ n3memorycore-mcp-lite/
 > | 22 | 親ドキュメントをチャンクより先に書く | 2 回の書き込みの間で失敗すると、チャンクのない `doc:`＋`docsha:` が残る：検索できず、再保存も 7 日間 `duplicate` で拒否される | 先にすべてのチャンクを埋め込み、`SET NX` でガードを取り、そのあと親とチャンクを 1 つのパイプラインで書く（失敗したらガードを解放する） | [§3.8](#38-重複判定v170完全一致のみ) |
 > | 23 | 数値の設定に範囲チェックがない | `chunk_overlap >= chunk_threshold` で無限ループ。`ttl_seconds: 604800.5` や `0` で保存がすべて失敗。`embedding_dim: 768.0` で起動時にサーバーが止まる | キーごとの型と範囲の表。`chunk_text` は必ず先へ進む | [§6](#6-設定) |
 > | 24 | 起動時の `FT.CREATE` の失敗を送り出す | RediSearch のない素の Redis（または起動中の接続断）でプロセスが終わる。クライアントには落ちたサーバーしか見えない | 索引なしで動き続け、呼び出しごとに再試行し、「Redis Stack が必要」というエラーを返す | [§3.9](#39-起動シーケンスと自己回復) |
-> | 25 | どの Redis でも永続化を無効にする | `localhost:6379` で動いている他人の Redis が、黙って RDB/AOF を失い、次の再起動でデータを失う | DB が空か N3MC のキーだけのときに限る。それ以外は `shared_redis` 通知 | [§3.4](#34-揮発性の厳守変更最適化禁止) |
+> | 25 | どの Redis でも永続化を無効にする | `localhost:6379` で動いている他人の Redis が、黙って RDB/AOF を失い、次の再起動でデータを失う | 接続した DB が空か N3MC のキーだけで、**サーバーのほかの DB にキーがない**ときに限る（v1.8.1）。それ以外は `shared_redis` 通知 | [§3.4](#34-揮発性の厳守変更最適化禁止) |
 > | 26 | ツール呼び出しがモデルのロックを無制限に待つ | 初回のダウンロード中（数分）はツール呼び出しがすべて止まり、クライアントのツールタイムアウトに達しうる | 待つのは最大 20 秒。そのあとは通知付きでキーワードだけで続ける | [§3.9](#39-起動シーケンスと自己回復) |
 > | 27 | TTL の更新が重複ガードを飛ばす／BM25 の語を AND でつなぐ／読めない `since` を無視する | よく使う記録が 7 日後に 2 回保存されうる／文のようなクエリでキーワードがヒットしない／`since="yesterday"` で全件を検索する | ガードもレコードと一緒に更新する。語は OR でつなぐ。読めない時刻の範囲は拒否する | [§3.3](#33-redis-接続と-ttl)、[§3.7](#37-トークナイズと句読点処理)、[§4.3.1](#431-取り出し拡張ツールretrieval-extensions) |
 > | 28 | 「キーがあるか」の確認と書き込みを別々のコマンドで送る | 確認と書き込みの間に削除（別のプロセスの `delete_memory`）または失効したレコードが、`access_count` か `embedding` だけを持つハッシュとして **TTL なしで**作り直される — 失効せず、どの削除でも消えない。レコードの削除後にガードを設定し直すと、同じ内容を 7 日間保存できなくなる | 確認と書き込みを **1 つの Lua スクリプト**で行う（`EXISTS` のあとに `HINCRBY` / `HSET` / `SET … EX`） | [§3.3](#33-redis-接続と-ttl) |
@@ -335,12 +335,15 @@ return 0
 
 **`enforce_ephemeral()` — Redis の永続化を無効にする（v1.7.1）**：接続に成功するたびに（起動時とつなぎ直しのたび、§3.9）呼ぶ。
 
-1. 接続した DB のキーを `SCAN`（`COUNT 1000`）で調べ、`mem:`・`doc:`・`docsha:` のどれでも始まらないキーが最初に見つかった時点で止める（`mem:sha:` のキーは `mem:` で始まる）。RediSearch の索引そのものはキーではない。
-2. DB が空か、それらのキーだけなら：`CONFIG SET appendonly no` と `CONFIG SET save ""`。
-3. それ以外なら**設定を変更しない**。通知 `shared_redis` を加える（§6 の設定通知と同じく、最初に成功した `search_memory` で表示）：`shared_redis: the Redis at <host>:<port> also holds keys that are not N3MC's, so its persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a dedicated container (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) for Lite.`
-4. `CONFIG` が拒否されたら（マネージド Redis、`rename-command`、ACL）、stderr に 1 行出し、通知 `config_refused` を加える（文面の決まりは同じ：何が起きたか、永続化がまだ有効かもしれないこと、専用コンテナの案内）。これを理由に接続を失敗させてはならない。
+1. **先にほかの DB を見る（v1.8.1）**：`INFO keyspace` を実行する。接続した DB（`redis_url` の `db`、既定は 0）以外の DB にキーがあれば、手順 4 に進む。`INFO` が拒否されたときも、ほかの DB を確かめられないので手順 4 に進む。
+2. 接続した DB のキーを `SCAN`（`COUNT 1000`）で調べ、`mem:`・`doc:`・`docsha:` のどれでも始まらないキーが最初に見つかった時点で止める（`mem:sha:` のキーは `mem:` で始まる）。RediSearch の索引そのものはキーではない。
+3. 接続した DB が空か、それらのキーだけなら：`CONFIG SET appendonly no` と `CONFIG SET save ""`。
+4. それ以外（接続した DB に N3MC 以外のキーがある、ほかの DB にキーがある、`INFO` が拒否された）なら**設定を変更しない**。通知 `shared_redis` を加える（§6 の設定通知と同じく、最初に成功した `search_memory` で表示）：`shared_redis: the Redis at <host>:<port> also holds keys that are not N3MC's, so its persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a dedicated container (docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest) for Lite.`
+5. `CONFIG` が拒否されたら（マネージド Redis、`rename-command`、ACL）、stderr に 1 行出し、通知 `config_refused` を加える（文面の決まりは同じ：何が起きたか、永続化がまだ有効かもしれないこと、専用コンテナの案内）。これを理由に接続を失敗させてはならない。
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LM4）**：v1.7.0 は向けられた Redis が何であっても永続化設定を変え、既定の URL は `localhost:6379` である。ほかの用途で Redis を動かしていた利用者は、次の Redis 再起動でそのデータを何のメッセージもなく失った。Lite の 7 日の約束はすべてのキーの TTL で守られている。永続化を無効にするのは N3MC のデータをディスクに残さないためだけであり、ほかのプログラムのデータに手を出す理由にはならない。この動作はクイックスタートの注記にしか書かれていなかった。
+
+> **⚠️ ほかの DB も見る理由（v1.8.1、2026-11-17 のコードレビュー）**：`SCAN` は接続した DB しか見ないが、`CONFIG SET` はサーバー全体の設定を変える。v1.8.0 までは、ほかの DB に別のプログラムのデータがある Redis の DB 0 に Lite を向けると、そのすべての DB の永続化を止め、次の Redis の再起動でそのデータが失われた。
 
 ### 3.5 データレイアウト
 
@@ -647,7 +650,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 `save_memory` に渡された本文が `chunk_threshold`（既定 400 文字）を超えた場合、サーバーは以下を自動実行する：
 
 1. 本文全体を `chunk_threshold` 文字のスライディングウィンドウ（オーバーラップ `chunk_overlap`、既定 100 文字）に分割する。**どのウィンドウも最低 1 文字は先へ進む**（v1.7.1）：次のウィンドウは、区切りで切ったときはその区切りのあとから、強制的に切ったときは `end - overlap` から始まるが、現在の開始位置以前には決して戻らない（`start = max(start + 1, …)`）。§6 は `chunk_overlap >= chunk_threshold` も拒否するが、この規則があれば、そのような値で呼ばれても `chunk_text` は安全である。（v1.7.0 は `chunk_overlap >= chunk_threshold` のとき、区切りのない本文で無限ループした — Lite レビュー LM2。）**本文のどの文字も、少なくとも 1 つのチャンクに入る**：最後のウィンドウが 20 文字（`_MIN_CHUNK_CHARS`）より短くなるときは、それを独立したチャンクにせず（短すぎる文は埋め込みの質が低い）、その文を**直前のチャンクの末尾につなぐ**。このため直前のチャンクは `chunk_threshold` より最大 19 文字長くなることがある。（v1.7.3 までのコードはこの末尾を捨てていた。区切りで切ったあとに残る長文の最後の数文字 — たとえば最終行だけの `PIN: 4471-ZX.` — はどのチャンクにも入らず、BM25 でもベクトル検索でも、その文字からは文書を見つけられなかった。親ドキュメントには残っていた。）
-2. すべてのチャンクの埋め込みを計算し、そのあと（§3.8 (B)）`docsha:<sha1(full_text)>` ガードを取り、`doc:<parent_id>` — **全文 verbatim**（切り詰め無し・コードブロック除去無し — 入力をバイト単位でそのまま保存）— をすべてのチャンクと一緒に **1 つのパイプライン**で書き、各 `mem:<chunk_id>` の `parent_id` TAG フィールドに親 ID を格納する（個別 sha ガードはスキップ — 文書全体の重複は親レベル完全一致ガード `docsha:` が担う。[§3.8 (B)](#38-重複判定v170完全一致のみ) を参照）。
+2. すべてのチャンクの埋め込みを計算し、そのあと（§3.8 (B)）`docsha:<sha1(full_text)>` ガードを取り、`doc:<parent_id>` — **全文 verbatim**（切り詰め無し。§3.13 の入口の 2 つの決まり — 外側の `strip()` と、v1.9.0 からのコードブロック → `[code omitted]` — の後をバイト単位でそのまま保存）— をすべてのチャンクと一緒に **1 つのパイプライン**で書き、各 `mem:<chunk_id>` の `parent_id` TAG フィールドに親 ID を格納する（個別 sha ガードはスキップ — 文書全体の重複は親レベル完全一致ガード `docsha:` が担う。[§3.8 (B)](#38-重複判定v170完全一致のみ) を参照）。
 
 `search_memory` 側の整合：
 
@@ -807,8 +810,31 @@ verbatim に保持される**（§3.11 の親ドキュメント verbatim 契約�
   は入力形式を尊重する。
 
 つまり「`save_memory` に渡したバイト列は、サロゲートだけ落として、それ以外は
-丸ごと帰ってくる」という最小限のサニタイズ契約を採る。これは silent な変換が
+丸ごと帰ってくる」という最小限のサニタイズ契約を採る。ただし外側の `strip()`
+が 1 回だけある：MCP Pro と同じく、`save_memory` は入口で前後の空白（空白・タブ・
+改行）を 1 回落とす。`' \nAAA\n '` は `AAA` として保存され、そのまま返る。前後の
+空白だけが違う本文は、保存済みの本文の完全一致の重複になる。本文の中はすべて
+残す。（v1.8.1：これまでのどの版もこう動いていた。2026-11-17 のコードレビューで、
+上の文がそれを書いていないことが分かったので書き足した。）2 つ目の例外は
+コードブロックである（v1.9.0、下記）。これは silent な変換が
 verbatim 契約を破る可能性を最小化するための設計判断である。
+
+**コードブロックは保存の時点で置き換える（v1.9.0）**：`save_memory` は、
+`skip_code_blocks` の確認（§6）の直後に、コードブロックをすべて `[code omitted]`
+に置き換える — `purify(text)` = `re.sub(r"```[\s\S]*?(?:```|\Z)",
+"[code omitted]", text)`（閉じていないフェンスは終わりまで。インラインの
+バッククォートは残す）。重複判定のハッシュ、チャンク分割、埋め込み、索引、
+保存は、置き換えた後の文で行う。`search_memory`・`list_memories`・
+`recall_thread` は、見せる文にも引き続き `purify` をかける。1.11.x 以前で保存した
+記録（TTL が切れるまで Redis にコードが残っている）も同じに見える。
+
+> **⚠️ 理由（v1.9.0、2026-11-17）**：Lite は 2026-04 からコードブロックを保存して
+> いたが、見せるときは必ず `[code omitted]` にしていたので、どのツールもコードを
+> 返せなかった。場所を取り、検索に影響し、「verbatim」の約束を誤って読ませる
+> だけだった。N3MemoryCore が覚えるのは話したことと決めたことで、ソースコード
+> ではない（コードはプロジェクトのファイルにある）。利用者に見えるものは変わ
+> らない。コードブロックの中にだけある語では記録に当たらなくなり、コード
+> ブロックの中だけが違う 2 つの本文は完全一致の重複になる。
 
 **pre-1.2.0 のモジバケ復旧ルーチンは意図的に Lite には移植しない**。
 あのルーチンは初期 Free 版が cp932 でデコードしてしまった行をレトロアクティブ
@@ -1019,7 +1045,7 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 - `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索上位 K 件に対する TTL 再設定と `access_count` インクリメント。再設定は既存エントリの TTL をリセットするのみで、新規エントリの寿命を超えて延長することはない。チャンクがヒットして親ドキュメントを展開する際は、`mem:<chunk_id>` の TTL と同時に `doc:<parent_id>` の TTL も更新されるため、verbatim recall 能力はチャンクと同期して維持される。
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — 融合スコア後の軽量語彙リランカー（[§3.6](#36-ランキング式)）。`false` で従来スコア素通し。
 - `b_session_match` / `b_session_mismatch` — ランキング式の `b_session` 係数（[§3.6](#36-ランキング式)）。検索リクエストの `effective_session`（呼び出し時引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUID）と行の保存時 `session_id` を比較し、一致なら `b_session_match`（既定 `1.0`）、それ以外なら `b_session_mismatch`（既定 `0.6`）を最終スコアに乗算する。両方を `1.0` に設定すれば実質無効化（全行対称）。
-- `skip_code_blocks` — `true` のとき `save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含む本文を拒否し、`{"status": "skipped_code", "saved": false}` を返す。既定は `false`（FastAPI 時代の N3MemoryCore に倣い「コードをメモリに入れたくない」ユーザー向けのオプトイン）。ヒューリスティックはフェンス記号のみ — 散文とコード混在でも一括拒否であり、コード部分だけを剥離する処理は行わない。LLM は §5 の指示で、`skipped_code` を受けた同一ペイロードを再送せず、代わりにコードの要約散文を保存するよう誘導される。
+- `skip_code_blocks` — `true` のとき `save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含む本文を拒否し、`{"status": "skipped_code", "saved": false}` を返す。既定は `false`（FastAPI 時代の N3MemoryCore に倣い「コードをメモリに入れたくない」ユーザー向けのオプトイン）。ヒューリスティックはフェンス記号のみ — 散文とコード混在でも一括拒否である。`false` のときは、コードブロックを `[code omitted]` に置き換えて保存する（v1.9.0、§3.13）。LLM は §5 の指示で、`skipped_code` を受けた同一ペイロードを再送せず、代わりにコードの要約散文を保存するよう誘導される。
 - `embedding_model` / `embedding_dim` — 埋め込みモデル名（既定 `intfloat/multilingual-e5-base`）と、そのモデルの出力ベクトル次元（既定 `768`）。[§3.2](#32-埋め込み) 参照。運用者が品質・リソース・言語のトレードオフを選べるよう設定可能化した項目で、製品自体は言語中立を保つ。`embedding_dim` は **`embedding_model` の実際の出力次元と一致させること** — RediSearch のベクトルインデックス（`DIM`）はこの値で構築されるため、不一致だと保存・検索が失敗する。両者の変更は**プロセス再起動 + インデックスフラッシュ**を要する（Lite は 7 日 TTL なので、既存データは放置しても自然消滅する）。既定のままなら従来挙動と完全に同一。
 
 **読めない・型を誤った `config.json`（v1.7.0）** — ユーザーはこのファイルを手で編集する（例：`vector_min_cos` の調整）ため、書き間違いは起こる前提とする。**上書きしない。**
@@ -1302,7 +1328,9 @@ n3mcmcp-lite/
 | `TestConfigRanges`（v1.7.1） | `ttl_seconds` の `604800.5` / `0`、`embedding_dim` の `768.0`、`chunk_overlap >= chunk_threshold`、`chunk_threshold` 10、`half_life_days` 0、`min_score` 1.5 が `config_type` 付きで無視される（**v1.7.2**：`min_results` の `-1` と `1.5` も同じ。`0` は受け付ける）。区切りのない本文で `chunk_text(text, 100, 100)` が終わる |
 | `TestLongSaveAtomic`（v1.7.1、*Redis*） | 長文の保存の途中で埋め込みが失敗しても `doc:` / `docsha:` のキーが残らず、そのあと同じ本文を保存できる。ガードは `SET NX` で取り、親とすべてのチャンクは 1 つのパイプラインで書かれる |
 | `TestIndexFailure`（v1.7.1） | `FT.CREATE` が `unknown command` で失敗しても `_main()` が終わらない。ツールは「Redis Stack が必要」の案内を返す。次の呼び出しで索引を再試行する。既存の索引の `DIM` が違えば `index_dim_mismatch` が加わる |
-| `TestEnforceEphemeral`（v1.7.1、*Redis*） | 空の DB や `mem:` / `doc:` / `docsha:` のキーだけの DB では `CONFIG SET` される。ほかのキーがある DB ではされず、`shared_redis` が加わる。拒否された `CONFIG` は接続を失敗させずに `config_refused` を加える |
+| `TestEnforceEphemeral`（v1.7.1、*Redis*） | 空の DB や `mem:` / `doc:` / `docsha:` のキーだけの DB では `CONFIG SET` される。ほかのキーがある DB ではされず、`shared_redis` が加わる。サーバーのほかの DB にキーがあるとき（v1.8.1）や `INFO` が拒否されたときも、設定を変えずに `shared_redis` が加わる。拒否された `CONFIG` は接続を失敗させずに `config_refused` を加える |
+| `TestCodeOmittedOnSave`（v1.9.0、*Redis*） | 短い本文も親ドキュメントも、コードブロックを `[code omitted]` に置き換えて保存される（生の `HGET` で確認）。インラインのバッククォートは残る。閉じていないフェンスは終わりまで置き換える。コードブロックの中だけが違う 2 つの本文は完全一致の重複になる。`skip_code_blocks: true` は今までどおり本文を断る。フェンスのまま保存された記録（1.11.x 以前）も `[code omitted]` と見える |
+| `TestSurroundingWhitespace`（v1.8.1、*Redis*） | 外側の `strip()`：`' \nAAA\n '` は `AAA` として保存される。親ドキュメントは中の改行を残し、外側の空白だけを落とす。前後の空白だけが違う本文は完全一致の重複になる。空白だけの本文は `empty content` で拒否される |
 | `TestModelWait`（v1.7.1） | ロードが `MODEL_WAIT_SECONDS`（テストでは短く差し替え）より長くロックを持つ間、`search_memory` は「still loading」の通知付きでキーワードだけで答え、`save_memory` は `detail` 付きでベクトルなしで保存する |
 | `TestListPaging`（v1.7.1、*Redis*） | 独立メモリと 260 チャンクの文書を保存したあと、`list_memories(20)` が両方を一覧に出す |
 | `TestGuardRefresh`（v1.7.1、*Redis*） | 検索ヒットで、レコードと一緒に `mem:sha:`（独立）と `docsha:`（文書）の TTL が設定し直される |

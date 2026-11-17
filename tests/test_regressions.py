@@ -1979,3 +1979,164 @@ class TestConfigRangesV172:
         cfg = C.load_config()
         assert cfg["min_results"] == 0
         assert not any("min_results" in n for n in cfg.get("_notices", []))
+
+
+# ── v1.8.1 code review of 2026-11-17 ───────────────────────────────────────
+
+@requires_redis
+class TestEnforceEphemeralOtherDb:
+    """§3.4 step 1 (v1.8.1): SCAN sees only the connected DB, CONFIG SET the
+    whole server, so keys in another DB leave the configuration alone."""
+
+    def _spy(self, db, monkeypatch):
+        calls = []
+        real = db._client.config_set
+
+        def spy(k, v):
+            calls.append((k, v))
+            return real(k, v)
+        monkeypatch.setattr(db._client, "config_set", spy)
+        return calls
+
+    def _other_db(self, db):
+        import redis as redis_lib
+        current = int(db._client.connection_pool.connection_kwargs.get("db", 0) or 0)
+        # from_url would let the URL's "/0" win over db=, so copy the kwargs.
+        kwargs = dict(db._client.connection_pool.connection_kwargs)
+        kwargs["db"] = (current + 1) % 16
+        other = redis_lib.Redis(**kwargs)
+        assert other.connection_pool.connection_kwargs["db"] != current
+        if other.dbsize() != 0:
+            pytest.skip("the neighbouring DB of the test Redis is not empty")
+        return other
+
+    def test_key_in_other_db_leaves_config(self, db, redis_client, monkeypatch):
+        other = self._other_db(db)
+        calls = self._spy(db, monkeypatch)
+        other.set("someone-else:data", b"1")
+        redis_client.delete(TEST_DB_MARKER)
+        try:
+            assert redis_client.dbsize() == 0      # the connected DB is empty
+            db.enforce_ephemeral()
+        finally:
+            other.delete("someone-else:data")
+            redis_client.set(TEST_DB_MARKER, b"1")
+        assert calls == []
+        notes = [n for n in db.cfg["_notices"] if n.startswith("shared_redis")]
+        assert len(notes) == 1
+
+    def test_refused_info_leaves_config(self, db, redis_client, monkeypatch):
+        import redis as redis_lib
+        calls = self._spy(db, monkeypatch)
+
+        def refuse(*a, **k):
+            raise redis_lib.ResponseError("NOPERM this user has no permissions")
+        monkeypatch.setattr(db._client, "info", refuse)
+        redis_client.delete(TEST_DB_MARKER)
+        try:
+            db.enforce_ephemeral()
+        finally:
+            redis_client.set(TEST_DB_MARKER, b"1")
+        assert calls == []
+        assert any(n.startswith("shared_redis") for n in db.cfg["_notices"])
+
+    def test_empty_server_still_gets_config_set(self, db, redis_client, monkeypatch):
+        self._other_db(db)
+        calls = self._spy(db, monkeypatch)
+        redis_client.delete(TEST_DB_MARKER)
+        try:
+            keyspace = db._client.info("keyspace")
+            if any(int(v.get("keys", 0)) for v in keyspace.values()):
+                pytest.skip("another DB of the test Redis holds keys")
+            db.enforce_ephemeral()
+        finally:
+            redis_client.set(TEST_DB_MARKER, b"1")
+        assert ("appendonly", "no") in calls and ("save", "") in calls
+
+
+@requires_redis
+class TestSurroundingWhitespace:
+    """§3.13 (v1.8.1 text, behaviour of every release): save_memory strips the
+    leading and trailing whitespace once; everything inside is kept."""
+
+    def _stored(self, redis_client, prefix):
+        out = []
+        for key in redis_client.scan_iter(match=prefix + "*"):
+            if key.startswith(b"mem:sha:"):
+                continue
+            body = redis_client.hget(key, "content")
+            if body is not None:
+                out.append(body.decode("utf-8"))
+        return out
+
+    def test_short_body_is_stripped(self, db, redis_client, fake_embed):
+        assert db.save_memory(" \nAAA short body\n ")["saved"] is True
+        assert "AAA short body" in self._stored(redis_client, "mem:")
+
+    def test_parent_document_keeps_interior(self, db, redis_client, fake_embed):
+        inner = "indented first line\n\n" + ("long body sentence. " * 40).strip()
+        assert db.save_memory("\n    " + inner + "\n\n")["saved"] is True
+        assert self._stored(redis_client, "doc:") == [inner]
+
+    def test_surrounding_whitespace_is_a_duplicate(self, db, fake_embed):
+        assert db.save_memory("same words")["saved"] is True
+        assert db.save_memory("same words\n")["saved"] is False
+
+    def test_whitespace_only_rejected(self, db):
+        out = db.save_memory(" \n\t ")
+        assert out["saved"] is False and out["reason"] == "empty content"
+
+
+# ── v1.9.0 code blocks replaced on save ────────────────────────────────────
+
+@requires_redis
+class TestCodeOmittedOnSave:
+    """§3.13 (v1.9.0): save_memory stores [code omitted] in place of each
+    fenced block; display still applies purify() to rows saved by 1.11.x."""
+
+    def _stored(self, redis_client, prefix):
+        out = []
+        for key in redis_client.scan_iter(match=prefix + "*"):
+            if key.startswith(b"mem:sha:"):
+                continue
+            body = redis_client.hget(key, "content")
+            if body is not None:
+                out.append(body.decode("utf-8"))
+        return out
+
+    def test_short_body(self, db, redis_client, fake_embed):
+        body = "use `inline` like this\n```python\nprint('secret_fn')\n```\nthen done"
+        assert db.save_memory(body)["saved"] is True
+        stored = self._stored(redis_client, "mem:")
+        assert stored == ["use `inline` like this\n[code omitted]\nthen done"]
+
+    def test_parent_document(self, db, redis_client, fake_embed):
+        body = ("long prose sentence. " * 30) + "\n```js\nconst secret_fn = 1;\n```\n" + ("more prose. " * 10)
+        assert len(body) > 400
+        assert db.save_memory(body)["saved"] is True
+        docs = self._stored(redis_client, "doc:")
+        assert len(docs) == 1 and "[code omitted]" in docs[0] and "secret_fn" not in docs[0]
+        assert all("secret_fn" not in c for c in self._stored(redis_client, "mem:"))
+
+    def test_unclosed_fence(self, db, redis_client, fake_embed):
+        assert db.save_memory("intro\n```\nnever closed secret_fn")["saved"] is True
+        assert self._stored(redis_client, "mem:") == ["intro\n[code omitted]"]
+
+    def test_code_only_difference_is_duplicate(self, db, fake_embed):
+        assert db.save_memory("note\n```\na = 1\n```")["saved"] is True
+        assert db.save_memory("note\n```\nb = 2\n```")["saved"] is False
+
+    def test_skip_code_blocks_still_rejects(self, db, redis_client):
+        db.cfg["skip_code_blocks"] = True
+        out = db.save_memory("see\n```\nx\n```")
+        assert out["status"] == "skipped_code"
+        assert self._stored(redis_client, "mem:") == []
+
+    def test_old_raw_row_is_still_shown_omitted(self, db, redis_client, fake_embed):
+        from n3mc_mcp import server as S
+        assert db.save_memory("placeholder body for an old row")["saved"] is True
+        key = next(k for k in redis_client.scan_iter(match="mem:*") if not k.startswith(b"mem:sha:"))
+        redis_client.hset(key, "content", "old row\n```\nsecret_fn()\n```")
+        rows = db.list_memories()
+        assert any("secret_fn" in (r.get("content") or "") for r in rows)  # raw in Redis
+        assert "secret_fn" not in S.purify(rows[0].get("content", ""))

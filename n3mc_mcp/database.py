@@ -34,6 +34,7 @@ from .processor import (
     embed,
     has_visible_text,
     model_unavailable_message,
+    purify,
     filter_score,
     final_score,
     judged_score,
@@ -428,6 +429,30 @@ class Database:
             if cursor == 0:
                 return True
 
+    def _other_dbs_hold_keys(self) -> bool:
+        """spec §3.4 step 1 (v1.8.1): True when another database of the
+        server holds keys, or when INFO is refused (they cannot be checked).
+        SCAN sees only the connected DB, but CONFIG SET changes the server."""
+        try:
+            keyspace = self._client.info("keyspace")
+        except _CONN_ERRORS:
+            raise
+        except Exception as e:
+            print(f"[n3mc] enforce_ephemeral: INFO keyspace refused: {e}", file=sys.stderr)
+            return True
+        current = int(self._client.connection_pool.connection_kwargs.get("db", 0) or 0)
+        for name, stats in (keyspace or {}).items():
+            if not str(name).startswith("db"):
+                continue
+            try:
+                index = int(str(name)[2:])
+            except ValueError:
+                continue
+            keys = stats.get("keys", 0) if isinstance(stats, dict) else 0
+            if index != current and int(keys or 0) > 0:
+                return True
+        return False
+
     def enforce_ephemeral(self) -> None:
         """Turn off RDB/AOF persistence (spec §3.4, v1.7.1).
 
@@ -439,7 +464,7 @@ class Database:
         if not self._ok:
             return
         where = _where(self.cfg.get("redis_url", ""))
-        if not self._only_n3mc_keys():
+        if self._other_dbs_hold_keys() or not self._only_n3mc_keys():
             self._add_notice(
                 f"shared_redis: the Redis at {where} also holds keys that are "
                 "not N3MC's, so its persistence settings were left unchanged. "
@@ -674,6 +699,9 @@ class Database:
                 "saved": False,
                 "reason": "content contains a code fence (```); skip_code_blocks=true",
             }
+        # §3.13 (v1.9.0): code blocks are replaced before hashing, chunking,
+        # embedding and storing; display keeps applying purify() for old rows.
+        content = purify(content)
 
         threshold = self.cfg.get("chunk_threshold", 400)
         if len(content) <= threshold:
