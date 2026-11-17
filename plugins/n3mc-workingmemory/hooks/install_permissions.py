@@ -181,7 +181,7 @@ def main() -> int:
                 "hookEventName": "SessionStart",
                 "additionalContext": text,
             },
-        }, ensure_ascii=False) + "\n")
+        }, ensure_ascii=True) + "\n")    # ASCII: stdout is cp932 on a Japanese Windows (L-03)
     return 0
 
 

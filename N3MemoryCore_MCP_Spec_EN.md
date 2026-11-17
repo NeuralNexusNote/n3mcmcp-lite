@@ -283,9 +283,9 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 
 > **⚠️ Implementation note (redis-py 8.0+ / RESP3)**: As of redis-py 8.0 the default protocol of `from_url()` became **RESP3**. Combining `decode_responses=False` with RESP3 makes `FT.SEARCH` responses arrive as a **dict keyed by bytes**, `Result.from_resp3` fails to parse, and **search always returns 0 results**. **The current implementation absorbs this by (a) pinning `redis<8.0.0` in `pyproject.toml` and (b) also handling the case where `FT.SEARCH` returns a dict response.** If you deliberately use a newer redis-py, **explicitly pass `protocol=2` (RESP2)** on connect (`redis.from_url(url, decode_responses=False, protocol=2)`). Apply this to **both** the live client and the test fixtures.
 
-**TTL**: every `HSET` of `mem:<uuid>` is followed (atomically via `PIPELINE`) by `EXPIRE mem:<uuid> <ttl_seconds>`. The sibling `mem:sha:<sha1>` guard is written with `SET ... EX <ttl_seconds>` in the same pipeline. Default TTL is 604 800 s (7 d).
+**TTL**: every `HSET` of `mem:<uuid>` is followed, in the same pipeline, by `EXPIRE mem:<uuid> <ttl_seconds>`. The sibling `mem:sha:<sha1>` guard is taken **before** that pipeline, with `SET … NX EX <ttl_seconds>` (§3.8), so it has the same TTL. Default TTL is 604 800 s (7 d).
 
-**Pipeline atomicity**: the three commands (`HSET`, `EXPIRE`, `SET`) ship as one pipeline, so partial-failure interleavings that could produce a record without a TTL or a sha-guard without a record are not possible. The long-content path follows the same rule since v1.7.1: after every chunk embedding has been computed and the `docsha:` guard has been taken with `SET … NX EX`, the parent document and **all** chunks are written in **one** pipeline; if that pipeline fails, the guard is deleted again (§3.8 (B)). Pipelines are sent with `transaction=True` (`MULTI`/`EXEC`).
+**Pipeline atomicity and the guard**: a record and its `EXPIRE` ship in one pipeline, so a record without a TTL is not possible. The guard is written first, on its own: `SET NX` decides which of two simultaneous saves of the same content wins (§3.8). So for a short moment a guard exists without its record. If anything fails after the guard was taken — building the record or sending the pipeline — the guard is deleted again (best effort), so the same content can be saved again (§3.8 (A) step 4, (B) step 4); only if that delete fails too, or the process stops in between, does the guard stay until its TTL runs out. The long-content path follows the same rule since v1.7.1: after every chunk embedding has been computed and the `docsha:` guard has been taken with `SET … NX EX`, the parent document and **all** chunks are written in **one** pipeline. Pipelines are sent with `transaction=True` (`MULTI`/`EXEC`). (Until the final review of 2026-11-18, L-04, this paragraph said that the guard was sent in the same pipeline as the record, so that a guard without a record could not exist; the code has taken the guard first since v1.7.1.)
 
 **Guards follow their record's TTL (v1.7.1)**: whenever a record's TTL is reset by a search hit (§3.11 / §3.14 step 7), the dedup guard of that record is reset with it — `SET mem:sha:<sha1> <id> EX <ttl_seconds>` for a standalone record, `SET docsha:<sha1> <parent_id> EX <ttl_seconds>` for a parent document — **only while the record still exists**, using the conditional script `SET_GUARD_IF_EXISTS` below (v1.7.3). The `<sha1>` is recomputed from the stored content with the same function `save_memory` uses (SHA-1 of the NFKC-normalized text), so records saved by earlier versions need no extra field. A chunk has no guard of its own; its parent's guard is reset when the parent is.
 
@@ -325,7 +325,7 @@ return 0
 
 ### 3.4 Ephemerality (No Modifications or Optimizations Allowed)
 
-On `save_memory` calls, complete HSET + EXPIRE + sha1-guard in a single pipeline — no batching, no queuing. The key must have a finite TTL when the `save_memory` response returns.
+On `save_memory` calls, take the sha1 guard (`SET NX EX`) and write HSET + EXPIRE in one pipeline, both inside the same call (§3.3, §3.8) — no batching, no queuing. The key must have a finite TTL when the `save_memory` response returns.
 
 **The following are absolutely prohibited (even for "performance" or "persistence" reasons):**
 - Writing records without an `EXPIRE` (i.e. infinite TTL).
@@ -360,6 +360,7 @@ mem:<uuid>                  HASH (memory record OR chunk)
     local_id        string      TAG
     agent_name        string      TAG
     session_id      string      TAG
+    turn_id         string      TAG — the turn_id of save_memory (empty string when none)
     importance      number      0.5–2.0 (from save_memory; default 1.0)
     access_count    number      search-hit counter (feeds frequency boost)
     parent_id       string      TAG — parent doc id when this row is a chunk
@@ -382,6 +383,7 @@ doc:<uuid>                  HASH (parent document — verbatim whole-body store;
     local_id        string
     agent_name        string
     session_id      string
+    turn_id         string      the turn_id of save_memory (empty string when none)
     chunk_count     number      number of chunks emitted for this doc
     chunk_ids       string      space-separated list of child chunk ids (for sibling-chunk TTL refresh)
     TTL                         ttl_seconds
@@ -399,6 +401,7 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
         local_id        TAG
         agent_name        TAG
         session_id      TAG
+        turn_id         TAG
         importance      NUMERIC
         access_count    NUMERIC
         parent_id       TAG
@@ -563,7 +566,7 @@ A record matches when it contains **any** term; BM25 scores records with more an
 1. **Exact dedup (O(1))** — `EXISTS mem:sha:<sha1(content)>`. If the key exists, return `{"status": "duplicate", "saved": false}`.
 2. Compute the embedding.
 3. **Take the guard atomically (v1.7.1)** — `SET mem:sha:<sha1> <id> NX EX <ttl_seconds>`. If it returns nothing, another save of the same content got there first: return `duplicate`. (Step 1 only avoids computing an embedding for an obvious duplicate; step 3 decides. v1.7.0's `EXISTS` → write let two simultaneous saves of the same content both through.)
-4. Pipeline `HSET mem:<id>` + `EXPIRE`. If this fails, delete the guard taken in step 3 (best effort) so the content can be saved again, then report the error.
+4. Pipeline `HSET mem:<id>` + `EXPIRE`. If **anything** fails after the guard was taken in step 3 — building the record's fields or sending the pipeline — delete the guard (best effort) so the content can be saved again, then report the error. (Until the final review of 2026-11-18, L-01, only a failed pipeline released it: a failure while the fields were built — a lone surrogate in `agent_name` / `session_id` / `turn_id`, or a value that is not a string, such as `turn_id: 12` from an older MCP SDK that does not check the input types — left the guard, and the content was answered `duplicate` for `ttl_seconds` although nothing was stored.)
 
 **(B) Multi-chunk path** (body > `chunk_threshold`): dedup runs at the **parent-document level** against the full body.
 
@@ -574,7 +577,7 @@ If the parent-level check passes, a single `save_memory` call (v1.7.1):
 1. Splits the body and **computes the embedding of every chunk first** (no Redis write yet).
 2. Takes the guard: `SET docsha:<sha1(full_text)> <parent_id> NX EX <ttl_seconds>`; if it returns nothing, return `duplicate` with the existing `parent_id`.
 3. Writes `doc:<parent_id>` (HSET + EXPIRE) and **all** chunks (HSET + EXPIRE each; no per-chunk sha guard; each chunk's `parent_id` field is set to the parent id) in **one** pipeline.
-4. If step 3 fails, deletes `docsha:` (best effort) and reports the error, so nothing is left half-written and the same body can be saved again.
+4. If **anything** fails after the guard was taken in step 2 — building the pipeline or sending it — deletes `docsha:` (best effort) and reports the error, so nothing is left half-written and the same body can be saved again (L-01, as in (A) step 4).
 
 > **⚠️ Why (v1.7.1, Lite review LM1)**: v1.7.0 wrote the parent and `docsha:` in a first pipeline and computed the chunk embeddings and wrote the chunks afterwards. A failure in between (connection lost, embedding exception) left a parent and a guard without chunks: the document could not be found (search hits chunks only), and re-saving it was rejected as `duplicate` for 7 days (reproduced).
 
@@ -745,9 +748,11 @@ for _stream_name in ("stdin", "stdout", "stderr"):
             pass
 ```
 
-**(2) Lone-surrogate sanitization** — every `save_memory.content` and
-`search_memory.query` is passed through `sanitize_surrogates()` before any
-`.encode("utf-8")` call. Lone UTF-16 surrogate halves (`U+D800`–`U+DFFF`)
+**(2) Lone-surrogate sanitization** — every `save_memory.content`,
+`save_memory.agent_name`, `save_memory.session_id`, `save_memory.turn_id`
+(these three since the final review of 2026-11-18, L-01; a value without
+surrogates is unchanged) and `search_memory.query` is passed through
+`sanitize_surrogates()` before any `.encode("utf-8")` call. Lone UTF-16 surrogate halves (`U+D800`–`U+DFFF`)
 appear when Windows subprocess pipes deliver UTF-8 bytes that Python's decoder
 maps with `errors="surrogateescape"`. They round-trip through `json.loads` but
 raise `UnicodeEncodeError` at SHA1 / Redis HSET / embedding time. Without the
@@ -991,7 +996,7 @@ The instructions require the LLM to:
 4. **Handle tool errors visibly — never generate long content blind** — if `search_memory` / `save_memory` returns a server error (Redis unreachable, connection refused, timeout, "start Redis Stack" hint, etc.), **STOP and surface the failure to the user in their language BEFORE generating any long creative or spec content**. Rationale: with the backend down, every subsequent `save_memory` also fails silently, so a long setting / design doc / code architecture produced during the outage is lost the moment the session closes — and the user will not realize the memory layer was broken until recall fails. Required behavior: (a) announce the failure succinctly (e.g. "Memory backend is unreachable — save/search are offline right now"), (b) relay the recovery hint the tool returned (e.g. `docker run -p 6379:6379 redis/redis-stack-server:latest`), (c) ask whether to proceed without memory (so the user knows this session will not persist) or to pause until the backend is restored. Short factual replies may proceed, but must still mention the error once so the user knows saves are failing.
 5. **Skip noise** — do not save greetings, clarifying questions, or mechanical acknowledgements.
 6. **Respect explicit requests** — honor "don't save this" and "forget that" (use `delete_memory`).
-7. **Inform the user about the 7-day TTL when they expect permanence** — the TTL is visible to the LLM (this INSTRUCTIONS block, the `search_memory` tool description, and the `ttl_seconds` field on every `save_memory` response) but is **invisible to the human user**. Default behavior remains silent auto-save (rule 2) — do NOT mention TTL on every save. However, when the user's message signals an expectation of long-term retention — explicit permanence phrases ("remember this forever", "don't forget", "save permanently", 「ずっと覚えておいて」「永続的に保存して」), a long setting / spec / code dump / world-building / character sheet the user obviously invested in, or a reference back to content saved more than ~5 days ago — add ONE short sentence in the user's language reminding them that Lite memories auto-expire 7 days after save, noting that the **Pro build (sqlite-vec backed, coming soon)** will offer persistence, and suggesting external backup in the meantime. Save anyway; do not ask permission. Emit the reminder ONCE per distinct long-term signal, not once per turn and not once per save. Rationale: without this rule, the LLM silently persists content that the user believes is permanent, and the user only discovers the loss when recall fails mid-project.
+7. **Inform the user about the 7-day TTL when they expect permanence** — the TTL is visible to the LLM (this INSTRUCTIONS block, the `search_memory` tool description, and the `ttl_seconds` field on every `save_memory` response) but is **invisible to the human user**. Default behavior remains silent auto-save (rule 2) — do NOT mention TTL on every save. However, when the user's message signals an expectation of long-term retention — explicit permanence phrases ("remember this forever", "don't forget", "save permanently", 「ずっと覚えておいて」「永続的に保存して」), a long setting / spec / code dump / world-building / character sheet the user obviously invested in, or a reference back to content saved more than ~5 days ago — add ONE short sentence in the user's language reminding them that Lite memories auto-expire 7 days after save, noting that the **Pro build (sqlite-vec backed)** offers persistence, and suggesting external backup otherwise. Save anyway; do not ask permission. Emit the reminder ONCE per distinct long-term signal, not once per turn and not once per save. Rationale: without this rule, the LLM silently persists content that the user believes is permanent, and the user only discovers the loss when recall fails mid-project.
 8. **Respect the `skip_code_blocks` server policy** — when `save_memory` returns `{"status": "skipped_code", "saved": false}`, the server is configured to reject any payload containing a triple-backtick fence (see [§6](#6-configuration)). This mirrors the FastAPI-era N3MemoryCore's code-exclusion behavior for users who intentionally keep code out of memory. With the default `false` the body is saved with its code blocks as `[code omitted]` (§3.13), and the INSTRUCTIONS text says so (v1.9.1). Do NOT retry the same payload; either save a prose description of what the code does, or skip saving for that turn. Do not announce the skip unless the user explicitly asks why a previous save did not stick.
 
 9. **Bulk cleanup via `delete_memories_by_session`** — Use this to wind down a finished project or remove test-run noise before TTL expiry, keeping search results clean. The operation is **irreversible** — confirm the `session_id` with the user before calling.
@@ -1100,7 +1105,7 @@ Complete schema (missing fields auto-filled with defaults below):
 - **While `config.json` is unreadable** (the run uses fresh in-memory IDs, table above), every `save_memory` response adds `"warning": "config_unreadable", "detail": "config.json could not be read, so this entry was saved under a temporary owner_id and will not be visible after the server restarts. Fix <path> and restart the MCP client."` (v1.7.1; v1.7.0 warned only on the first search — Lite review LL9). The warning is added to responses that saved something. If the entry was also saved without a vector, the two are combined: `"warning": "embedding_unavailable; config_unreadable"` and the two `detail` texts joined with a space.
 - **Notices**: `load_config()` collects these messages in `cfg["_notices"]` (a list of strings, each starting with its key, e.g. `config_type: …`) and prints each to `stderr`. The connection layer adds `shared_redis` / `config_refused` (§3.4) and `index_dim_mismatch` (§3.9) to the same list. The server prepends each notice **once**, to the output of the first successful `search_memory` call after the notice was added (an error response must still start with `Error:`, so the notices wait for the next successful search), as `> ⚠️ N3MC notice: <message>` lines, so the connected LLM can tell the user (§5 rule 11). A notice added later in the process — `shared_redis` after a reconnect, for example — is therefore shown on the next successful search (v1.7.1; v1.7.0 showed notices only on the first search of the process, so later ones were never shown). Fixing the cause and restarting the client clears them.
 
-> **Multi-account on a single PC**: each OS user runs the server under their own `config.json` by default. To share a Redis across accounts, set the same `redis_url` in both configs — entries are segregated via the `owner_id` TAG filter.
+> **Multi-account on a single PC**: each OS user runs the server under their own `config.json`, so each has its own `owner_id`. Lite does not share memories between owners: search and list show only the records of the configured `owner_id` (§3.12). Do not point two accounts at one Redis — the duplicate guards do not contain `owner_id`, so a body saved by one account is answered `duplicate` for the other (§3.8), and the other account's records can fill the search candidates (§3.12). Give each account its own Redis (another container on another port, set in its `redis_url`). Memories are shared only between servers that use the same `config.json` (the same `owner_id`), for example the Claude desktop app and the terminal `claude` of one account. (Until the final review of 2026-11-18, L-02, this note said that two accounts could share a Redis by setting the same `redis_url`.)
 
 ---
 
@@ -1215,7 +1220,7 @@ Wildcards cover all seven tools, including `recall_thread`, and any tool added l
 
 The fourth step also runs when a Python step exists but exits non-zero (an exception before the script's own handler), so the text names both causes (v1.7.1, Lite review LL7; the script itself always exits 0, so this is rare). `systemMessage` is shown to the user as a warning, and `additionalContext` lets the connected LLM explain it. A plain non-zero exit is **not** enough: Claude Code reports a failed `SessionStart` hook only as a `SessionStart hook error` notice in the transcript carrying the first stderr line (`python: command not found`), which says neither what breaks nor how to fix it, and the `/plugin` Errors tab lists plugin *load* errors (invalid `hooks.json`, bad paths), not hook *runtime* failures ([hooks docs](https://code.claude.com/docs/en/hooks.md), [plugin troubleshooting](https://code.claude.com/docs/en/plugins/troubleshooting.md)). v1.6.x relied on the Errors tab and was effectively silent.
 
-The same hook also performs a **`uvx` pre-flight check**: the plugin manifest ([`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)) launches the MCP server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so a missing `uvx` would otherwise surface only as an opaque `ENOENT` in the MCP launcher. The hook calls `shutil.which("uvx")` and, if not found, prints the same kind of JSON (`systemMessage` + `additionalContext`) with a bilingual install hint (`pipx install uv`, `curl -LsSf https://astral.sh/uv/install.sh | sh`, plus the docs URL) and exits 0. When both apply, the messages are combined into one JSON object (a hook's stdout must be a single JSON object).
+The same hook also performs a **`uvx` pre-flight check**: the plugin manifest ([`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)) launches the MCP server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so a missing `uvx` would otherwise surface only as an opaque `ENOENT` in the MCP launcher. The hook calls `shutil.which("uvx")` and, if not found, prints the same kind of JSON (`systemMessage` + `additionalContext`) with a bilingual install hint (`pipx install uv`, `curl -LsSf https://astral.sh/uv/install.sh | sh`, plus the docs URL) and exits 0. When both apply, the messages are combined into one JSON object (a hook's stdout must be a single JSON object). The object is written with `json.dumps(..., ensure_ascii=True)` — ASCII only, non-ASCII characters as `\uXXXX` escapes, which a JSON reader turns back into the same text: the script does not switch its stdout to UTF-8, and on a Japanese Windows it is cp932, while the `uvx` hint contains Japanese (final review of 2026-11-18, L-03; until then the JSON was written with `ensure_ascii=False`). `settings.json` itself is still written as UTF-8 with `ensure_ascii=False`.
 
 **If you installed without the plugin** (`claude mcp add`, manual `.mcp.json`), add the block below manually (wildcard form: `mcp__n3mc-workingmemory__*`). **If you installed the plugin but no Python interpreter is available**, add `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` instead (the plugin-scoped name). Put the rules in `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
 
@@ -1360,6 +1365,9 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestHangulFiller` (v1.7.1) | `U+3164`, `U+115F`, `U+1160`, `U+FFA0`, `U+2800` alone are rejected as no visible characters; with a visible character they are stored verbatim |
 | `TestPluginHook` (additions, v1.7.1) | `settings.json` is re-read just before writing and replaced atomically; the fallback text names "or the permission script failed" |
 | `TestWeakMatches` (v1.7.2, *Redis*) | With one row passing the floors and `min_results: 3`, two weak rows are added after it, ordered by `filter_score` and marked `_weak`; a candidate below `vector_min_cos` is added with its actual cos; `min_results: 0` adds nothing; nothing is added when enough rows pass; a `limit` smaller than `min_results` caps the total; two chunk hits of one parent document give one weak row, and a parent already in the results is not added again; a candidate with `filter_score` below `1e-6` is never added; **the TTL and `access_count` of a weak row's `mem:` / `doc:` / guard keys do not change** while a normal row's are refreshed; an empty or whitespace-only query adds no weak rows; the default config has `min_results: 3` |
+| `TestGuardReleasedOnAnyFailure` (final review of 2026-11-18, L-01, *Redis*) | For a short body and a long body: a save with `turn_id: 12` fails and leaves no `mem:sha:` / `docsha:` key, and the same body then saves; lone surrogates in `agent_name` / `session_id` / `turn_id` are stripped and the record is saved; fields without surrogates are stored unchanged |
+| `TestPluginHookAsciiStdout` (final review of 2026-11-18, L-03) | With `uvx` missing, the hook's stdout is one ASCII-only line whose `systemMessage` still contains the Japanese hint after `json.loads` |
+| `TestPublicRepoHygiene` (final review of 2026-11-18, L-05) | `tests/eval_uvx_missing.py` contains no absolute user path (the folders to strip are the `PATH` entries that hold `uvx`); `metadata.version` of `.claude-plugin/marketplace.json` equals the package version |
 
 ### Example runs
 

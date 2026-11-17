@@ -675,6 +675,11 @@ class Database:
         # case) collapses to empty and is rejected with "empty content"
         # rather than blowing up at .encode("utf-8") downstream.
         content = sanitize_surrogates(content).strip()
+        # §3.13 (2) (L-01): the other text fields are stored too, so they are
+        # cleaned the same way (a string without surrogates is unchanged).
+        agent_name = sanitize_surrogates(agent_name)
+        session_id = sanitize_surrogates(session_id)
+        turn_id    = sanitize_surrogates(turn_id)
         if not content:
             return {"status": "error", "saved": False, "reason": "empty content"}
         # §3.13 invisible-only contract: strip() keeps NUL / U+200B / U+FEFF,
@@ -762,30 +767,33 @@ class Database:
         ttl = self.cfg["ttl_seconds"]
         if not self._client.set(sha_key, mem_id.encode(), nx=True, ex=ttl):
             return {"status": "duplicate", "saved": False}
-        ngram = content_ngram(content)
-        now_iso = _now_iso()
-        now_epoch = _now_epoch()
-
-        fields: dict = {
-            b"id":              mem_id.encode(),
-            b"content":         content.encode("utf-8"),
-            b"content_ngram":   ngram.encode("utf-8"),
-            b"timestamp":       now_iso.encode(),
-            b"timestamp_epoch": str(now_epoch).encode(),
-            b"owner_id":        owner_id.encode(),
-            b"local_id":        self.cfg.get("local_id", "").encode(),
-            b"agent_name":      (agent_name or "").encode(),
-            b"session_id":      session_id.encode(),
-            b"turn_id":         turn_id.encode(),
-            b"importance":      str(importance).encode(),
-            b"access_count":    b"0",
-            b"parent_id":       b"",
-        }
-        if vec_bytes:
-            fields[b"embedding"] = vec_bytes
-
-        mem_key = f"mem:{mem_id}"
+        # §3.8 (A) step 4 (L-01): from here on, ANY failure releases the guard
+        # — also one while the record is being built (e.g. a non-string turn_id),
+        # not only a failed pipeline.
         try:
+            ngram = content_ngram(content)
+            now_iso = _now_iso()
+            now_epoch = _now_epoch()
+
+            fields: dict = {
+                b"id":              mem_id.encode(),
+                b"content":         content.encode("utf-8"),
+                b"content_ngram":   ngram.encode("utf-8"),
+                b"timestamp":       now_iso.encode(),
+                b"timestamp_epoch": str(now_epoch).encode(),
+                b"owner_id":        owner_id.encode(),
+                b"local_id":        self.cfg.get("local_id", "").encode(),
+                b"agent_name":      (agent_name or "").encode(),
+                b"session_id":      session_id.encode(),
+                b"turn_id":         turn_id.encode(),
+                b"importance":      str(importance).encode(),
+                b"access_count":    b"0",
+                b"parent_id":       b"",
+            }
+            if vec_bytes:
+                fields[b"embedding"] = vec_bytes
+
+            mem_key = f"mem:{mem_id}"
             pipe = self._client.pipeline(transaction=True)
             pipe.hset(mem_key, mapping=fields)
             pipe.expire(mem_key, ttl)
@@ -877,53 +885,55 @@ class Database:
             return duplicate() or {"status": "duplicate", "saved": False}
 
         # Step 3: parent + all chunks in ONE pipeline (MULTI/EXEC).
-        doc_key = f"doc:{parent_id}"
-        pipe = self._client.pipeline(transaction=True)
-        pipe.hset(
-            doc_key,
-            mapping={
-                b"id":              parent_id.encode(),
-                b"content":         content.encode("utf-8"),
-                b"timestamp":       now_iso.encode(),
-                b"timestamp_epoch": str(now_epoch).encode(),
-                b"owner_id":        owner_id.encode(),
-                b"local_id":        local_id.encode(),
-                b"agent_name":      (agent_name or "").encode(),
-                b"session_id":      session_id.encode(),
-                b"turn_id":         turn_id.encode(),
-                b"chunk_count":     str(len(chunks)).encode(),
-                b"chunk_ids":       " ".join(chunk_ids).encode(),
-            },
-        )
-        pipe.expire(doc_key, ttl)
-
-        # No per-chunk SHA guards (spec §3.8): sliding-window chunks overlap
-        # by design and would otherwise reject each other.
-        for chunk, chunk_id, vec_bytes in zip(chunks, chunk_ids, vectors):
-            ngram     = content_ngram(chunk)
-            fields: dict = {
-                b"id":              chunk_id.encode(),
-                b"content":         chunk.encode("utf-8"),
-                b"content_ngram":   ngram.encode("utf-8"),
-                b"timestamp":       now_iso.encode(),
-                b"timestamp_epoch": str(now_epoch).encode(),
-                b"owner_id":        owner_id.encode(),
-                b"local_id":        local_id.encode(),
-                b"agent_name":      (agent_name or "").encode(),
-                b"session_id":      session_id.encode(),
-                b"turn_id":         turn_id.encode(),
-                b"importance":      str(importance).encode(),
-                b"access_count":    b"0",
-                b"parent_id":       parent_id.encode(),
-            }
-            if vec_bytes:
-                fields[b"embedding"] = vec_bytes
-            pipe.hset(f"mem:{chunk_id}", mapping=fields)
-            pipe.expire(f"mem:{chunk_id}", ttl)
+        # Step 4 (L-01): ANY failure from here on — building the pipeline
+        # (e.g. a non-string turn_id) or sending it — releases the guard, so
+        # the same body can be saved again.
         try:
+            doc_key = f"doc:{parent_id}"
+            pipe = self._client.pipeline(transaction=True)
+            pipe.hset(
+                doc_key,
+                mapping={
+                    b"id":              parent_id.encode(),
+                    b"content":         content.encode("utf-8"),
+                    b"timestamp":       now_iso.encode(),
+                    b"timestamp_epoch": str(now_epoch).encode(),
+                    b"owner_id":        owner_id.encode(),
+                    b"local_id":        local_id.encode(),
+                    b"agent_name":      (agent_name or "").encode(),
+                    b"session_id":      session_id.encode(),
+                    b"turn_id":         turn_id.encode(),
+                    b"chunk_count":     str(len(chunks)).encode(),
+                    b"chunk_ids":       " ".join(chunk_ids).encode(),
+                },
+            )
+            pipe.expire(doc_key, ttl)
+
+            # No per-chunk SHA guards (spec §3.8): sliding-window chunks overlap
+            # by design and would otherwise reject each other.
+            for chunk, chunk_id, vec_bytes in zip(chunks, chunk_ids, vectors):
+                ngram     = content_ngram(chunk)
+                fields: dict = {
+                    b"id":              chunk_id.encode(),
+                    b"content":         chunk.encode("utf-8"),
+                    b"content_ngram":   ngram.encode("utf-8"),
+                    b"timestamp":       now_iso.encode(),
+                    b"timestamp_epoch": str(now_epoch).encode(),
+                    b"owner_id":        owner_id.encode(),
+                    b"local_id":        local_id.encode(),
+                    b"agent_name":      (agent_name or "").encode(),
+                    b"session_id":      session_id.encode(),
+                    b"turn_id":         turn_id.encode(),
+                    b"importance":      str(importance).encode(),
+                    b"access_count":    b"0",
+                    b"parent_id":       parent_id.encode(),
+                }
+                if vec_bytes:
+                    fields[b"embedding"] = vec_bytes
+                pipe.hset(f"mem:{chunk_id}", mapping=fields)
+                pipe.expire(f"mem:{chunk_id}", ttl)
             pipe.execute()
         except Exception:
-            # Step 4: release the guard so the same body can be saved again.
             self._release_guard(docsha_key)
             raise
 
