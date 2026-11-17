@@ -86,7 +86,9 @@ BEHAVIORAL RULES
 
    NOTE ON CODE BLOCKS: If the server config has `skip_code_blocks: true`,
    any content containing a triple-backtick fence (```) is rejected with
-   `status: "skipped_code"`. The default is `false` (code is saved). If
+   `status: "skipped_code"`. The default is `false`: the content is saved
+   with each code block replaced by [code omitted] — the code itself is
+   never kept or returned (it belongs in the project files). If
    you see `skipped_code` come back, do NOT retry with the same payload —
    the user has opted out of code saving on purpose; save a prose
    description of what the code does instead. Do not announce the skip
@@ -94,7 +96,7 @@ BEHAVIORAL RULES
 
 3. LONG CONTENT — SAVE VERBATIM IN ONE CALL
    When the turn produces OR receives a long body (> ~400 chars) the user
-   may want back verbatim — a pasted spec / log / code dump, or a long
+   may want back verbatim — a pasted spec / article / log, or a long
    creative setting you just generated — pass the FULL text to a SINGLE
    `save_memory` call. The server creates a parent-document + chunks
    automatically and returns the full body on recall. Do NOT split long
@@ -144,7 +146,7 @@ BEHAVIORAL RULES
    - Explicit permanence words: "remember this forever", "don't forget",
      "save this permanently", "keep this for next time", "次回も覚えていて",
      「ずっと覚えておいて」「永続的に保存して」「絶対忘れないで」
-   - Pasting or generating a long setting / spec / code dump / world-
+   - Pasting or generating a long setting / spec / world-
      building / character sheet that the user obviously invested time in.
    - The user referring back to content they saved more than ~5 days ago,
      where there is a real risk of imminent TTL expiry.

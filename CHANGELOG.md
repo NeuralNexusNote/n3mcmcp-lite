@@ -9,6 +9,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-11-17
+
+Spec v1.9.0 → v1.9.1 (JP/EN). The instructions the server sends to the model
+now match how code blocks are saved: they said "the default is `false` (code
+is saved)" and listed a pasted code dump among the long bodies to save
+verbatim. They now say that content is saved with each code block replaced
+by `[code omitted]` and that the code itself is never kept or returned.
+Saving and display are unchanged.
+
 ## [1.12.0] — 2026-11-17
 
 Spec v1.8.0 → v1.9.0 (JP/EN): two findings of the code review of
