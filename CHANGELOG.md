@@ -9,6 +9,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Docs
+- The specification (EN / JP, §3.8 and §3.12) and the README say that one
+  Redis is for one installation (one `owner_id`): if several PCs or people
+  share a Redis, or `owner_id` is re-created while old records remain, a body
+  one owner saved is `duplicate` for the other until it expires, and one
+  owner's records can fill the search candidates so the other's are not
+  found (second review of 2026-11-17, L01 / L02). No change in behavior.
+
 ### Tests
 - `test_foreign_key_leaves_config_and_notices` expects the host:port of the
   Redis under test (`N3MC_REDIS_TEST_URL`) instead of a fixed `:6390`, so it

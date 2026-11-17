@@ -316,6 +316,13 @@ owner_id  (one N3MC server / data owner)
 - **You should not pass `owner_id`** unless you specifically need to
   prove ownership (the server validates it against `config.json` and
   rejects mismatches; an empty value means "use my own").
+- **Use one Redis per installation.** Lite assumes one `owner_id` per
+  Redis (one PC, a dedicated container). If several PCs or people point
+  at the same Redis, or `config.json` is re-created with a new
+  `owner_id` while old records remain: a body one owner saved is
+  rejected as `duplicate` for the other until it expires (7 days), and
+  one owner's records can fill the search candidates so the other's are
+  not found. Nothing is deleted. Give each installation its own Redis.
 
 ## Prerequisites
 
