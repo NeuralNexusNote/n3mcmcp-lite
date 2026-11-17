@@ -9,11 +9,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## [1.11.1] — 2026-11-17
+## [1.12.0] — 2026-11-17
 
-Spec v1.8.0 → v1.8.1 (JP/EN): two findings of the code review of
-2026-11-17. The specification was changed first, then the code and tests.
-Saving and display behave as in 1.11.0 except in the case below.
+Spec v1.8.0 → v1.9.0 (JP/EN): two findings of the code review of
+2026-11-17, and code blocks replaced on save. The specification was changed
+first, then the code and tests.
+
+### Changed
+- **Code blocks are replaced with `[code omitted]` when saved** (§3.13).
+  Since 2026-04 Lite stored them but always showed them as `[code omitted]`,
+  so no tool could return the code. What you see does not change. A word that
+  appears only inside a code block no longer finds the record, and two bodies
+  that differ only inside their code blocks are exact duplicates. Records
+  saved by 1.11.x keep their code in Redis until their 7-day TTL ends, and are
+  still shown as `[code omitted]`. `skip_code_blocks: true` still rejects the
+  whole body.
 
 ### Fixed
 - **Persistence was turned off although another database held data** (§3.4).

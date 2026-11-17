@@ -34,6 +34,7 @@ from .processor import (
     embed,
     has_visible_text,
     model_unavailable_message,
+    purify,
     filter_score,
     final_score,
     judged_score,
@@ -698,6 +699,9 @@ class Database:
                 "saved": False,
                 "reason": "content contains a code fence (```); skip_code_blocks=true",
             }
+        # §3.13 (v1.9.0): code blocks are replaced before hashing, chunking,
+        # embedding and storing; display keeps applying purify() for old rows.
+        content = purify(content)
 
         threshold = self.cfg.get("chunk_threshold", 400)
         if len(content) <= threshold:

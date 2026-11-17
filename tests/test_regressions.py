@@ -2085,3 +2085,58 @@ class TestSurroundingWhitespace:
     def test_whitespace_only_rejected(self, db):
         out = db.save_memory(" \n\t ")
         assert out["saved"] is False and out["reason"] == "empty content"
+
+
+# ── v1.9.0 code blocks replaced on save ────────────────────────────────────
+
+@requires_redis
+class TestCodeOmittedOnSave:
+    """§3.13 (v1.9.0): save_memory stores [code omitted] in place of each
+    fenced block; display still applies purify() to rows saved by 1.11.x."""
+
+    def _stored(self, redis_client, prefix):
+        out = []
+        for key in redis_client.scan_iter(match=prefix + "*"):
+            if key.startswith(b"mem:sha:"):
+                continue
+            body = redis_client.hget(key, "content")
+            if body is not None:
+                out.append(body.decode("utf-8"))
+        return out
+
+    def test_short_body(self, db, redis_client, fake_embed):
+        body = "use `inline` like this\n```python\nprint('secret_fn')\n```\nthen done"
+        assert db.save_memory(body)["saved"] is True
+        stored = self._stored(redis_client, "mem:")
+        assert stored == ["use `inline` like this\n[code omitted]\nthen done"]
+
+    def test_parent_document(self, db, redis_client, fake_embed):
+        body = ("long prose sentence. " * 30) + "\n```js\nconst secret_fn = 1;\n```\n" + ("more prose. " * 10)
+        assert len(body) > 400
+        assert db.save_memory(body)["saved"] is True
+        docs = self._stored(redis_client, "doc:")
+        assert len(docs) == 1 and "[code omitted]" in docs[0] and "secret_fn" not in docs[0]
+        assert all("secret_fn" not in c for c in self._stored(redis_client, "mem:"))
+
+    def test_unclosed_fence(self, db, redis_client, fake_embed):
+        assert db.save_memory("intro\n```\nnever closed secret_fn")["saved"] is True
+        assert self._stored(redis_client, "mem:") == ["intro\n[code omitted]"]
+
+    def test_code_only_difference_is_duplicate(self, db, fake_embed):
+        assert db.save_memory("note\n```\na = 1\n```")["saved"] is True
+        assert db.save_memory("note\n```\nb = 2\n```")["saved"] is False
+
+    def test_skip_code_blocks_still_rejects(self, db, redis_client):
+        db.cfg["skip_code_blocks"] = True
+        out = db.save_memory("see\n```\nx\n```")
+        assert out["status"] == "skipped_code"
+        assert self._stored(redis_client, "mem:") == []
+
+    def test_old_raw_row_is_still_shown_omitted(self, db, redis_client, fake_embed):
+        from n3mc_mcp import server as S
+        assert db.save_memory("placeholder body for an old row")["saved"] is True
+        key = next(k for k in redis_client.scan_iter(match="mem:*") if not k.startswith(b"mem:sha:"))
+        redis_client.hset(key, "content", "old row\n```\nsecret_fn()\n```")
+        rows = db.list_memories()
+        assert any("secret_fn" in (r.get("content") or "") for r in rows)  # raw in Redis
+        assert "secret_fn" not in S.purify(rows[0].get("content", ""))
