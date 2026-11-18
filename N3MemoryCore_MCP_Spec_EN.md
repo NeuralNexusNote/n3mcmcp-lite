@@ -1,7 +1,7 @@
 # N3MemoryCore MCP v1.9.1 [Volatile Memory over MCP]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
-> **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build (coming soon)** will use SQLite + sqlite-vec to store memories permanently.
+> **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build** uses SQLite + sqlite-vec to store memories permanently.
 >
 > **Who is this for?** Users of any MCP-compatible LLM client (Claude Desktop, Claude Code, and others) who want searchable, short-lived memory shared across sessions within a 7-day window.
 >
@@ -22,7 +22,7 @@ By using this software, you agree to the terms above.
 
 > **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-lite` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3mc-workingmemory` entry from your MCP client's config file.
 >
-> **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, the **Pro build (coming soon)** will offer persistent storage.
+> **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, the **Pro build** offers persistent storage.
 
 > **For implementation questions**: While the author cannot be contacted for support, you can load this specification into Claude and ask questions directly — Claude can assist with implementation and customization.
 
@@ -32,7 +32,7 @@ By using this software, you agree to the terms above.
 
 This section captures the tradeoffs unique to the Lite build; the rest of the specification deliberately reuses the Pro-build structure so AI-driven regeneration stays simple.
 
-| Property               | Lite (this spec)                         | Pro (coming soon — separate spec)      |
+| Property               | Lite (this spec)                         | Pro (separate spec)                    |
 | ---------------------- | ----------------------------------------- | -------------------------------------- |
 | Storage engine         | Redis Stack (RediSearch module)           | SQLite + sqlite-vec (local file)       |
 | Durability             | **7 d TTL per entry**, ephemeral         | Permanent, disk-persistent             |
@@ -40,7 +40,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | External dependency    | User-run Redis Stack container            | None (self-contained)                  |
 | `time_decay` relevance | Meaningful (3-day half-life; fresh=1.0, 7d≈0.20) | Meaningful (90-day half-life) |
 | Re-indexing / repair   | `FT.CREATE` is idempotent; no migrations  | Schema + model migration markers       |
-| Intended use           | Short-term projects, working memory, marketplace | Ongoing projects (coming soon)   |
+| Intended use           | Short-term projects, working memory, marketplace | Ongoing projects                 |
 
 **Volatility contract:**
 - Every write to Redis sets a TTL equal to `ttl_seconds` (default 604 800 = 7 d).
@@ -49,7 +49,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 - Expiration is delegated to Redis; no background cleanup job runs.
 - Restarting the Redis container with its volume removed wipes all memory immediately.
 
-**No cross-session guarantee beyond 7 d.** Unlike the forthcoming Pro build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, wait for the Pro build (coming soon).
+**No cross-session guarantee beyond 7 d.** Unlike the Pro build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, use the Pro build.
 
 ---
 
@@ -140,7 +140,7 @@ Not applicable. See the [Lite: Volatile Memory](#lite-volatile-memory) section �
 
 Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector + RediSearch BM25), mathematically sound ranking, 7-day automatic garbage collection. The MCP server delivers behavioral instructions so the connected LLM auto-searches at the start of each turn and auto-saves after each meaningful exchange — without requiring client-side hooks.
 
-The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; the forthcoming **Pro build (coming soon)** will swap the storage layer from Redis to SQLite + sqlite-vec while preserving the MCP surface.
+The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; the **Pro build** swaps the storage layer from Redis to SQLite + sqlite-vec while preserving the MCP surface.
 
 > **⚠️ Setup checks (Method A — do these first, in this order, before writing any file)**: checks 1–3 stop the setup when they fail; check 4 fixes the problem itself. These checks exist because a setup on a second PC (2026-11-16) started in a folder that already held a copy of an earlier setup from another PC, with Docker stopped, only Python 3.15 installed and `.mcp.json` pointing at the other PC's Python; the implementing session could neither build nor start the server. Stop at the first of checks 1–3 that fails and show the user what to do.
 
@@ -417,7 +417,7 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
 
 ### 3.6 Ranking Formula
 
-Identical to the forthcoming Pro build:
+Identical to the Pro build:
 
 ```
 Final Score = (cos_sim × 0.7 + keyword_relevance × 0.3) × time_decay × b_local × b_session
@@ -461,7 +461,7 @@ RediSearch returns `cosine_distance ∈ [0, 2]` for normalized vectors. Clamping
 1. If `|bm25_score| < bm25_min_threshold` (default `0.1`), set to `0.0`.
 2. Otherwise: `|bm25_score| / max(1.0, max_|bm25_score| in result set)`.
 
-(RediSearch BM25 scores are non-negative, but the `abs()` keeps the algorithm identical to the forthcoming Pro build where FTS5 produces negative scores.)
+(RediSearch BM25 scores are non-negative, but the `abs()` keeps the algorithm identical to the Pro build where FTS5 produces negative scores.)
 
 > **⚠️ Implementation note (fetching the BM25 score — the most frequent bug)**: RediSearch `FT.SEARCH` **does not return scores by default**. Without **`.with_scores()` on the redis-py `Query`, `doc.score` is `None`**, the implementation falls back to `bm25 = 0.0`, and **keyword_relevance is always 0 → the BM25 leg of the hybrid search (weight 0.3) dies completely** (it degrades to vector-only; the lexical rerank compensates, which is what makes it deceptively appear to work). Furthermore, even with `.with_scores()`, the **default scorer is TFIDF**, which on a small corpus returns a flat `1.0` for every doc and does not reflect term frequency. **Explicitly set the scorer to `BM25`**:
 > ```python
@@ -473,7 +473,7 @@ RediSearch returns `cosine_distance ∈ [0, 2]` for normalized vectors. Clamping
 
 $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
-Default `half_life_days = 3` — deliberately shorter than the 7-day TTL so that `time_decay` is actually informative in the Lite build: a fresh entry scores 1.0, a 3-day-old one exactly 0.5, and a 7-day-old (near-expiry) one ≈ 0.20. This pushes recent context ahead in ranking. This is a Lite-specific tuning; the forthcoming Pro build will keep a 90-day half-life to match its permanent horizon.
+Default `half_life_days = 3` — deliberately shorter than the 7-day TTL so that `time_decay` is actually informative in the Lite build: a fresh entry scores 1.0, a 3-day-old one exactly 0.5, and a 7-day-old (near-expiry) one ≈ 0.20. This pushes recent context ahead in ranking. This is a Lite-specific tuning; the Pro build keeps a 90-day half-life to match its permanent horizon.
 
 **Lightweight lexical rerank** (post-fusion, pre-TTL-refresh):
 
@@ -501,7 +501,7 @@ The v1.7.0 shaping steps that run around this formula (vector floor, newest vers
 
 ### 3.7 Text Tokenization & Punctuation Handling
 
-**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the forthcoming Pro build is **not** available here.
+**Tokenizer**: RediSearch's built-in tokenizer (whitespace + punctuation split, case-folded). The Porter stemmer used by the Pro build is **not** available here.
 
 **CJK bigram expansion**: Japanese and Chinese text lacks inter-word spaces, so the raw RediSearch tokenizer collapses whole sentences into a single BM25 token and keyword relevance degenerates. To compensate, at save time the server expands every contiguous CJK run in `content` into **overlapping bigrams** (e.g. "記憶装置" → "記憶 憶装 装置") and stores the result in a parallel `content_ngram` TEXT field. BM25 queries apply the same expansion and run `@content:(...) | @content_ngram:(...)`, giving working Japanese partial-match retrieval without touching vector search (the e5 embedding model handles Japanese natively).
 
@@ -592,7 +592,7 @@ The server's `_main()` runs these steps in order, **before** the stdio loop begi
 1. **Load config** (`load_config()`):
    - Read `config.json` from the data directory.
    - The config lives in `~/.n3mc-workingmemory/config.json`; on first start after upgrading from v1.6.x it is migrated from the legacy platform directory ([§7](#7-data-location)).
-   - **Never overwrite a `config.json` the user mistyped** (v1.6.x replaced an unreadable file with defaults, losing the user's settings). See the table in [§6](#6-configuration): an unreadable file is left untouched and the server runs on defaults with in-memory UUIDs for this process; a wrongly typed item is ignored individually. Unlike the forthcoming Pro build, the Lite does **not** attempt DB-based ID recovery — Redis may already be empty (TTL-expired).
+   - **Never overwrite a `config.json` the user mistyped** (v1.6.x replaced an unreadable file with defaults, losing the user's settings). See the table in [§6](#6-configuration): an unreadable file is left untouched and the server runs on defaults with in-memory UUIDs for this process; a wrongly typed item is ignored individually. Unlike the Pro build, the Lite does **not** attempt DB-based ID recovery — Redis may already be empty (TTL-expired).
    - Apply `N3MC_REDIS_URL` env-var override (takes precedence over the file).
    - If the file is readable and a field is missing, fill with defaults and persist.
 
@@ -652,7 +652,7 @@ The `repair_memory` tool in the Lite build is a **thin idempotent operation**: i
 
 Return shape: `{"status": "ok", "message": "index ensured", "reembedded": N, "remaining": M}` (`remaining` = entries still without a vector after this call, counted while scanning; call again if > 0), or `{"status": "error", "message": "<detail>"}` on failure.
 
-This is a deliberate simplification versus the forthcoming Pro build (which will run FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 7 d old.
+This is a deliberate simplification versus the Pro build (which runs FTS punctuation migration, vec model-version migration, and an unindexed-row repair loop). The Lite has nothing to migrate because the oldest record is at most 7 d old.
 
 ### 3.11 Verbatim Recall (Parent-Document + Chunks Pattern)
 
@@ -932,7 +932,7 @@ The server advertises:
 
 ### 4.3 Tools
 
-Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §4.3.1; same names as the forthcoming Pro build, except `delete_memories_by_session` which is Lite-only — Pro will keep only the per-record `delete_memory` to minimize accidental-deletion risk on a persistent store):
+Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §4.3.1; same names as the Pro build, except `delete_memories_by_session` which is Lite-only — Pro keeps only the per-record `delete_memory` to minimize accidental-deletion risk on a persistent store):
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |

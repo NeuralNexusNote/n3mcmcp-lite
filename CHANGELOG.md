@@ -7,7 +7,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
-## [Unreleased]
+## [1.12.2] — 2026-11-18
 
 ### Fixed
 - **A failed save no longer blocks the same content for 7 days** (§3.8 (A) /
@@ -38,6 +38,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   a Redis through the same `redis_url` (L-02, L-04). README (EN / JP): the
   "Team & organization support" line now says that memories are not shared
   between people.
+- Spec (EN / JP) and PHILOSOPHY: the Pro build is no longer called "coming
+  soon" / 「公開予定」 anywhere (introduction, Backup note, Lite / Pro table,
+  §1 and the rest); it is described as the separate edition that exists. No
+  change in behavior.
 
 ### Chore
 - `tests/eval_uvx_missing.py` finds the folders to remove from `PATH` (the
