@@ -996,6 +996,552 @@ MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無い�
 
 完全文面は [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py)。
 
+### コードから書き起こした文面と決まり（2026-11-19）
+
+ここまでの文は、いくつかの文面をコードに任せ、いくつかの決まりを書いていなかった。コードはこの文書から作り直すので、以下はすべて仕様の一部である。**上の要約と下の文面が違うときは、下の文面を実装する**（例: 配る指示文の規則 8 は `session_id` の規則で、`skip_code_blocks` は規則 2 の中の注記である）。
+
+**(1) `initialize` で返す指示文 — `n3mc_mcp/instructions.py` の `INSTRUCTIONS`。** この文そのままで、最後に改行を 1 つ付ける。言い換えない。順序を変えない。翻訳しない（英語のまま配る）。
+
+`````text
+N3MemoryCore — Lite (Ephemeral Memory)
+
+This MCP server gives you hybrid-search memory (vector + BM25) backed by
+Redis Stack. It is the free *Lite* build of N3MemoryCore: every entry
+expires 7 days after it was saved. Treat it as a short-lived scratchpad,
+not a long-term store.
+
+BEHAVIORAL RULES
+================
+
+0. ROLE WHEN PRO IS ALSO CONNECTED (coexistence policy)
+   If `n3mc-longtermmemory` (N3MemoryCore Pro, persistent SQLite+sqlite-vec
+   backend) is also registered as an MCP server in the same session, treat
+   the two servers as complementary, not redundant:
+
+   - THIS SERVER (Lite, ephemeral) is the working-memory / scratchpad.
+     Route here: in-session progress notes, temporary debugging state,
+     throwaway intermediate results, transient task context — anything
+     that will be irrelevant next week.
+
+   - PRO is the canonical long-term store. Route THERE (not here):
+     user profile / preferences, project specs and architecture decisions,
+     world-building / character settings / design artifacts, API contracts,
+     research summaries, outlines, and anything the user wants retained
+     across sessions.
+
+   - When in doubt, prefer Pro. "Painful if lost" > "fine if it vanishes".
+   - Search order at the start of a turn: Pro first, then Lite.
+   - Do NOT double-save the same fact to both servers.
+   - When Pro is connected, the TTL warning (rule 7 below) is generally
+     unnecessary — just route long-term content to Pro instead.
+
+   If Pro is NOT connected, this server is the sole memory store. Accept
+   all content, and emit the TTL warning (rule 7) when the user signals
+   an expectation of permanence.
+
+1. SEARCH FIRST, THEN ACKNOWLEDGE WHEN YOU USE MEMORY
+   At the start of every user turn, call `search_memory` with a concise
+   representation of the user's intent (key nouns + verbs). Use the
+   returned snippets as context when formulating your answer.
+
+   When your answer actually draws on retrieved memories (i.e. you are
+   recalling or reusing information that was saved in an earlier turn),
+   OPEN the reply with a short acknowledgment IN THE USER'S LANGUAGE.
+   Examples:
+   - Japanese: 「前回の回答がメモリに保存されています。」
+                「以前の会話から該当情報を取り出しました。」
+   - English:  "Pulling this from earlier memory in this session."
+                "Recalling the setting you saved earlier."
+
+   If `search_memory` returned nothing relevant, or you did not actually
+   use the retrieved content, proceed normally with no announcement.
+   Do not announce the mere act of searching — only the act of recalling.
+
+2. SAVE AFTER EVERY SUBSTANTIVE EXCHANGE — AUTOMATIC, NO PERMISSION ASKED
+   Saving is silent and automatic. The user should NEVER have to say
+   "save this" or "remember that" — you save by default. Do NOT ask the
+   user whether to save. Do NOT wait for the user to confirm. Just save.
+
+   After every meaningful turn, call `save_memory` to persist:
+   (a) The user's intent / question (short paraphrase, not verbatim).
+   (b) YOUR OWN substantive output — decisions, plans, answers, and
+       especially any creative or generated content the user may refer
+       back to later: world-building, character settings, design sketches,
+       code architecture, research summaries, outlines, etc. If you
+       invested more than a sentence or two producing it, save it.
+   (c) Key facts, preferences, and unresolved questions.
+   Use one `save_memory` call per distinct fact (~50-200 chars each).
+   Long content goes to rule 3.
+   Exact duplicates are auto-rejected server-side, so err on the side of
+   saving more. Near-duplicates are NOT rejected: an updated fact or a
+   re-made document is saved as a new entry, and `search_memory` shows the
+   newest version first.
+   NOTE: Lite memories expire 7 days after they are saved — this is a
+   rolling scratchpad, not a permanent archive.
+
+   Routing reminder: if Pro is also connected, long-lived content goes to
+   Pro, not here. See rule 0.
+
+   NOTE ON CODE BLOCKS: If the server config has `skip_code_blocks: true`,
+   any content containing a triple-backtick fence (```) is rejected with
+   `status: "skipped_code"`. The default is `false`: the content is saved
+   with each code block replaced by [code omitted] — the code itself is
+   never kept or returned (it belongs in the project files). If
+   you see `skipped_code` come back, do NOT retry with the same payload —
+   the user has opted out of code saving on purpose; save a prose
+   description of what the code does instead. Do not announce the skip
+   unless the user explicitly asks why a previous save did not stick.
+
+3. LONG CONTENT — SAVE VERBATIM IN ONE CALL
+   When the turn produces OR receives a long body (> ~400 chars) the user
+   may want back verbatim — a pasted spec / article / log, or a long
+   creative setting you just generated — pass the FULL text to a SINGLE
+   `save_memory` call. The server creates a parent-document + chunks
+   automatically and returns the full body on recall. Do NOT split long
+   verbatim-worthy content into many short summaries.
+
+   If Pro is connected, long verbatim content that the user may want
+   months later belongs in Pro, not here.
+
+4. TOOL-ERROR HANDLING — NEVER GENERATE LONG CONTENT BLIND
+   If `search_memory` or `save_memory` returns a server error (Redis
+   unreachable, timeout, "start Redis Stack" hint, etc.), STOP and
+   announce the failure to the user in their language BEFORE generating
+   any long creative or spec content. Otherwise every subsequent
+   `save_memory` fails silently and the user loses their work when the
+   session closes.
+
+   Required on error:
+   - Surface the error succinctly.
+   - Relay the recovery hint the tool returned (e.g. the docker run command).
+   - Ask whether to proceed WITHOUT memory or pause until backend is restored.
+
+   Short factual replies may proceed, but still mention the error once.
+
+5. SKIP NOISE
+   Do not save greetings, confirmations, or purely mechanical acknowledgments.
+
+6. RESPECT EXPLICIT REQUESTS
+   If the user says "don't save this" or "forget that", call `delete_memory`
+   and do not persist that content.
+
+7. INFORM THE USER ABOUT THE 7-DAY TTL WHEN THEY EXPECT PERMANENCE
+   The Lite build's 7-day TTL is visible to you (this instructions block,
+   the `search_memory` description, and the `ttl_seconds` field in every
+   `save_memory` response) but the USER does not see any of that. By
+   default, silent auto-save (rule 2) is correct — do NOT mention TTL on
+   every save. However, when the user's message signals an expectation of
+   long-term retention, add ONE short sentence reminding them that Lite
+   memories expire 7 days after they were saved, and suggest backing up
+   externally if they want permanence. Do NOT ask permission to save;
+   save anyway, then mention the TTL.
+
+   IF PRO IS CONNECTED: prefer routing the long-term content to Pro
+   (see rule 0) rather than emitting this warning. The warning is
+   primarily for sessions where Lite is the only memory backend.
+
+   Signals that warrant the reminder (examples, non-exhaustive):
+   - Explicit permanence words: "remember this forever", "don't forget",
+     "save this permanently", "keep this for next time", "次回も覚えていて",
+     「ずっと覚えておいて」「永続的に保存して」「絶対忘れないで」
+   - Pasting or generating a long setting / spec / world-
+     building / character sheet that the user obviously invested time in.
+   - The user referring back to content they saved more than ~5 days ago,
+     where there is a real risk of imminent TTL expiry.
+
+   Phrase the reminder in the USER'S LANGUAGE. Examples:
+   - Japanese: 「なお、Lite 版のメモリは保存から7日で自動削除されます。
+               永続保存が必要な場合は Pro 版（sqlite-vec バックエンド）を、
+               もしくは外部バックアップをご検討ください。」
+   - English:  "Note: Lite memories auto-expire 7 days after they're saved.
+                For permanent storage, use the Pro build (sqlite-vec backed)
+                or back it up externally."
+
+   Emit the reminder ONCE per distinct long-term signal — not once per
+   turn, not once per save. Do not repeat it if the same user has already
+   been warned in the current conversation.
+
+8. SESSION_ID AS PROJECT / TASK GROUPING KEY
+   Both save_memory and search_memory accept an optional `session_id`
+   argument. When multiple AI agents collaborate on the same project or
+   task, they SHOULD pass the same `session_id` string (e.g.
+   `"proj-alpha"`, `"task-refactor-auth"`) on every call.
+
+   Effect in Lite (same contract as Pro): rows whose stored session_id
+   matches the request's effective session get a ranking boost
+   (b_session_match=1.0); non-matching rows are dampened
+   (b_session_mismatch=0.6). Passing a consistent session_id therefore
+   surfaces THIS project's memories above unrelated cross-project noise
+   sharing the same Redis instance. The boost is multiplicative on top
+   of the existing (cos·0.7 + bm25·0.3) · time_decay · b_local score.
+
+   The value of passing session_id in Lite is therefore (a) ranking —
+   pin recall to the current chat / project, (b) the filter key for
+   `delete_memories_by_session` (tear down a finished project's
+   memories without waiting for TTL), and (c) Pro migration
+   compatibility (the same session_id keeps working when the workload
+   moves to Pro's persistent backend).
+
+   Precedence for session_id resolution:
+   (a) Per-call `session_id` argument (highest precedence — use this when
+       an orchestrator wants to pin child-agent calls to a specific
+       project).
+   (b) `N3MC_SESSION_ID` environment variable (set once at process
+       start — use this when the whole Claude Code process is dedicated
+       to one project).
+   (c) Per-process UUIDv4 (fallback — fresh on each server start). Note
+       that this fallback changes across restarts, so cross-restart
+       recall of rows tagged with the previous run's UUID will receive
+       the b_session_mismatch dampening unless you pin session_id
+       explicitly via (a) or (b).
+
+   When working on a named project or task, pass `session_id` on every
+   save and search. For ad-hoc work, leave it blank.
+
+9. BULK CLEANUP — `delete_memories_by_session`
+   Use this tool to wrap up a finished project or reset a polluted
+   workspace before TTL expiry. It removes every memory (singles,
+   parent docs, child chunks, sha index entries) whose session_id
+   matches. Scoped to the configured owner.
+
+   Use cases:
+   - Project closed and you want to keep search results clean.
+   - A test/debug session generated noise that's hurting later recalls.
+   - Reclaiming Redis memory early instead of waiting 7 days.
+
+   Confirm the session_id with the user before calling — this delete
+   is irreversible.
+
+10. THREAD CONTEXT RETRIEVAL — `recall_thread` (§4.3.1)
+    `search_memory` results include a `turn_id` field when the memory was
+    saved with one. When a search hit lacks enough context to be actionable
+    — for example, the snippet is a fragment without clear meaning on its
+    own — call `recall_thread` with that hit's `turn_id` to retrieve the
+    full thread of memories from the same conversation turn, plus N entries
+    before and after it chronologically.
+
+    Usage pattern:
+      1. `search_memory` returns a hit with `turn=<some-id>` in the header.
+      2. You judge the snippet insufficient for answering the user.
+      3. Call `recall_thread(turn_id="<some-id>", before=2, after=2)`.
+      4. The tool returns the turn's memories in chronological order with
+         "▶" markers on the target turn's entries and unmarked neighbors.
+
+    When saving memories, use the optional `turn_id` argument on every
+    `save_memory` call in a turn so future `recall_thread` lookups work:
+      - Choose any stable string for the turn (e.g. a short UUID, or
+        "turn-1", "turn-2", …). Use the SAME value for all saves within
+        one turn.
+      - You do NOT have to tag every save; only do so when the turn's
+        context might be worth reconstructing later (multi-step tasks,
+        long creative sessions, research threads, etc.).
+
+    The user does not need to be aware of `recall_thread`; it is an
+    internal tool you use proactively to enrich recall quality.
+
+11. VERSIONS AND NOTICES
+    Every `search_memory` hit shows a `saved=` time. When several versions
+    of the same content appear in the results, the one with the newest
+    `saved=` time is the current one — answer from it (mention the change
+    if it matters).
+
+    If a `search_memory` result starts with `> ⚠️ N3MC notice:`, tell the
+    user what it says, in their language (e.g. their `config.json` could
+    not be read, or a setting has the wrong type and was ignored).
+
+12. WEAK MATCHES
+    Records under `#### Possibly related (weak matches — may be unrelated)` did not
+    pass the relevance floors and are added only so that a search is never
+    empty. Use one only when it is actually relevant to the question; if it
+    is not, ignore it and do not mention it (do not say that unrelated
+    memories were found).
+`````
+
+**(2) すべてのツールの結果の末尾に付ける催促文 — `n3mc_mcp/server.py`。** `search_memory` の結果には `_NUDGE_AFTER_SEARCH` を付ける。`save_memory` の結果には `_NUDGE_AFTER_SAVE` を付ける。それ以外のすべての結果 — エラーの結果と、知らないツール名への応答（`Error: unknown tool '<name>'`）を含む — には `_NUDGE_GENERIC` を付ける。
+
+`````python
+_NUDGE_AFTER_SEARCH = (
+    "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
+    "to persist the user's intent (paraphrased) and any substantive "
+    "output you generate. If Pro (`n3mc-longtermmemory`) is also "
+    "connected, route long-lived artifacts there; this server is for "
+    "transient task scratch (7-day TTL). Do not skip the save just "
+    "because no memory hit was returned above._"
+)
+_NUDGE_AFTER_SAVE = (
+    "\n\n---\n_Reminder: if this turn produced multiple distinct facts or a "
+    "long verbatim artifact, make sure each was saved — one "
+    "`save_memory` call per fact, or one full-text call for verbatim "
+    "long content (>400 chars). Exact duplicates are auto-rejected, so "
+    "err on the side of saving._"
+)
+_NUDGE_GENERIC = (
+    "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
+    "to persist the user's intent (paraphrased) and any substantive "
+    "output you produced. Lite entries expire 7 days after save, so "
+    "saving more is safer than saving less._"
+)
+`````
+
+**(3) `tools/list` で返すツールの定義 — `n3mc_mcp/server.py` の `list_tools()`。** ツールは 7 つ。description、引数の説明、`minimum` / `maximum` / `default` の値、`required` の一覧は、接続したモデルが読むものである。下のとおりに書くこと。
+
+`````python
+@app.list_tools()
+async def list_tools() -> list[Tool]:
+    return [
+        Tool(
+            name="search_memory",
+            description=(
+                "Hybrid (vector + BM25) search over stored memories. "
+                "Call this at the start of every user turn. "
+                "Each hit shows its saved= time; when several versions of the "
+                "same content appear, the newest is listed first and is the "
+                "current one. "
+                "When fewer than min_results (default 3) rows pass the "
+                "relevance floors, the closest dropped rows are added under "
+                "'Possibly related (weak matches — may be unrelated)': they "
+                "are often unrelated — use one only when it is actually "
+                "relevant to the question; if it is not, ignore it and do not "
+                "mention it. "
+                "NOTE: Lite memories expire 7d after they were saved."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (natural language or keywords).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default: config search_result_limit).",
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional project/task grouping key. Rows whose stored "
+                            "session_id matches this value are boosted in ranking "
+                            "(b_session_match=1.0); non-matching rows are dampened "
+                            "(b_session_mismatch=0.6). Pass the same session_id used "
+                            "at save time to surface that project's memories above "
+                            "unrelated rows. Leave blank to use the server default "
+                            "(N3MC_SESSION_ID env var, or per-process UUIDv4)."
+                        ),
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": (
+                            "§4.3.1 — ISO 8601 date or datetime (e.g. '2026-05-01' or "
+                            "'2026-05-01T09:00:00+09:00'). Only entries saved ON OR "
+                            "AFTER this timestamp are returned. Date-only values and "
+                            "values without an offset are read in the server's local "
+                            "time (the clock of saved=); date-only means 00:00:00. "
+                            "An unreadable value is an error."
+                        ),
+                    },
+                    "until": {
+                        "type": "string",
+                        "description": (
+                            "§4.3.1 — ISO 8601 date or datetime. Only entries saved "
+                            "ON OR BEFORE this timestamp are returned. Read like "
+                            "since; date-only means 23:59:59.999999 local time."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="save_memory",
+            description=(
+                "Save a memory entry (Lite: 7-day TTL). "
+                "Rejects exact duplicates only; an updated fact or a re-made "
+                "document is saved as a new entry (search_memory lists the "
+                "newest version first). "
+                "Long content (>chunk_threshold chars) is chunked with a "
+                "parent-document for verbatim recall."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Memory content to save.",
+                    },
+                    "agent_name": {
+                        "type": "string",
+                        "description": "Agent display name (e.g. 'claude-code').",
+                    },
+                    "owner_id": {
+                        "type": "string",
+                        "description": "Owner UUID override (must match server config).",
+                    },
+                    "importance": {
+                        "type": "number",
+                        "description": "Importance weight 0.5–2.0 (default 1.0).",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional project/task grouping key. Stored on the row "
+                            "and used as: (a) the ranking key for search_memory's "
+                            "b_session boost (match=1.0 / mismatch=0.6), and "
+                            "(b) the filter for delete_memories_by_session. "
+                            "Pass the same value across all calls for one project. "
+                            "Leave blank to use the server default "
+                            "(N3MC_SESSION_ID env var, or per-process UUIDv4)."
+                        ),
+                    },
+                    "turn_id": {
+                        "type": "string",
+                        "description": (
+                            "§4.3.1 — Optional turn grouping label. "
+                            "Tag all memories saved within one conversation turn with "
+                            "the same turn_id. Enables recall_thread to surface the "
+                            "surrounding context later. Any non-empty string works; "
+                            "a short UUID, timestamp, or 'turn-N' format is recommended."
+                        ),
+                    },
+                },
+                "required": ["content"],
+            },
+        ),
+        Tool(
+            name="list_memories",
+            description=(
+                "List stored memories newest first. "
+                "Parent documents shown with [doc×N] tag."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 20).",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="delete_memory",
+            description=(
+                "Delete a memory by ID (only memories of the configured owner). "
+                "If the ID is a parent document (doc:<uuid>), cascades to all child chunks."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Memory ID or parent document ID to delete.",
+                    },
+                },
+                "required": ["id"],
+            },
+        ),
+        Tool(
+            name="delete_memories_by_session",
+            description=(
+                "Delete every memory (singles, parent docs, child chunks, sha guards) "
+                "whose session_id matches. Scoped to the configured owner. "
+                "Use this to wrap up a finished project or reset a polluted session "
+                "before TTL expiry. IRREVERSIBLE — confirm session_id with the user first."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "session_id whose memories should be removed.",
+                    },
+                },
+                "required": ["session_id"],
+            },
+        ),
+        Tool(
+            name="repair_memory",
+            description=(
+                "Re-ensure the RediSearch index (idempotent) and add missing "
+                "vectors (up to 200 per call) to entries saved while the "
+                "embedding model was unavailable. "
+                "Returns {status, message, reembedded, remaining}."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="recall_thread",
+            description=(
+                "§4.3.1 — Retrieve the memories sharing a turn_id plus N entries "
+                "before and after in chronological order. "
+                "Use this when a search_memory hit lacks enough context: pass the "
+                "hit's turn_id here to surface the surrounding conversation thread. "
+                "Returns {status:'not_found'} if turn_id is unknown."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "turn_id": {
+                        "type": "string",
+                        "description": "The turn_id from a search_memory result.",
+                    },
+                    "before": {
+                        "type": "integer",
+                        "description": "Number of earlier entries to include (default 2).",
+                        "minimum": 0,
+                        "maximum": 20,
+                    },
+                    "after": {
+                        "type": "integer",
+                        "description": "Number of later entries to include (default 2).",
+                        "minimum": 0,
+                        "maximum": 20,
+                    },
+                },
+                "required": ["turn_id"],
+            },
+        ),
+    ]
+`````
+
+**(4) 一覧を返すツールの文の形。**
+
+- `list_memories`: 何も保存されていなければ `_No memories stored._`。そうでなければ、項目ごとに 1 つの塊 `**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<tag> ` は、項目にタグがあるときだけ付く（親文書は `[doc×N]`）。塊は `\n\n---\n\n` でつなぐ。親文書の本文は、先頭 200 文字にする。200 文字より長かったときだけ、あとに `…` を付ける。単独のメモリ（`limit` 件まで）とすべての親文書を合わせ、timestamp の文字列の降順に並べ、`limit` 件に切る。`limit` がない、空、または 0 のときは 20。1 未満の値は 1。
+- `recall_thread`: `turn_id` が空なら `{"status": "error", "reason": "turn_id required"}`。行がなければ `{"status": "not_found", "turn_id": "<turn_id>"}`。そうでなければ、行ごとに 1 つの塊 `<印>**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<印>` は、求められたターンの行では `▶ `、ほかの行では空白 2 つである。塊は `\n\n---\n\n` でつなぐ。範囲は、そのターンの最初の行から `before` 行前まで、最後の行から `after` 行後までで、間にあるほかのターンの行も含む。ここでは、親文書は全文を出す（200 文字に切らない）。
+- `search_memory`: ヒットどうしは `\n\n---\n\n` でつなぐ。知らせ、版の文、ヒット、弱い候補の見出し、弱い候補は、空行 1 つ（`\n\n`）でつなぐ。
+
+**(5) バイグラムに展開する文字（§3.7）— `n3mc_mcp/processor.py`。** `_is_cjk(ch)` は、コードポイントが次の範囲のどれかに入るときに真である。§3.7 の「CJK の連続」は、この文字の連続のことである。1 文字だけの連続は、その 1 文字のまま残す。
+
+`````python
+_CJK_RANGES = [
+    (0x0E00, 0x0E7F),    # Thai
+    (0x0E80, 0x0EFF),    # Lao
+    (0x1000, 0x109F),    # Myanmar
+    (0x1780, 0x17FF),    # Khmer
+    (0x3000, 0x9FFF),    # CJK punct + Hiragana + Katakana + CJK Unified
+    (0xAC00, 0xD7AF),    # Hangul Syllables (Korean)
+    (0xF900, 0xFAFF),    # CJK Compatibility Ideographs
+    (0x20000, 0x2A6DF),  # CJK Unified Ideographs Ext B
+]
+`````
+
+それ以外の文字の連続では、結合文字を取り除いた形（`fold_diacritics`: NFD に分解し、Unicode のカテゴリ `Mn` の文字をすべて捨てる）も `content_ngram` に入れる。そのため `café` は `cafe` としても索引に入る。保存する本文は変えない。
+
+**(6) 語彙リランク（§3.6）: 短い本文の減衰。** 行の加点は `(coverage × weight + phrase_bonus) × length_factor` である。`length_factor` は、正規化して小文字にした本文が 50 文字より短いときは `len(content) / 50`、そうでなければ 1.0 である。加点は `score` に足し、`filter_score` があればそれにも足す。この係数がないと、質問の語をたまたますべて含むごく短い断片が、本当の答えより上に出る。
+
+**(7) チャンク分け（§3.11）: 区切り。** 各ウィンドウで、区切りは末尾の `overlap` 文字の中（`max(start + 1, end − overlap)` から `end` まで）だけで探す。区切りの文字を下の順に試し、最初に見つかった種類の、**最後の**出現の直後で切る。区切りで切ったあとは、次のウィンドウを切れ目から始める（重なりなし）。見つからなければ `end` で切り、次のウィンドウを `overlap` 文字前から始める（必ず 1 文字以上進む）。
+
+`````python
+_SOFT_BREAKS = (
+    "\n\n",                      # paragraph break  (highest priority)
+    "\n",                        # line break
+    ". ", "! ", "? ",            # ASCII sentence ends
+    "。", "！", "？", "…",      # CJK / universal sentence ends
+    " ", "\t",                   # word boundary    (lowest priority)
+)
+`````
+
 ---
 
 ## 6. 設定
