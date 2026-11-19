@@ -4,18 +4,17 @@
 
 ## 🚀 The Core Function
 
-**N3MemoryCore MCP** is a **Memory and local RAG system** exposed through
-the **Model Context Protocol (MCP)**.
-
-Any MCP-compatible client — Claude Desktop, Claude Code, or other tools
-that speak MCP — can attach to it and gain memory across sessions.
+**N3MemoryCore MCP** is a **Memory and local RAG system**. Claude Code
+reaches it through **hooks**; the Claude desktop app and other tools that
+speak the **Model Context Protocol (MCP)** reach it through an MCP entry.
+Both gain memory across sessions, from the same store.
 
 - **Cross-Session Memory** — bridges conversations so the assistant
   remembers project context, decisions, and user preferences.
 - **Local Context Injection** — a seamless RAG layer that stays entirely
   on the user's machine. No cloud. No API calls.
-- **Client-agnostic** — the same store is reachable from every MCP
-  client the user connects to it.
+- **Client-agnostic** — the same store is reachable from Claude Code and
+  from every MCP client the user connects to it.
 
 ## 🎁 Lite vs. Pro
 
@@ -62,34 +61,38 @@ chunk-on-save, HyDE, Japanese morphological analysis) are documented
 there. Use it as reference when editing; ignore it if you just want to
 run the thing.
 
-### Why MCP?
+### Why hooks and MCP?
 
-The earlier generation of N3MemoryCore bound the runtime tightly to
-Claude Code's hook system (`UserPromptSubmit` / `Stop`). That gave
-effortless auto-save but locked users into one client.
+Up to v1.12.2 the Lite was an MCP server only. MCP reaches every client,
+but an MCP server can only ask the model to save: whether it does is up
+to the model. Claude Code's hooks (`UserPromptSubmit` / `Stop`) run
+whatever the model decides, so they can save every message and reply.
 
-Migrating to MCP inverts the coupling:
+From v2.0.0 the Lite uses each where it works best — it is N3MC-Free +
+MCP, with Redis as the database:
 
-| Aspect             | Old (hook-based)                        | New (MCP server)                                 |
-| ------------------ | --------------------------------------- | ------------------------------------------------ |
-| Client reach       | Claude Code only                        | Any MCP client                                   |
-| Transport          | CLI subprocess + FastAPI HTTP           | stdio JSON-RPC                                   |
-| Save trigger       | Hook executes automatically             | LLM calls `save_memory` (guided by instructions) |
-| Process model      | Two processes (CLI + resident server)   | Single process per client                        |
-| Distribution       | Git clone + Claude Code setup           | `pip install n3memorycore-mcp-lite`             |
+| Aspect           | Claude Code                                   | Claude desktop app and other MCP clients            |
+| ---------------- | --------------------------------------------- | --------------------------------------------------- |
+| Connects through | Hooks and the CLI `n3mc-lite`                 | The MCP entry `n3mc-workingmemory` (stdio JSON-RPC) |
+| Save trigger     | Hooks save every message and reply            | LLM calls `save_memory` (guided by instructions)    |
+| Search           | The hook searches with every message          | LLM calls `search_memory` (guided by instructions)  |
+| Process model    | One resident server on `127.0.0.1`, shared by both; it loads the embedding model once | (same server; the MCP entry is a thin client) |
+| Storage          | The same Redis Stack, the same 7-day TTL      | (same)                                              |
 
-Auto-save is preserved: the MCP server delivers behavioral `instructions`
-during the `initialize` handshake, telling the connected LLM when to
-search and when to save. The "Instruction is the light" principle holds
-— the behavior is specified in natural language, not compiled into the
-client.
+The "Instruction is the light" principle holds on both paths: in Claude
+Code the rules file `.claude/rules/n3mc-lite-behavior.md` tells Claude how
+to use the memory, and the MCP entry delivers behavioral `instructions`
+during the `initialize` handshake. The behavior is specified in natural
+language, not compiled into the client.
 
 ## Project Details
 
-- **Architecture** — Python package implementing the N3 MCP protocol.
-  Storage layer is swappable; the Lite uses Redis Stack, the
-  Pro build uses SQLite + sqlite-vec.
-- **Focus** — Hands-free memory continuity across every MCP-capable tool.
+- **Architecture** — Python package: hooks, a CLI and a resident server
+  for Claude Code, and an MCP entry for other applications. Storage layer
+  is swappable; the Lite uses Redis Stack, the Pro build uses SQLite +
+  sqlite-vec.
+- **Focus** — Hands-free memory continuity across Claude Code and every
+  MCP-capable tool.
 - **License** — Apache License 2.0 — free to use, modify, and redistribute
   (including commercial use).
 
@@ -97,18 +100,18 @@ client.
 
 ## 🚀 コア機能（日本語）
 
-**N3MemoryCore MCP** は、**Model Context Protocol (MCP)** を通じて公開
-される **メモリおよびローカル RAG システム** です。
-
-Claude Desktop、Claude Code、その他 MCP 対応ツールなど、あらゆる MCP
-クライアントが接続し、セッションをまたいだ記憶を獲得できます。
+**N3MemoryCore MCP** は、**メモリおよびローカル RAG システム** です。
+Claude Code は**フック**でつながります。Claude デスクトップアプリと、
+その他の **Model Context Protocol (MCP)** 対応ツールは、MCP の入口で
+つながります。どちらも、同じストアから、セッションをまたいだ記憶を
+獲得できます。
 
 - **セッション間メモリ** — 会話をまたいでプロジェクトの文脈・決定事項・
   ユーザー選好をアシスタントに記憶させます。
 - **ローカルコンテキスト注入** — 完全にユーザー端末内に留まる RAG
   レイヤー。クラウド送信も API 呼び出しもありません。
-- **クライアント非依存** — ユーザーが接続するあらゆる MCP クライアント
-  から同一のストアに到達可能。
+- **クライアント非依存** — Claude Code と、ユーザーが接続するあらゆる
+  MCP クライアントから、同一のストアに到達可能。
 
 ## 🎁 Lite 版と Pro 版
 
@@ -154,33 +157,38 @@ Lite 版です。Lite は Pro の機能制限版ではなく、**別の用途を
 保存時チャンキング、HyDE、日本語形態素解析）がそこに記載されています。
 改造するなら参照してください — 普通に使うだけなら読まなくて結構です。
 
-### なぜ MCP か
+### なぜフックと MCP か
 
-旧世代の N3MemoryCore は Claude Code のフック機構
-（`UserPromptSubmit` / `Stop`）にランタイムが強く結合していました。
-自動保存は楽でしたが、ユーザーは 1 つのクライアントに縛られていました。
+v1.12.2 までの Lite は MCP サーバーだけでした。MCP はあらゆる
+クライアントに届きます。しかし MCP サーバーは、モデルに保存を頼む
+ことしかできません。保存するかどうかはモデル次第です。Claude Code の
+フック（`UserPromptSubmit` / `Stop`）は、モデルの判断にかかわらず
+動くので、すべてのメッセージと応答を保存できます。
 
-MCP への移行は結合を逆転させます：
+v2.0.0 からの Lite は、それぞれを向いている場所で使います。
+「N3MC-Free + MCP で、データベースは Redis」です：
 
-| 観点               | 旧（フック方式）                         | 新（MCP サーバー）                                  |
-| ------------------ | ---------------------------------------- | --------------------------------------------------- |
-| クライアント範囲   | Claude Code のみ                         | あらゆる MCP クライアント                           |
-| 通信               | CLI サブプロセス + FastAPI HTTP          | stdio JSON-RPC                                      |
-| 保存トリガー       | フックが自動実行                         | LLM が `save_memory` を呼ぶ（instructions で誘導）  |
-| プロセス構成       | 2 プロセス（CLI + 常駐サーバー）         | クライアントごとに 1 プロセス                       |
-| 配布               | Git clone + Claude Code セットアップ     | `pip install n3memorycore-mcp-lite`                |
+| 観点         | Claude Code                                  | Claude デスクトップアプリとその他の MCP クライアント |
+| ------------ | -------------------------------------------- | ---------------------------------------------------- |
+| つながる経路 | フックと CLI `n3mc-lite`                     | MCP の入口 `n3mc-workingmemory`（stdio JSON-RPC）     |
+| 保存の契機   | フックがすべてのメッセージと応答を保存       | LLM が `save_memory` を呼ぶ（instructions で誘導）   |
+| 検索         | フックがメッセージのたびに検索               | LLM が `search_memory` を呼ぶ（instructions で誘導） |
+| プロセス構成 | `127.0.0.1` の常駐サーバー 1 つを両方で共有。埋め込みモデルは 1 回だけ読み込む | （同じサーバー。MCP の入口は薄いクライアント） |
+| 保存先       | 同じ Redis Stack、同じ 7 日の TTL            | （同じ）                                             |
 
-自動保存は失われていません。MCP サーバーは `initialize` ハンドシェイク
-時に**振る舞いの指示**を配信し、接続中の LLM に「いつ検索し、いつ
-保存するか」を教えます。「指示は光」原則は保たれ、振る舞いは自然言語で
-指定されクライアントにコンパイルされません。
+「指示は光」原則は、どちらの経路でも保たれます。Claude Code では、
+ルールファイル `.claude/rules/n3mc-lite-behavior.md` が Claude に記憶の
+使い方を伝えます。MCP の入口は、`initialize` ハンドシェイク時に
+**振る舞いの指示**を配信します。振る舞いは自然言語で指定され、
+クライアントにコンパイルされません。
 
 ## プロジェクト詳細
 
-- **アーキテクチャ** — N3 MCP プロトコルを実装した Python パッケージ。
-  ストレージ層は差し替え可能で、Lite は Redis Stack、Pro 版
-  は SQLite + sqlite-vec を使用。
-- **重点** — あらゆる MCP 対応ツールをまたいだ、ハンズフリーなメモリ
-  継続性。
+- **アーキテクチャ** — Python パッケージ。Claude Code 向けのフック・
+  CLI・常駐サーバーと、ほかのアプリ向けの MCP の入口。ストレージ層は
+  差し替え可能で、Lite は Redis Stack、Pro 版は SQLite + sqlite-vec を
+  使用。
+- **重点** — Claude Code と、あらゆる MCP 対応ツールをまたいだ、
+  ハンズフリーなメモリ継続性。
 - **ライセンス** — Apache License 2.0 — 使用・改変・再配布（商用含む）
   を自由に許可。

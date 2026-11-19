@@ -3,6 +3,19 @@ Copyright 2026 NeuralNexusNote / ArnolfJp019
 
 This product is part of the NeuralNexusNote project and is distributed as
 the free "Lite" (ephemeral / Redis-backed) build of N3MemoryCore.
+From version 2.0.0 it is N3MC-Free + MCP, with Redis as the database:
+hooks, a CLI and a resident server for Claude Code, and an MCP entry for
+other applications.
+
+This product includes portions derived from N3MC-Free (n3memorycore-free):
+the Claude Code hooks, the resident server and the CLI, adapted to Lite's
+Redis storage and Lite's search and save rules. N3MC-Free is licensed under
+the Apache License, Version 2.0. A summary of the changes is provided in
+MODIFICATIONS.md.
+
+    Upstream:  https://github.com/NeuralNexusNote/n3mc-free
+    License:   Apache License 2.0
+    Copyright: Copyright 2026 NeuralNexusNote / ArnolfJp019
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this software except in compliance with the License.
@@ -10,6 +23,17 @@ A copy of the License is distributed with this product in the file
 LICENSE. You may also obtain a copy at:
 
     http://www.apache.org/licenses/LICENSE-2.0
+
+
+----- Original NOTICE (from N3MC-Free) -----
+
+N3MemoryCore (N3MC)
+Copyright 2026 NeuralNexusNote / ArnolfJp019
+
+This product is part of the NeuralNexusNote project.
+
+
+----- Third-party components -----
 
 This product bundles or depends on the following third-party components,
 each under their own license terms:
@@ -29,3 +53,7 @@ each under their own license terms:
   - uuid-utils                                — MIT
   - platformdirs                              — MIT
   - numpy                                     — BSD-3-Clause
+  - FastAPI (fastapi, from 2.0.0)             — MIT
+  - Uvicorn (uvicorn, from 2.0.0)             — BSD-3-Clause
+  - Pydantic (pydantic, from 2.0.0)           — MIT
+  - psutil (from 2.0.0)                       — BSD-3-Clause
