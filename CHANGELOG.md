@@ -61,6 +61,10 @@ the specification.
   `redis_url_mismatch`; put `redis_url` into `config.json`.
 - The resident server refuses requests with an `Origin` header (from
   N3MC Free v1.9.1); the hooks, the CLI and the MCP entry never send it.
+- New CLI command `n3mc-lite --stop-server` stops this data folder's
+  resident server (never another folder's).
+- On Windows, a hook path that contains a space is written with its 8.3
+  short name, so the hook command does not start with a quote.
 - The Claude desktop app is registered with the absolute path of the command
   and `env.N3MC_AGENT_NAME`; plugin users use
   `uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-workingmemory`. The plugin's

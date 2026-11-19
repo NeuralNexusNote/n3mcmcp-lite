@@ -22,7 +22,7 @@
 
 - **ライセンス**：Apache License 2.0。詳細は `LICENSE` を参照。
 
-> **アンインストール**：フックの登録も消えるように、AI に「N3MC Lite を削除してください」と頼む。自分で行うときは次のとおり。(1) プラグインの利用者は `/plugin uninstall n3mc-workingmemory@neuralnexusnote`。pip の利用者は、`~/.claude/settings.json` のうち、コマンドが `n3mc-lite-hook` / `n3mc-lite-stop-hook` を実行する 2 つの項目を消す（v2.0.0）。(2) 常駐サーバーのプロセス（コマンドラインに `n3mc_mcp.cli` と `--run-server` を含む）を終わらせる。または一度サインアウトする（v2.0.0）。(3) `pip uninstall n3memorycore-mcp-lite` でパッケージを削除する。(4) `docker rm -f redis-stack` で Redis コンテナを停止・削除すれば、保存済みメモリは即座に消える。(5) `${N3MC_DATA_DIR}`（既定は `~/.n3mc-workingmemory/`）を削除すれば、`config.json`、`audit.log` と §7 のほかのファイルが除去される。(6) Claude デスクトップアプリの設定ファイルから `n3mc-workingmemory` の項目を消す。プロジェクトのフォルダにある `.claude/rules/n3mc-lite-behavior.md` は、手で消してよい。
+> **アンインストール**：フックの登録も消えるように、AI に「N3MC Lite を削除してください」と頼む。自分で行うときは次のとおり。(1) プラグインの利用者は `/plugin uninstall n3mc-workingmemory@neuralnexusnote`。pip の利用者は、`~/.claude/settings.json` のうち、コマンドが `n3mc-lite-hook` / `n3mc-lite-stop-hook` を実行する 2 つの項目を消す（v2.0.0）。(2) 常駐サーバーを止める：`n3mc-lite --stop-server`（v2.0.0。またはコマンドラインに `n3mc_mcp.cli` と `--run-server` を含むプロセスを終わらせる）。(3) `pip uninstall n3memorycore-mcp-lite` でパッケージを削除する。(4) `docker rm -f redis-stack` で Redis コンテナを停止・削除すれば、保存済みメモリは即座に消える。(5) `${N3MC_DATA_DIR}`（既定は `~/.n3mc-workingmemory/`）を削除すれば、`config.json`、`audit.log` と §7 のほかのファイルが除去される。(6) Claude デスクトップアプリの設定ファイルから `n3mc-workingmemory` の項目を消す。プロジェクトのフォルダにある `.claude/rules/n3mc-lite-behavior.md` は、手で消してよい。
 >
 > **バックアップは？** Lite 版は **バックアップを想定していません**。7 日の滑り窓で消滅します。永続メモリが必要な場合は **Pro 版** をご利用ください。
 
@@ -1162,7 +1162,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 **（v2.0.0）ツールが動く場所**：下のハンドラは常駐サーバーの中で動く（`tools.py`。`POST /tools/<name>` から呼ばれる、§4.5）。薄いクライアントは、その文をそのまま返す（§4.6）。引数・振る舞い・出力の文は v1.12.2 のものである。1 つだけ足した：`search_memory` の文は `context_max_chars` の中に収める（§3.17）。§13 の CLI は同じハンドラを呼び、リマインダを除いて同じ文を出力する。
 
-全ツールの応答は単一の `TextContent`。`save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` は JSON 文字列、`search_memory` / `list_memories` は人間可読 markdown。**いずれの応答も末尾に短い auto-save リマインダ（[§11](#11-保存の確実性と-mcp-プロトコルの限界) で利用するナッジチャネル）を `\n---\n` 区切りで付加する。** **エラーの応答も含む（v1.7.3）**：§4.4 の `Error: …` の文（読めない `since` / `until`、予期しない例外、`search_memory` / `list_memories` / `recall_thread` のバックエンドエラー）と、`"status": "error"` の JSON（例：数値でない `importance`）。エラーの文が先頭のままなので、§4.4 の `Error: ` の前置きは変わらない。（v1.7.2 はこれらにリマインダを付けていなかった。） 機械的に応答 JSON をパースする呼び出し側は、先頭から JSON ドキュメント 1 つを取り出すストリーミングデコード（例：`json.JSONDecoder().raw_decode()`）を使うこと。
+全ツールの応答は単一の `TextContent`。`save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` は JSON 文字列、`search_memory` / `list_memories` は人間可読 markdown。**いずれの応答も末尾に短い auto-save リマインダ（[§11](#11-保存の確実性と-mcp-プロトコルの限界) で利用するナッジチャネル）を `\n\n---\n` 区切りで付加する。** **エラーの応答も含む（v1.7.3）**：§4.4 の `Error: …` の文（読めない `since` / `until`、予期しない例外、`search_memory` / `list_memories` / `recall_thread` のバックエンドエラー）と、`"status": "error"` の JSON（例：数値でない `importance`）。エラーの文が先頭のままなので、§4.4 の `Error: ` の前置きは変わらない。（v1.7.2 はこれらにリマインダを付けていなかった。） 機械的に応答 JSON をパースする呼び出し側は、先頭から JSON ドキュメント 1 つを取り出すストリーミングデコード（例：`json.JSONDecoder().raw_decode()`）を使うこと。
 
 ### 4.3.1 取り出し拡張ツール（Retrieval Extensions）
 
@@ -1193,7 +1193,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 **運用**: 接続中の LLM は `search_memory` のスニペットで文脈不足と判断したとき、ヒットの `turn_id` を `recall_thread` に渡して周辺会話を取得すること。ユーザーがこのツールを直接指定する必要はない。
 
-> **⚠️ 実装注意（`search_memory` 応答に `turn_id` を出力すること）**：上記運用が成立するには、`recall_thread` に渡す `turn_id` を LLM が `search_memory` の結果から読み取れる必要がある。したがって **`search_memory` の markdown 出力に各ヒットの `turn_id` を含める**こと（空のときは省略可）。実装上は `_vector_search` / `_bm25_search` の `RETURN_FIELDS` に `turn_id` を追加し、親解決時は `doc:<pid>` から `turn_id` を取得して行 dict に載せ、最終 markdown に 各ヒットの見出し行に `turn=<turn_id>` として出す（[§3.14](#314-検索結果の整形v170v172-から弱い候補で補充)）。これが無いと `recall_thread` は事実上呼べない（仕様の運用フローが閉じない）。
+> **⚠️ 実装注意（`search_memory` 応答に `turn_id` を出力すること）**：上記運用が成立するには、`recall_thread` に渡す `turn_id` を LLM が `search_memory` の結果から読み取れる必要がある。したがって **`search_memory` の markdown 出力に各ヒットの `turn_id` を含める**こと（空のときは出さない）。実装上は `_vector_search` / `_bm25_search` の `RETURN_FIELDS` に `turn_id` を追加し、親解決時は `doc:<pid>` から `turn_id` を取得して行 dict に載せ、最終 markdown に 各ヒットの見出し行に `turn=<turn_id>` として出す（[§3.14](#314-検索結果の整形v170v172-から弱い候補で補充)）。これが無いと `recall_thread` は事実上呼べない（仕様の運用フローが閉じない）。
 
 ### 4.4 エラー処理
 
@@ -2198,6 +2198,14 @@ pip install -e ".[dev]"
 N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
+Windows PowerShell (L25; development is done on Windows 11):
+
+```powershell
+docker start redis-stack-test 2>$null; if ($LASTEXITCODE -ne 0) { docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest }
+pip install -e ".[dev]"
+$env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
+```
+
 **テスト URL の既定値は無い（v1.7.0）。** Redis を要するテストは `N3MC_REDIS_TEST_URL` が設定されていなければスキップされる。またその URL がユーザーの実際の `config.json` の `redis_url` または `N3MC_REDIS_URL` と同じ場合、スイートは実行を拒否する（理由付きでスキップ）。実際の `config.json` は、サーバーと同じく `encoding="utf-8-sig"` で読む（BOM でその `redis_url` が隠れてはならない）。
 
 **2 つ目の防御：DB そのもの（v1.7.1、Lite レビュー LL6）**：URL の比較では、同じサーバーの別名（PC のホスト名、LAN のアドレス、`127.0.0.2`）を見逃す。フィクスチャは**毎回の** `FLUSHDB` の前に DB を確かめる：`DBSIZE` が 0 か、目印のキー `__n3mc_test_db__` があるときだけフラッシュし、フラッシュした直後に `SET __n3mc_test_db__ 1` する。データがあって目印のない DB は決してフラッシュしない — Redis のテストは `N3MC_REDIS_TEST_URL points at a Redis that holds data and is not marked as a test DB` という理由でスキップする。古いスイートの残りが入ったテスト用コンテナを使い回すには、一度だけ自分でフラッシュする。（目印は N3MC のキーではないので、`enforce_ephemeral()` は目印付きのテスト DB を共有とみなし、その永続化設定を変えない — 安全側。`TestEnforceEphemeral` は自分で用意した空の状態と N3MC のキーだけの状態を使う。）すべてのテストファイルは `conftest.py` の同じ `REDIS_TEST_URL` を使い、Redis URL をハードコードしてはならない。v1.6.x は既定で `redis://localhost:6379/0` — MCP サーバーと同じ Redis — を使っていたため、素の `pytest` がユーザーのワーキングメモリを消していた。
@@ -2248,7 +2256,7 @@ n3mcmcp-lite/
 | `TestDelete` | 単体削除、親→チャンクカスケード、`docsha:` ガード掃除 | トランザクション保護 |
 | `TestTTL` | 7 日 TTL 設定、検索ヒット時の `EXPIRE` リフレッシュ、期限切れ消失 | TTL |
 | `TestFTS` | 句読点除去、BM25 スコア、短クエリ、CJK バイグラム展開によるヒット | FTS / 日本語 |
-| `TestVectorSearch` | KNN 結果、空 DB 検索、`owner_id` フィルタ、`-@parent_id:{*}` 除外 | KNN 検索 |
+| `TestVectorSearch` | KNN 結果、空 DB 検索、`owner_id` フィルタ、独立したレコードだけ（`parent_id` が空。Python で絞る — `-@parent_id:{*}` の TAG のフィルタは使わない、§3.12） | KNN 検索 |
 | `TestCjkBigramExpand` | ひらがな・カタカナ・漢字混在のバイグラム展開、境界処理 | トークナイズ |
 | `TestAccessCount` | `access_count` の HINCRBY、上位 N のみ加算、キャップ | 自動 importance |
 | `TestSerialization` | ベクトルのバイナリ往復、f32 LE パック | シリアライズ |
@@ -2426,7 +2434,7 @@ pytest tests/ -v -k "not TestEmbedding"
 
 ## 10. 自律評価（Evidence Report）
 
-> 実装完了後、AI は以下を自律実行し、各項目を ⭐⭐⭐⭐⭐ で報告すること。スコアはコード生成直後の一発勝負ではなく、§9 の pytest が緑である前提で判定する。MCP Lite 版は Redis Stack 前提・7 日 TTL という制約下での最善を測る。
+> 実装完了後、AI は以下を自律実行し、各項目を ⭐⭐⭐⭐⭐ で報告すること。スコアはコード生成直後の一発勝負ではない。先に §9 の pytest を実行し、その結果を報告する。§9 のとおり、失敗したテストはこの判定を止めない（合否を決めるのは検証レポートである）が、失敗したテストはすべて報告に名前を挙げる。MCP Lite 版は Redis Stack 前提・7 日 TTL という制約下での最善を測る。
 
 > **（v2.0.0）項目 1〜6 でのツールの呼び方**：Claude Code には、このサーバーの MCP ツールはもうない。各ツールは CLI で動かす。CLI は同じハンドラを呼び、リマインダを除いて同じ文を出力する（§13）：`search_memory` → `python -m n3mc_mcp.cli --search`（§3.14 と同じ検索を行い、行をフックの見出しの中に出力する）。`save_memory` → `--buffer`。`list_memories` → `--list`。`delete_memories_by_session` → `--delete-session`（Claude Code が許可を求めるので、許可する）。`repair_memory` → `--repair`。項目 10 は MCP の経路そのものを確かめる。
 
@@ -2517,7 +2525,7 @@ pytest tests/ -v -k "not TestEmbedding"
 
 ### 実運用で起きること
 
-大半のターンでは正しく auto-save される。だが**短い返答・事実訂正のターン・LLM がユーザの質問に強く集中しているターン**では飛ぶ。観察可能な症状であっても自動評価は困難で、「飛んだら飛んだまま」── 次セッションで失われていることに気づくまで分からない。
+大半のターンでは正しく auto-save される。だが**短い返答・事実訂正のターン・LLM がユーザの質問に強く集中しているターン**では飛ぶ。観察可能な症状であっても自動評価は困難なので、§10 の検証レポートには含めない。「飛んだら飛んだまま」── 次セッションで失われていることに気づくまで分からない。
 
 ### 確実な保存が必要なときの 2 つの経路
 
@@ -2589,7 +2597,7 @@ LLM の自発性に依存せず保存を保証したい場合、**MCP の建付�
 
 **`--save-claude-turn`** は Stop の JSON（`session_id`、`stop_hook_active`、`last_assistant_message`）を読み、`sanitize_surrogates` を当て、`last_assistant_message` が空でなければ、`role = "claude"` と `turn_id_<session>.txt` の `turn_id`（ファイルがなければ新しい UUIDv4）で保存する — §12.6。ファイルは空にしない（次の `--hook-submit` が上書きする）。1 つのやりとりで Stop が 2 回動いたら、2 回目の保存は `duplicate` である。stdout には何も出力しない。
 
-**`--stop`**（セッションの終わりの片付け。サーバーは止め**ない**）：
+**`--stop`**（セッションの終わりの片付け。サーバーは止め**ない** — 止めるのは `--stop-server`、§13）：
 
 1. `<cwd>/.claude/rules/n3mc-lite-behavior.md` を用意する（§12.9）。`<cwd>` は Stop フックの JSON の `cwd` で、`n3mc-lite-stop-hook` が `--save-claude-turn` と同じく `--stop` にも stdin で渡す（L21、2026-11-20）。なければ、プロセスの作業フォルダ。**`<cwd>` がホームフォルダのとき**（または `cwd` がなく、作業フォルダがホームフォルダのとき）は、この手順を飛ばす：`~/.claude/rules/` はすべてのプロジェクトに効いてしまう。
 2. データフォルダの `turn_id_*.txt` のうち、更新時刻が 30 日より前のファイルを消す。
@@ -2703,7 +2711,18 @@ def is_own_hook(command: str, event: str) -> bool:
 
 def shell_path(p) -> str:
     s = pathlib.Path(p).as_posix()                     # forward slashes: bash reads "\" as an escape
-    return f'"{s}"' if " " in s else s                 # quote only when there is a space
+    if " " in s and os.name == "nt":                   # (L28) a command that starts with a quote
+        short = _short_path(p)                         #       did not run as a hook on a Windows PC:
+        if short and " " not in short:               #       use the 8.3 short name, which has no space
+            s = pathlib.Path(short).as_posix()
+    return f'"{s}"' if " " in s else s                 # quote only when a space is left
+
+def _short_path(p) -> str:
+    """Windows 8.3 short path of an existing file, or "" (8.3 names may be disabled on the volume)."""
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetShortPathNameW(str(p), buf, len(buf))
+    return buf.value if 0 < n < len(buf) else ""
 
 def resolve_cmd(script_name: str) -> str:
     folders = [sysconfig.get_path("scripts")]
@@ -2726,7 +2745,7 @@ def resolve_cmd(script_name: str) -> str:
 
 - `lite_hook.py` と `lite_stop_hook.py` は `main()` を持ち、`python -m` でも動く（フォールバックの形）。
 - **この正確な照合にする理由**（Free D1、v1.5.0）：フックの名前を*含む*だけのコマンドをすべて当てると、ほかの N3MC 製品のフックを消してしまった。1 つの形だけを当てると、重複が残った。Lite の名前（`n3mc-lite-hook`、`n3mc_mcp.lite_hook`）は、Free のもの（`n3mc-hook`、`n3memorycore.n3mc_hook`）とも Pro のものとも違うので、どちらの `--init` も相手の項目を消さない（§14）。
-- **scripts フォルダを先に見て、引用符を付けない理由**（Free v1.6.0）：Python を入れた直後は、Claude Code の `PATH` に scripts フォルダがない。また、引用符で始まるフックのコマンドが、ある Windows の PC で動かなかった。
+- **scripts フォルダを先に見て、引用符を付けない理由**（Free v1.6.0）：Python を入れた直後は、Claude Code の `PATH` に scripts フォルダがない。また、引用符で始まるフックのコマンドが、ある Windows の PC で動かなかった。**（L28、2026-11-20）** 空白を含むパスには、それでも引用符が要る。そこで Windows では、`shell_path` がファイルの 8.3 形式の短い名前（`GetShortPathNameW`）を使う。これには空白がない。そのドライブで 8.3 の名前が切ってあるときだけ引用符を付け、`--init` は `The hook command for <event> starts with a quote because <path> contains a space; if the hook does not run, install Python into a folder without spaces.` を出す。Linux のパスは今までどおり引用符で囲む（そこで失敗するとは分かっていない）。
 
 ### 12.9 ルールファイル `.claude/rules/n3mc-lite-behavior.md`
 
@@ -2834,6 +2853,7 @@ kept only in `audit.log`.
 | `--delete <id>` | `/tools/delete_memory` | `delete_memory` の JSON |
 | `--delete-session <session_id>` | `/tools/delete_memories_by_session` | §4.3 の JSON |
 | `--repair` | `/tools/repair_memory`（1 回の呼び出し：最大 200 のベクトル。`remaining` > 0 の間はもう一度実行する） | `repair_memory` の JSON |
+| `--stop-server`（L26、2026-11-20） | 何も起動せずに `ensure_server` の同一性の確認を行う：`server_port` の `/health` が自分の `root` を返したら、それを付けて `POST /shutdown` を送り、ポートが空くまで待つ（§3.15） | `Stopped the N3MC Lite server (pid <pid>).`、または `No N3MC Lite server of this data folder is running.`（ほかのフォルダのサーバーがポートを使っているときも。それは決して止めない）。exit 0 |
 | `--hook-submit`、`--save-claude-turn`、`--stop` | §12 | §12 |
 | `--init` | §12.8 | §12.8 |
 | `--run-server` | このプロセスで常駐サーバーを動かす（§3.15）：`config.json` を読み込み、`127.0.0.1` 以外の `bind_host` を警告し、§3.9 の手順 1〜3 とライブラリの import を行い、モデルのロードを始める lifespan 付きで、`bind_host:server_port` で uvicorn を動かす。終わるとき、PID ファイルが自分の PID を持っていれば消す | stdout には何も出さない |
@@ -2876,7 +2896,7 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 
 - **クロスエンコーダ・リランカー** — `hybrid_search` が返した上位 N 候補を、小型のクロスエンコーダ（例: `cross-encoder/ms-marco-MiniLM-L-12-v2`、~130 MB / `BAAI/bge-reranker-base`、~278 MB）で再ランキングする。現代的なノート PC で `search_memory` 1 回あたり **+100〜300 ms の CPU レイテンシ**（上位 50 件リランク）を加え、言い換えの多いクエリで概ね **精度 +1 ポイント** を得る見立て。差し込み位置は `processor.hybrid_search` の融合スコアソート後、`min_score` フィルタの前。リランカー無効時には従来スコアを素通しできるよう既定フォールバックを残すこと。なお本版には軽量な語彙リランカーが既にデフォルト有効で組み込まれており（`lexical_rerank_enabled` [§6](#6-設定)）、クロスエンコーダはその上位互換として差し替える形になる。
 - **HyDE（Hypothetical Document Embeddings）** — ユーザーのクエリを埋め込む前に、小型 LLM で「仮の回答」を合成し、その回答をクエリの代わりに（または併用で）埋め込む。クエリが短く曖昧で、記憶側が長く具体的な場合に効く。検索ごとに LLM ホップが入るため、「外部 API コール無し」を謳う Lite 版とは相性が悪い — ローカル LLM が既に利用可能な場合に限り選択肢となる。
-- **日本語形態素解析** — 本版はすでに [§3.7](#37-トークナイズと句読点処理) の通り CJK バイグラム展開で日本語・中国語 BM25 を補強している。さらに精度を求めるなら保存時に形態素解析器で `text` 本文を事前分割する — 候補は `fugashi` + `unidic-lite`（MeCab ベース、~50 MB）、`SudachiPy` + `sudachidict-core`（~70 MB、A/B/C 三段の分割粒度）、バイナリ依存を避けたいなら純 Python の `Janome` — 表層形をスペース結合したものを並列 `text_tokens` TEXT フィールドに格納し、BM25 検索はこのフィールドを参照する。ベクトル検索側は影響なし（e5 埋め込みモデルは日本語を直接扱える）、表示用の生 `text` はそのまま保持する。見込みコストは `save_memory` 1 回あたり +5〜20 ms、バイグラム展開との差分は語境界の厳密性で、複合語・派生形の識別で差が出る。
+- **日本語形態素解析** — 本版はすでに [§3.7](#37-トークナイズと句読点処理) の通り CJK バイグラム展開で日本語・中国語 BM25 を補強している。さらに精度を求めるなら保存時に形態素解析器で本文（`content`）を事前分割する — 候補は `fugashi` + `unidic-lite`（MeCab ベース、~50 MB）、`SudachiPy` + `sudachidict-core`（~70 MB、A/B/C 三段の分割粒度）、バイナリ依存を避けたいなら純 Python の `Janome` — 表層形をスペース結合したものを並列 `text_tokens` TEXT フィールドに格納し、BM25 検索はこのフィールドを参照する。ベクトル検索側は影響なし（e5 埋め込みモデルは日本語を直接扱える）、表示用の本文（`content`）はそのまま保持する。見込みコストは `save_memory` 1 回あたり +5〜20 ms、バイグラム展開との差分は語境界の厳密性で、複合語・派生形の識別で差が出る。
 
 3 案はいずれも加算的で、Redis スキーマ既存フィールドや TTL / 重複判定契約の変更を要求しない（日本語トークナイザは並列フィールドを**追加**するのみ）。将来の実装者は機能フラグとして独立に扱い（既定 OFF）、各々ベースラインランカーに対して単独でベンチマークすべきである。
 
@@ -2963,7 +2983,7 @@ n3mcmcp-lite について：
 ```
 n3mcmcp-lite について：
 このセッションのメッセージがフックで保存されたことを確認してください
-（python -m n3mc_mcp.cli --list）。常駐サーバーを /shutdown で止め
+（python -m n3mc_mcp.cli --list）。常駐サーバーを python -m n3mc_mcp.cli --stop-server で止め
 （Redis は止めない）、そのメッセージについて python -m n3mc_mcp.cli --search を
 実行してください：サーバーがもう一度起動し、レコードが見つかること。
 一時的なデータフォルダで、MCP の薄いクライアントを通した save_memory でも
@@ -2991,7 +3011,7 @@ MCP クライアントのテストを使い、§10 の 1〜11 の各項目を順
 - §10-1: サーバー起動の後の初回の検索と、定常の検索（5 回計測の中央値）の実測値、Redis 停止時のヒント返却（クラッシュなし）
 - §10-3: 400 字超テキストの一字一句復元（親ドキュメント verbatim 契約と [doc×N] タグ）
 - §10-4: 括弧付き保存テキストを無括弧クエリで上位 3 件以内ヒット（CJK バイグラム）
-- §10-6: 短／中／長（chunk_threshold 超）の混合投入 → delete_memories_by_session
+- §10-6: 短／中／長（chunk_threshold 超）の混合投入を 1 つの session_id の下で → delete_memories_by_session
          → 投入数と deleted 合計の一致、他 session の無干渉、2 回目 not_found
 - §10-7..9: フックの関門、ターンごとに turn_id 1 つの [user]/[claude] レコード
 - §10-10: 一時フォルダでの MCP の薄いクライアント（モデルなし、同じ文）
@@ -3018,12 +3038,12 @@ Evidence Report が緑になったら、フェーズ 4（品質レビュー）�
 n3mcmcp-lite をレビューしてください。必要に応じて修正してください。
 
 n3mcmcp-lite は記憶装置（Claude Code にはフック、ほかのアプリには MCP）として、また RAG として 10 点満点で何点ですか？
-記憶装置としての評価（保存・TTL・重複排除・親ドキュメント verbatim 契約）と
+記憶装置としての評価（保存・7 日 TTL・重複排除・親ドキュメント verbatim 契約）と
 RAG としての評価（ハイブリッド検索・CJK バイグラム・軽量リランカー・時間減衰・
 自動 importance）を分けて、スコアカードを生成してください。
 ```
 
-Opus が実際に CLI のコマンド（とテスト用フォルダでの MCP の薄いクライアント）を動かし、**記憶装置**（保存・7 日 TTL・重複排除・親ドキュメント）と **RAG**（検索精度・ランキング・ノイズ耐性）の 2 軸でスコアカードを生成します。
+Opus が実際に CLI のコマンド（とテスト用フォルダでの MCP の薄いクライアント）を動かし、**記憶装置**（保存・TTL・重複排除・親ドキュメント）と **RAG**（検索精度・ランキング・ノイズ耐性）の 2 軸でスコアカードを生成します。
 
 > **注意**：MCP Lite 版は軽量リランカーと CJK バイグラムを標準搭載しているため Free 版より RAG 側の天井は少し高いですが、それでも以下が未実装で **RAG 側は 8 点を超えることはまずありません：**
 > - 形態素解析（MeCab / SudachiPy 等）による語境界の厳密化（付録 A）

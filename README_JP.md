@@ -621,7 +621,7 @@ Lite は 3 つとも使います。ツールの応答の最後には、いつも
 
 1. プラグインの利用者は `/plugin uninstall n3mc-workingmemory@neuralnexusnote`。
    pip の利用者は、`~/.claude/settings.json` のうち、コマンドが `n3mc-lite-hook` / `n3mc-lite-stop-hook` を実行する 2 つの項目を消します。
-2. 常駐サーバーのプロセス（コマンドラインに `n3mc_mcp.cli` と `--run-server` を含む）を終わらせます。または、一度サインアウトします。
+2. 常駐サーバーを止めます：`n3mc-lite --stop-server`（または、コマンドラインに `n3mc_mcp.cli` と `--run-server` を含むプロセスを終わらせます）。
 3. `pip uninstall n3memorycore-mcp-lite` でパッケージを消します。
 4. `docker rm -f redis-stack` で Redis のコンテナを止めて消します。保存した記憶はすべて消えます。
 5. `~/.n3mc-workingmemory/`（または `N3MC_DATA_DIR`）を消します。`config.json`、`audit.log` とほかのファイルが消えます。
@@ -637,6 +637,15 @@ docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
+```
+
+Windows の PowerShell:
+
+```powershell
+docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
+python -m venv .venv; .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+$env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
 ```
 
 RediSearch は DB 0 にしか索引を作れません。だから、別の DB 番号でテストすることはできません。
@@ -675,7 +684,7 @@ The process cannot access the file because it is being used by another process:
 
 対処：Claude デスクトップアプリと Claude Code を完全に終了します。
 Windows では、ウィンドウを閉じるだけでは足りません。タスクマネージャーでプロセスを終わらせるか、一度サインアウトします。
-常駐サーバーのプロセス（コマンドラインに `n3mc_mcp.cli` と `--run-server` を含む）も終わらせます。
+常駐サーバーも止めます（`n3mc-lite --stop-server`）。
 そのあと、もう一度 `pip install --upgrade` を実行します。
 
 ### `~3memorycore-mcp-lite` 警告が pip install 時に出る

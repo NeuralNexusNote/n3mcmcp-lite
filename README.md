@@ -676,8 +676,8 @@ too, or do it yourself:
 1. Plugin users: `/plugin uninstall n3mc-workingmemory@neuralnexusnote`.
    pip users: remove the two entries of `~/.claude/settings.json` whose
    command runs `n3mc-lite-hook` / `n3mc-lite-stop-hook`.
-2. End the resident server process (its command line contains
-   `n3mc_mcp.cli` and `--run-server`), or sign out once.
+2. Stop the resident server: `n3mc-lite --stop-server` (or end the process
+   whose command line contains `n3mc_mcp.cli` and `--run-server`).
 3. `pip uninstall n3memorycore-mcp-lite` removes the package.
 4. `docker rm -f redis-stack` stops and deletes the Redis container and
    erases all stored memories.
@@ -697,6 +697,15 @@ docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
+```
+
+Windows PowerShell:
+
+```powershell
+docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
+python -m venv .venv; .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+$env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
 ```
 
 RediSearch refuses to create indexes outside DB 0, so a separate test DB is
@@ -739,8 +748,8 @@ the Claude desktop app running `n3mc-workingmemory.exe`.
 
 Fix: fully quit the Claude desktop app and Claude Code (closing the window
 is not enough on Windows; end the processes in Task Manager or sign out
-once), end the resident server process (its command line contains
-`n3mc_mcp.cli` and `--run-server`), then run `pip install --upgrade` again.
+once), stop the resident server (`n3mc-lite --stop-server`), then run
+`pip install --upgrade` again.
 
 ### `~3memorycore-mcp-lite` warnings during pip install
 

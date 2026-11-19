@@ -22,7 +22,7 @@ By using this software, you agree to the terms above.
 
 - **License**: Apache License 2.0. See the `LICENSE` file for details.
 
-> **Removal (Uninstall)**: Ask the AI "Please remove N3MC Lite" so that the hook entries are removed too, or do it yourself: (1) plugin users: `/plugin uninstall n3mc-workingmemory@neuralnexusnote`; pip users: remove the two entries of `~/.claude/settings.json` whose command runs `n3mc-lite-hook` / `n3mc-lite-stop-hook` (v2.0.0); (2) end the resident server process (its command line contains `n3mc_mcp.cli` and `--run-server`), or sign out once (v2.0.0); (3) `pip uninstall n3memorycore-mcp-lite` removes the package; (4) stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly; (5) delete `${N3MC_DATA_DIR}` (default `~/.n3mc-workingmemory/`) to remove `config.json`, `audit.log` and the other files of §7; (6) remove the `n3mc-workingmemory` entry from the Claude desktop app's config file. `.claude/rules/n3mc-lite-behavior.md` in your project folders can be deleted by hand.
+> **Removal (Uninstall)**: Ask the AI "Please remove N3MC Lite" so that the hook entries are removed too, or do it yourself: (1) plugin users: `/plugin uninstall n3mc-workingmemory@neuralnexusnote`; pip users: remove the two entries of `~/.claude/settings.json` whose command runs `n3mc-lite-hook` / `n3mc-lite-stop-hook` (v2.0.0); (2) stop the resident server: `n3mc-lite --stop-server` (v2.0.0; or end the process whose command line contains `n3mc_mcp.cli` and `--run-server`); (3) `pip uninstall n3memorycore-mcp-lite` removes the package; (4) stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly; (5) delete `${N3MC_DATA_DIR}` (default `~/.n3mc-workingmemory/`) to remove `config.json`, `audit.log` and the other files of §7; (6) remove the `n3mc-workingmemory` entry from the Claude desktop app's config file. `.claude/rules/n3mc-lite-behavior.md` in your project folders can be deleted by hand.
 >
 > **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, the **Pro build** offers persistent storage.
 
@@ -1176,7 +1176,7 @@ Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §
 
 **(v2.0.0) Where the tools run**: the handlers below run inside the resident server (`tools.py`, called by `POST /tools/<name>`, §4.5); the thin client returns their text unchanged (§4.6). Their arguments, behaviour and output texts are those of v1.12.2, with one addition: the `search_memory` text is kept within `context_max_chars` (§3.17). The CLI of §13 calls the same handlers and prints the same text without the reminder.
 
-All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. **This includes every error response (v1.7.3)**: the `Error: …` text of §4.4 (an unreadable `since` / `until`, an unexpected exception, the backend error of `search_memory` / `list_memories` / `recall_thread`) and the JSON with `"status": "error"` (e.g. a non-numeric `importance`). The error text stays first, so the `Error: ` prefix of §4.4 is unchanged. (v1.7.2 sent these without the reminder.) Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
+All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. **This includes every error response (v1.7.3)**: the `Error: …` text of §4.4 (an unreadable `since` / `until`, an unexpected exception, the backend error of `search_memory` / `list_memories` / `recall_thread`) and the JSON with `"status": "error"` (e.g. a non-numeric `importance`). The error text stays first, so the `Error: ` prefix of §4.4 is unchanged. (v1.7.2 sent these without the reminder.) Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
 
 ### 4.3.1 Retrieval Extension Tools
 
@@ -2209,6 +2209,14 @@ pip install -e ".[dev]"
 N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
+Windows PowerShell (L25; development is done on Windows 11):
+
+```powershell
+docker start redis-stack-test 2>$null; if ($LASTEXITCODE -ne 0) { docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest }
+pip install -e ".[dev]"
+$env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
+```
+
 **There is no default test URL (v1.7.0).** Tests that need Redis are skipped unless `N3MC_REDIS_TEST_URL` is set, and the suite refuses to run (skips with a reason) when that URL equals the `redis_url` in the user's real `config.json` or `N3MC_REDIS_URL`. The real `config.json` is read with `encoding="utf-8-sig"`, like the server reads it (a BOM must not hide its `redis_url`).
 
 **Second guard: the DB itself (v1.7.1, Lite review LL6)**: comparing URLs misses aliases of the same server (the PC's host name, its LAN address, `127.0.0.2`). Before **every** `FLUSHDB`, the fixtures check the DB: flush only if `DBSIZE` is 0 or the marker key `__n3mc_test_db__` exists; right after flushing, `SET __n3mc_test_db__ 1`. A DB with data and no marker is never flushed — the Redis tests skip with the reason `N3MC_REDIS_TEST_URL points at a Redis that holds data and is not marked as a test DB`. To reuse a test container that holds leftovers from an older suite, flush it yourself once. (Because the marker is not an N3MC key, `enforce_ephemeral()` treats a marked test DB as shared and leaves its persistence settings alone — the safe side; `TestEnforceEphemeral` uses its own empty / N3MC-only states.) Every test file uses the same `REDIS_TEST_URL` from `conftest.py`; no test may hard-code a Redis URL. v1.6.x defaulted to `redis://localhost:6379/0` — the same Redis the MCP server uses — so a plain `pytest` wiped the user's working memory.
@@ -2259,7 +2267,7 @@ n3mcmcp-lite/
 | `TestDelete` | Single delete, parent→chunk cascade, `docsha:` guard cleanup | Transactional safety |
 | `TestTTL` | 7-day TTL set on save, `EXPIRE` refresh on search hits, expiry-driven disappearance | TTL |
 | `TestFTS` | Punctuation stripping, BM25 scores, short queries, CJK-bigram hits | FTS / Japanese |
-| `TestVectorSearch` | KNN results, empty-DB search, `owner_id` filter, `-@parent_id:{*}` exclusion | KNN search |
+| `TestVectorSearch` | KNN results, empty-DB search, `owner_id` filter, standalone records only (empty `parent_id`, filtered in Python — the `-@parent_id:{*}` TAG filter is not used, §3.12) | KNN search |
 | `TestCjkBigramExpand` | Bigram expansion for hiragana / katakana / kanji mixes, boundary handling | Tokenization |
 | `TestAccessCount` | `access_count` HINCRBY, only top-N increments, cap enforcement | Auto importance |
 | `TestSerialization` | Vector binary round-trip, f32 LE packing | Serialization |
@@ -2437,7 +2445,7 @@ pytest tests/ -v -k "not TestEmbedding"
 
 ## 10. Self-Evaluation (Evidence Report)
 
-> Once implementation is complete, the AI runs the following checks autonomously and reports each item at ⭐⭐⭐⭐⭐. This is not a post-generation one-shot scorecard: it assumes the §9 pytest suite is green. MCP Lite is judged on *best-in-class behavior given the Redis-Stack + 7-day-TTL constraint set*.
+> Once implementation is complete, the AI runs the following checks autonomously and reports each item at ⭐⭐⭐⭐⭐. This is not a post-generation one-shot scorecard: run the §9 pytest suite first and report its result. Per §9, a failing test does not block this sign-off (the Evidence Report is the pass/fail gate), but every failing test is named in the report. MCP Lite is judged on *best-in-class behavior given the Redis-Stack + 7-day-TTL constraint set*.
 
 > **(v2.0.0) How to call the tools in items 1–6**: Claude Code has no MCP tools for this server any more. Run each tool through the CLI, which calls the same handler and prints the same text without the reminder (§13): `search_memory` → `python -m n3mc_mcp.cli --search` (it runs the same search of §3.14 and prints the rows inside the hook's heading); `save_memory` → `--buffer`; `list_memories` → `--list`; `delete_memories_by_session` → `--delete-session` (Claude Code asks for permission: approve it); `repair_memory` → `--repair`. Item 10 checks the MCP path itself.
 
@@ -2600,7 +2608,7 @@ Input: the UserPromptSubmit JSON on stdin (`session_id`, `transcript_path`, `cwd
 
 **`--save-claude-turn`** reads the Stop JSON (`session_id`, `stop_hook_active`, `last_assistant_message`), applies `sanitize_surrogates`, and, when `last_assistant_message` is not empty, saves it with `role = "claude"` and the `turn_id` from `turn_id_<session>.txt` (a new UUIDv4 when the file is missing) — §12.6. The file is not cleared (the next `--hook-submit` overwrites it). If Stop fires twice in one exchange, the second save is a `duplicate`. Prints nothing to stdout.
 
-**`--stop`** (session-end housekeeping; it does **not** stop the server):
+**`--stop`** (session-end housekeeping; it does **not** stop the server — `--stop-server` does, §13):
 
 1. Prepare `<cwd>/.claude/rules/n3mc-lite-behavior.md` (§12.9). `<cwd>` is the `cwd` of the Stop hook's JSON, which `n3mc-lite-stop-hook` passes on to `--stop` on stdin as it does to `--save-claude-turn` (L21, 2026-11-20); without it, the process's working folder. **When `<cwd>` is the home folder** (or `cwd` is missing and the working folder is the home folder), skip this step: `~/.claude/rules/` would apply to every project.
 2. Delete `turn_id_*.txt` files in the data folder whose modification time is more than 30 days old.
@@ -2714,7 +2722,18 @@ def is_own_hook(command: str, event: str) -> bool:
 
 def shell_path(p) -> str:
     s = pathlib.Path(p).as_posix()                     # forward slashes: bash reads "\" as an escape
-    return f'"{s}"' if " " in s else s                 # quote only when there is a space
+    if " " in s and os.name == "nt":                   # (L28) a command that starts with a quote
+        short = _short_path(p)                         #       did not run as a hook on a Windows PC:
+        if short and " " not in short:               #       use the 8.3 short name, which has no space
+            s = pathlib.Path(short).as_posix()
+    return f'"{s}"' if " " in s else s                 # quote only when a space is left
+
+def _short_path(p) -> str:
+    """Windows 8.3 short path of an existing file, or "" (8.3 names may be disabled on the volume)."""
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetShortPathNameW(str(p), buf, len(buf))
+    return buf.value if 0 < n < len(buf) else ""
 
 def resolve_cmd(script_name: str) -> str:
     folders = [sysconfig.get_path("scripts")]
@@ -2737,7 +2756,7 @@ def resolve_cmd(script_name: str) -> str:
 
 - `lite_hook.py` and `lite_stop_hook.py` have a `main()` and also run under `python -m` (the fallback form).
 - **Why this exact matching** (Free D1, v1.5.0): matching every command that merely *contains* a hook name deleted other N3MC products' hooks; matching only one form left duplicates. Lite's names (`n3mc-lite-hook`, `n3mc_mcp.lite_hook`) differ from Free's (`n3mc-hook`, `n3memorycore.n3mc_hook`) and Pro's, so neither `--init` removes the other's entries (§14).
-- **Why the scripts folder first and no quotes** (Free v1.6.0): right after installing Python, Claude Code's `PATH` lacks the scripts folder, and a hook command that starts with a quote did not run on one Windows PC.
+- **Why the scripts folder first and no quotes** (Free v1.6.0): right after installing Python, Claude Code's `PATH` lacks the scripts folder, and a hook command that starts with a quote did not run on one Windows PC. **(L28, 2026-11-20)** A path with a space would still need the quote, so on Windows `shell_path` uses the 8.3 short name of the file (`GetShortPathNameW`), which has no space. Only when the volume has 8.3 names turned off is the path quoted; `--init` then prints `The hook command for <event> starts with a quote because <path> contains a space; if the hook does not run, install Python into a folder without spaces.` Linux paths are quoted as before (the quote is not known to fail there).
 
 ### 12.9 The rules file `.claude/rules/n3mc-lite-behavior.md`
 
@@ -2845,6 +2864,7 @@ kept only in `audit.log`.
 | `--delete <id>` | `/tools/delete_memory` | The `delete_memory` JSON |
 | `--delete-session <session_id>` | `/tools/delete_memories_by_session` | The JSON of §4.3 |
 | `--repair` | `/tools/repair_memory` (one call: up to 200 vectors; run again while `remaining` > 0) | The `repair_memory` JSON |
+| `--stop-server` (L26, 2026-11-20) | `ensure_server`'s identity check without starting anything: when `/health` on `server_port` reports our `root`, `POST /shutdown` with it and wait until the port is free (§3.15) | `Stopped the N3MC Lite server (pid <pid>).`, or `No N3MC Lite server of this data folder is running.` (also when another folder's server holds the port, which is never stopped); exit 0 |
 | `--hook-submit`, `--save-claude-turn`, `--stop` | §12 | §12 |
 | `--init` | §12.8 | §12.8 |
 | `--run-server` | Runs the resident server in this process (§3.15): load `config.json`, warn about a `bind_host` other than `127.0.0.1`, steps 1–3 of §3.9 and the library import, then uvicorn on `bind_host:server_port` with the lifespan that starts the model load; removes the PID file on exit when it holds its own PID | nothing on stdout |
@@ -2976,7 +2996,7 @@ implemented and fix it.
 ```
 For n3mcmcp-lite:
 Check that a message of this session was saved by the hooks
-(python -m n3mc_mcp.cli --list). Stop the resident server with /shutdown
+(python -m n3mc_mcp.cli --list). Stop the resident server with python -m n3mc_mcp.cli --stop-server
 (keep Redis running), then run python -m n3mc_mcp.cli --search for that
 message: the server is started again and the record is found. Do the
 same with save_memory through the MCP thin client in a temporary data
