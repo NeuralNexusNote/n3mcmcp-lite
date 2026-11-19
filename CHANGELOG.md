@@ -7,6 +7,82 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
+## [2.0.0] — Unreleased
+
+Specification v2.0.0 (EN / JP, 2026-11-19). A MAJOR version: the way Lite
+connects to Claude Code changed. MCP-Lite is now "N3MC-Free + MCP, with Redis
+as the database": the search and save rules of v1.12.2, plus Free's hooks,
+resident server and CLI, plus a thin MCP entry for applications without
+hooks. The code in this repository is still v1.12.2; it is regenerated from
+the specification.
+
+### Changed
+- **Claude Code uses the hooks only.** The plugin registers the
+  `UserPromptSubmit` and `Stop` hooks (and `SessionStart` for permissions)
+  and no longer registers the MCP server in Claude Code; `plugin.json` has no
+  `mcpServers` key. pip users run `n3mc-lite --init` once. Claude Code no
+  longer shows the seven MCP tools. Do not register the MCP server in Claude
+  Code; `--init` reports an old registration in `~/.claude.json` or
+  `.mcp.json` but does not edit those files.
+- **Every non-empty message and reply is saved in Claude Code** by the hooks,
+  as `[user]` / `[claude]` records (chunks `[user i/N]`), with Lite's save
+  rules (code blocks as `[code omitted]`, chunking, parent document, TTL).
+  Hook saves reject exact duplicates only within the same exchange
+  (`turn_id`); the MCP `save_memory` keeps Lite's rule across all records.
+- **The `UserPromptSubmit` hook searches with every message** and puts the
+  result into Claude's context under `# Recalled Memory Context`; it also
+  adds missing vectors and saves Claude's previous reply from the transcript
+  when the Stop hook missed it.
+- **One resident server** (`127.0.0.1:18524`, `python -m n3mc_mcp.cli
+  --run-server`) loads the embedding model once for the hooks, the CLI and
+  every MCP client, and keeps running in the background. It is replaced by
+  itself when the code or `config.json` changes (`code_version`).
+- **The MCP entry `n3mc-workingmemory` is a thin client** for the Claude
+  desktop app and other applications without hooks: it answers `initialize`
+  and `tools/list` itself, loads no model and forwards every tool call to the
+  resident server. When the server is not available, `save_memory` saves
+  directly to Redis without a vector.
+- The MCP instructions tell a client that already has a
+  `# Recalled Memory Context` block not to save every turn.
+- The Claude desktop app is registered with the absolute path of the command
+  and `env.N3MC_AGENT_NAME`; plugin users use
+  `uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-workingmemory`. The plugin's
+  `uvx` commands are pinned to the package version.
+- Auto-approve in Claude Code covers the CLI commands (`--search`,
+  `--buffer`, `--list`, `--recall-thread`, `--repair`, `--stop`) instead of
+  the MCP tools. `--delete` and `--delete-session` are never pre-approved.
+- Classifiers: Windows and Linux (macOS is not a target).
+
+### Added
+- CLI `n3mc-lite`: `--search`, `--buffer`, `--list`, `--recall-thread`,
+  `--delete`, `--delete-session`, `--repair` (the tools' handlers and texts),
+  and `--init`, `--hook-submit`, `--save-claude-turn`, `--stop`,
+  `--run-server`, `--uvx`.
+- Console scripts `n3mc-lite`, `n3mc-lite-hook`, `n3mc-lite-stop-hook`.
+- Rules file `.claude/rules/n3mc-lite-behavior.md`, kept up to date by the
+  Stop hook (a file edited by hand is not replaced).
+- Config keys `server_port` (18524), `bind_host` (`127.0.0.1`) and
+  `context_max_chars` (9500): the hook's block and the MCP `search_memory`
+  result are kept within this size.
+- Data-folder files: `audit.log` (the raw input of every hook call, no TTL,
+  rotated at 50 MB), `n3mc-lite.pid`, `server.log`, `server_start_failed`,
+  `notices.json`, `turn_id_<session>.txt`.
+- Dependencies `fastapi`, `uvicorn`, `pydantic`, `psutil`; dev `httpx`.
+- Coexistence with N3MC-Free, N3MC-Pro and the other editions on one PC (own
+  port, folder, hook commands, CLI and rules file).
+- `MODIFICATIONS.md`; `NOTICE` names the portions derived from N3MC-Free.
+
+### Unchanged
+- The PyPI name, the package `n3mc_mcp`, the MCP command and server name
+  `n3mc-workingmemory` (alias `n3mc-mcp-lite`), the seven tools with the same
+  names, arguments and output texts, the Redis layout and settings, the
+  7-day TTL, the data folder `~/.n3mc-workingmemory`, the plugin name, and
+  every search and save rule. Records saved by v1.12.2 stay readable.
+
+### Docs
+- README (EN / JP), PHILOSOPHY, NOTICE and this file describe v2.0.0;
+  `MODIFICATIONS.md` is new.
+
 ## [1.12.2] — 2026-11-18
 
 ### Fixed

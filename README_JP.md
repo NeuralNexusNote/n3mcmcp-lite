@@ -1,322 +1,122 @@
 # N3MemoryCore MCP — Lite（揮発型）
 
-> **N3MC-MCP-Lite は、Claude Code / Cursor / Windsurf などの
-> MCP 対応エディタが利用する "外部メモリサーバー" です。**
-> MCP Server として動作し、AI が会話やコード文脈を保存・検索できます。
+> NeuralNexusNote™ プロダクト — **無償 Lite** 版。
+> Redis Stack を使う、揮発性のハイブリッド（ベクトル + BM25）メモリです。
+> 各エントリは 7 日で消えます。
+> **Claude Code** では**フック**で使います。すべてのメッセージと応答が、自動で保存・検索されます。
+> **Claude デスクトップアプリ**と、ほかの MCP 対応アプリでは **MCP** で使います。
 
-> NeuralNexusNote™ プロダクト — **無償 Lite** 版：Redis Stack を使った
-> 揮発性ハイブリッド（ベクトル + BM25）メモリを Model Context Protocol
-> サーバーとして提供します。各エントリは 7 日で自動失効します。
-
-> 💬 **MCP サーバの制限により、保存する会話は基本的に LLM 任せになります。
-> ただし Claude Code に依頼すれば、hook を使った全会話の自動記録もセットアップ可能です。**
-> 「毎ターン終わったら、Claude Code の会話全文を Lite に自動保存して」と頼めば、
-> Claude Code が `~/.claude/hooks/` にスクリプトを置き、`~/.claude/settings.json`
-> に `Stop` hook を追加します。これは LLM の判断を介さず harness が決定論的に
-> 実行するため、Claude が `save_memory` を呼び忘れる事故が構造的に発生しません。
-> 詳細は本 README の [hook による全会話保存](#hook-による全会話保存) 節を参照。
+> ⚠️ **この README は、次の版 v2.0.0 を説明しています。**
+> v2.0.0 は、このリポジトリの指示書
+> （[`N3MemoryCore_MCP_Spec_JP.md`](./N3MemoryCore_MCP_Spec_JP.md)）で決まっています。
+> **v2.0.0 はまだリリースされていません。**
+> このリポジトリのコード、PyPI のパッケージ、Claude Code のプラグインは、まだ **v1.12.2** です。
+> v1.12.2 は MCP サーバーだけです。Claude Code では、何を保存するかをモデルが決めます。
+> v2.0.0 のリリースまでは、下のインストールのコマンドで v1.12.2 が入ります。
+> v1.12.2 の設定は、PyPI で v1.12.2 と一緒に公開されている README のとおりです
+> （<https://pypi.org/project/n3memorycore-mcp-lite/1.12.2/>）。
+> 既存の利用者にとって何が変わるかは、[v2.0.0 で変わったこと](#v200-で変わったこと) にあります。
 
 > 🇺🇸 **[English README](./README.md)**
 > 🛡️ **[開発ポリシー](./PHILOSOPHY.md)**
 
-## Lite と Free、どちらを使うか
-
-無償の N3MemoryCore は 2 つあります。**Lite(このリポジトリ)は、Docker の起動と MCP クライアントの設定ができる方向けです。Claude Code だけを使い、初めて入れる方には、[N3MC Free](https://github.com/NeuralNexusNote/n3mc-free) のほうが簡単です。**
-
-| | **N3MC MCP Lite**(このリポジトリ) | **[N3MC Free](https://github.com/NeuralNexusNote/n3mc-free)** |
-|---|---|---|
-| 使えるアプリ | MCP 対応のアプリ: Claude Code、Claude Desktop、Cursor、Windsurf など | Claude Code だけ |
-| 保存されるもの | AI が保存すると判断したもの(`save_memory`) | すべての発言を自動で(フック) |
-| 残る期間 | 7 日。過ぎると自動で消える | 自分で消すまで |
-| 必要なもの | Python 3.10 以上、Docker(Redis Stack)、MCP クライアントの設定 | Python 3.10 以上 |
-| 導入 | Redis Stack を起動し、インストールして、MCP クライアントにサーバーを登録する | `pip install n3memorycore-free` の後に `n3mc --init` |
-| 向いている人 | MCP と Docker に慣れた方。プロジェクトの間だけの作業メモリに | 初めての方。Claude Code の長期記憶に |
-
-- **Lite を選ぶ:** Claude Code 以外の MCP クライアントを使う場合や、短いプロジェクトが終われば自然に消える記憶がほしい場合。
-- **Free を選ぶ:** Claude Code を使っていて、Docker や MCP の設定なしで会話を覚えさせたい場合。
-
----
-
-## 🚀 クイックスタート — Claude Code に 3 ステップで接続
-
-> 「何もインストールしていない」状態から「Claude Code が N3MC メモリを
-> 使っている」までの最短経路。インストール手段（PyPI / フォーク / uvx）
-> を選んで、クライアント設定に登録するだけ。Claude Code CLI と
-> Claude Desktop の両方を扱います。
-
-### Step 1 — Redis Stack を起動
-
-```bash
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
-# 2 回目以降は: `docker start redis-stack`
-```
-
-### Step 2 — パッケージをインストール（いずれか）
-
-**最短経路 — Claude Code マーケットプレイス。** 2 行で install と MCP 配線が
-完了します。Claude Code 内で実行：
-
-```
-/plugin marketplace add NeuralNexusNote/n3mcmcp-lite
-/plugin install n3mc-workingmemory@neuralnexusnote
-```
-
-続いて `/reload-plugins`。プラグインマニフェストが MCP 配線を担うので Step 3 は
-不要です。下記の手動オプションは fork・カスタム設定・Claude Desktop 用途で
-引き続き利用できます。
-
----
-
-**(a) PyPI から** — 大半の利用者：
-
-```bash
-pip install n3memorycore-mcp-lite
-```
-
-**(b) フォークから**（リポジトリをクローン済み）— 寄稿者・改造目的：
-
-```bash
-git clone https://github.com/<YOU>/n3mcmcp-lite
-cd n3mcmcp-lite
-pip install -e ".[dev]"
-```
-
-**(c) uvx でゼロインストール** — グローバル install を使わず隔離環境：
-
-```bash
-# 動作確認のみ。実際の起動は MCP クライアント設定が担う：
-uvx --from n3memorycore-mcp-lite n3mc-workingmemory --help
-```
-
-Step 2 終了時点で `n3mc-workingmemory` コマンドが `PATH` に通ります。
-`where n3mc-workingmemory`（Windows）または `which n3mc-workingmemory`
-（macOS/Linux）で確認できます。
-
-### Step 3 — MCP クライアントに登録
-
-| クライアント | やること |
-|---|---|
-| **Claude Code（CLI）・本リポジトリの作業ツリー** | `.mcp.json` がコミット済み。`cd` して `claude` を起動するだけで次のプロンプトから自動接続 |
-| **Claude Code（CLI）・別プロジェクトのディレクトリ** | そのプロジェクトの `.mcp.json` に同じ `n3mc-workingmemory` ブロックを追加。詳細は [Claude Code（スタンドアロン CLI）](#claude-codeスタンドアロン-cli) |
-| **Claude Desktop**（内蔵の「Code」タブ含む） | OS ごとの `claude_desktop_config.json` を編集。詳細は [Claude Desktop](#claude-desktopおよび-claude-desktop-内の「code」タブ) |
-| **Claude Code でツール自動許可** | `~/.claude/settings.json` に許可ブロックを 1 つ足すだけ。AI が承認待ちで停止しなくなる。詳細は [ツール自動許可](#ツール自動許可claude-code-固有) |
-| **uvx 経由で起動**（グローバル install 不要） | クライアント設定の `command`/`args` を uvx 形式にする。詳細は [Claude Code（スタンドアロン CLI）](#claude-codeスタンドアロン-cli) |
-
-これだけ。接続すると、サーバの振る舞い指示が引き継ぎ、`search_memory`
-が各ターン先頭で、`save_memory` が応答後に自動で呼ばれます。
-
-> 初回呼び出しのみ 30〜60 秒かかります — `intfloat/multilingual-e5-base`
-> （~400 MB）が `~/.cache/huggingface/` にダウンロードされるため。
-> 2 回目以降は数秒で起動。
-
----
-
-## ⚠️ 事前準備（インストール前に必須）
-
-このサーバーは **そのままでは起動しません**。以下 2 点を事前に用意してください：
-
-1. **`localhost:6379` で動く Redis Stack** — Lite 版は Redis + RediSearch にメモリを保存します。Docker が最も簡単です：
-   ```bash
-   # 初回のみ（コンテナを作成）：
-   docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
-
-   # 2 回目以降（コンテナは既存なので start するだけ）：
-   docker start redis-stack
-   ```
-   コンテナ作成後に再度 `docker run` を実行すると `Conflict. The container name "/redis-stack" is already in use` エラーになります。2 回目以降は `docker start redis-stack` を使ってください。
-
-   > **docker コマンドに永続化フラグが無い理由**：本サーバーは**意図的に
-   > 揮発性**です。揮発性は設計上の特長であり欠落機能ではありません — 
-   > 詳細は下記「ユースケース」セクションを参照。`--save ""` のような空文字列引数は Windows PowerShell
-   > や cmd.exe のクォート処理で壊れやすい（コンテナのエントリポイント
-   > が起動不能になる事例あり）ため、docker 側での指定はやめ、MCP
-   > サーバーが起動時に `CONFIG SET appendonly no` および `CONFIG SET
-   > save ""` を毎回発行して**強制的に永続化を無効化**します。セッショ
-   > ン間に手動で永続化を有効にしても次回 Lite 起動時に無効に戻され
-   > ます。上の素の `docker run` で十分 — 揮発性の保証の真の源は
-   > サーバー側です。
-   >
-   > **Redis は専用のものを使ってください。** サーバーがこの設定を変えるのは、
-   > その Redis に N3MC のキーしかないときだけです（1.11.1 から、ほかの DB 番号も
-   > 確かめます）。ほかのデータ（別の用途で
-   > すでに使っている Redis）が見つかったときは、永続化の設定に触れず、
-   > `shared_redis` の知らせを出します。ほかのプログラムのデータが、Redis の
-   > 再起動で消えることはありません。また、N3MC Lite には **Redis Stack**
-   > （RediSearch）が必要です。素の Redis では、どのツールも Redis Stack を
-   > 起動するよう案内を返します。
-2. **[`uv`](https://docs.astral.sh/uv/) を `PATH` に通す** — Claude Code プラグイン / `uvx` 経由インストールの場合のみ必要。ソースからインストールする場合は不要です。
-
-Redis に接続できない場合はサーバーが起動を拒否し、`uv` が無いと Claude Code プラグインは立ち上がりません。`/plugin install` やクライアント設定の前に必ず揃えてください。
-
----
-
-## 特徴
-
-- 💾 **自分の Redis に保存** — 記憶は自分で動かす Redis(標準では自分の PC)に保存し、クラウドのサービスには置きません。AI のサービスに送られるのは、そのターンに呼び出した記憶だけで、会話の一部として送られます([詳しく](#記憶はあなたが管理するマシンに残ります))
-- 🔍 **意味で検索** — キーワードが違っても、関連する過去の会話を引き出します
-- 🌐 **多言語対応・標準装備** — CPU のみ動作、LLM/GPU 不要。NFKC フォールド（`ｱﾙﾌｧ`↔`アルファ`、`１２３`↔`123`、合字）／日本語・中国語・韓国語・タイ語・ラオ語・ミャンマー語・クメール語のバイグラム被覆／Latin 系の発音区別フォールド（`café`↔`cafe`）
-- 🛡️ **エンコーディング安全策** — Windows での stdio UTF-8 再設定（cp932 → UTF-8）、すべての入力に対する孤立サロゲート除去。Free 版と同等の防御
-- 🔄 **会話の文脈を保持** — **7 日間**のワーキングメモリ（Redis TTL により自動失効。長期記憶が必要なら任意の永続メモリバックエンドと併用）
-- ⚡ **自動で動く** — 保存も検索もすべて自動。MCP の `initialize` 応答で配信される振る舞い指示により、ユーザーの指示は不要です
-- 🤖 **マルチエージェント対応** — 複数の AI エージェントが 1 つの Redis を共有。`b_local` と `b_session` のバイアスでプロジェクトの記憶を優先しつつ、他のエージェントの知識も検索できます
-- 🏢 **記憶は 1 人分** — 人どうしで記憶は共有しません。`config.json` ごとに `owner_id` が違い、検索に出るのは自分の記録だけです。インストールごとに 1 つの Redis を使ってください。記憶を共有できるのは、同じ `config.json` を使うクライアントどうしだけです
-- 🧹 **揮発性は設計上の特長** — 7 日で自動蒸発するため、失敗した試行や破棄された設計案が次タスクに流出しません。`docker restart redis-stack` で即座に一掃可能
-- 💰 **トークン消費を削減** — 過去の文脈を再説明する必要がなくなります。記憶検索はローカル embedding（`intfloat/multilingual-e5-base`）で行うため Claude のトークンを消費せず、的確な文脈注入により修正のやり取りも減少します
-
-## 仕組み
-
-```
-ユーザーの発言
-    │
-    ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  1. 自動保存  │────▶│  2. 意味検索  │────▶│ 3. コンテキスト│
-│  前回の回答を │     │  関連する過去 │     │    注入       │
-│  Redisに保存 │     │  の記憶を取得 │     │  Claudeに渡す │
-└──────────────┘     └──────────────┘     └──────────────┘
-                                                 │
-                                                 ▼
-                                          Claudeが過去の
-                                          文脈を踏まえて回答
-```
-
-MCP の `initialize` 応答で配信される**振る舞い指示**により、すべて自動で
-行われます。Claude Code のフックは使わないため、クライアント側の追加設定は
-不要です（ツール自動許可の `permissions.allow` 設定のみ）。ユーザーが意識する
-必要はありません。
-
-### Claude 標準の auto-memory との違い
-
-Claude Code には標準の auto-memory 機能（`~/.claude/projects/.../memory/`）が
-あります。N3MemoryCore はこれと**競合せず、補完し合います**。
-
-|                | Claude auto-memory                     | N3MemoryCore RAG                   |
-| -------------- | -------------------------------------- | ---------------------------------- |
-| **得意なこと** | 確実・毎回ロード・固定情報             | 過去の会話の文脈・詳細な経緯       |
-| **苦手なこと** | 会話の流れや文脈は持てない             | 検索精度に依存・確実性がない       |
-| **用途**       | ユーザープロフィール、フォルダパス等   | 会話の詳細、議論の経緯             |
-
-**推奨の使い分け：**
-
-- **毎回必要な固定情報**（開発フォルダのパス、ユーザーの好みなど）→ auto-memory に保存
-- **会話の文脈・経緯**（議論の流れ、過去の決定理由など）→ N3MemoryCore が自動で蓄積（7 日の窓。長期保存が必要なら永続メモリバックエンドと併用）
-
----
-
-## 記憶はあなたが管理するマシンに残ります
-
-AI が覚えていてくれるのは便利ですが、その記憶がどこに置かれるのかは気になるところです。N3MC Lite は、あなたが動かす Redis Stack に記憶を置きます。標準では自分の PC 上の Redis、または自分で選んだ Redis サーバーです。
-
-- **置き場所は自分の Redis** — 記憶は `redis_url` で指定した Redis に保存されます（標準は `redis://localhost:6379/0`。環境変数 `N3MC_REDIS_URL` があればそちらが優先。[設定](#設定) 参照）。N3MC のアカウントや N3MC のクラウドサービスはありません。各記憶は保存から 7 日で消えます（`ttl_seconds`）。
-- **ディスクにはほぼ何も残しません** — Redis のほかに N3MC が書くのは小さな `config.json` だけです（[データ保存先](#データ保存先) 参照）。Redis に N3MC のデータしかないときは、起動時に Redis 自身のディスク保存（RDB/AOF）を止めるので、`docker restart redis-stack` で記憶はすべて消えます。ほかのデータも入っている Redis では設定を変えず、`shared_redis` のお知らせを出します。
-- **ベクトル化は自分の PC で** — 埋め込みモデル（`intfloat/multilingual-e5-base`）は手元の CPU で動き、検索は自分の Redis の中で行います。検索のために外部の API は呼びません。
-- **N3MC はポートを開きません** — MCP サーバーは AI クライアントと stdio（標準入出力）でやり取りし、ネットワークのポートで待ち受けません。自分からつなぐのは `redis_url` の Redis だけです。N3MC は独自のパスワードを持たないため、Redis（上の `docker run` ではポート 6379）に誰が届くかは、Redis とファイアウォールの設定しだいです。
-- **利用状況の送信なし** — N3MC は利用データをどこにも送りません。コードは公開されているので、自分で確かめられます。
-- **中身を見て、消せます** — `list_memories` で新しい順に一覧でき、`delete_memory` と `delete_memories_by_session` で消せます（[提供ツール](#提供ツール) 参照）。
-
-ネットワークに出ていくもの:
-
-- **インストール** — `pip` と `uvx` は、パッケージと依存ライブラリを PyPI からダウンロードします。Claude Code のマーケットプレイスから入れる場合は、GitHub の `NeuralNexusNote/n3mcmcp-lite` リポジトリからプラグインを取得します。
-- **Redis Stack のイメージ** — 初回の `docker run` で `redis/redis-stack-server` を Docker Hub からダウンロードします。
-- **埋め込みモデルのダウンロード** — 初回の起動時に `intfloat/multilingual-e5-base`（約 440 MB）を Hugging Face からダウンロードします。
-- **別のマシンの Redis** — `redis_url` / `N3MC_REDIS_URL` を別のマシン（チームの共有サーバーなど）に向けた場合は、保存も検索もすべてネットワーク越しにそのマシンへ送られます。
-- **AI が読む記憶** — `search_memory` の結果は会話の一部になるため、あなたのメッセージと一緒に、MCP クライアントの先にある AI サービス（Claude Code なら Anthropic）に送られます。N3MC が Redis の中身をどこかにアップロードすることはありませんが、そのターンで AI が使った部分は会話の一部として送られます。
-
-## ユースケース — ワーキングメモリが適している場面
-
-7 日 TTL と揮発性 Redis ストレージは**設計上の特長であり制約ではありません**。
-以下のワークフローに適合します：
-
-- **エージェント的コード生成ループ** — 失敗した試行や破棄された設計案
-  が次タスクに流出しません。`docker restart redis-stack` で一掃可能。
-- **マルチエージェント協調** — あるタスクでの決定事項が、無関係な後続
-  タスクを汚染しません。
-- **試作・実験用途** — 放置すれば 7 日で自動蒸発、削除判断は不要です。
-- **プロジェクト境界内のワーキングメモリ** — タスク／プロジェクトごとに
-  `session_id` をピン留めすれば文脈が綺麗に分離されます。
-
-**数ヶ月〜数年にわたる長期的な知識蓄積**が必要な場面では、ワーキング
-メモリは適切なレイヤではありません。任意の永続メモリ MCP（公式の
-ナレッジグラフサーバ、自前の SQLite ベース実装、外部サービスなど）と
-併用すれば長期側をカバーできます。
-
 ## 概要
 
-`n3memorycore-mcp-lite` は、Claude をはじめとする任意の MCP 対応
-クライアントに **短時間の** 会話メモリを与えるローカル専用 MCP サーバー
-です。Redis Stack 上に BM25 全文検索インデックスと 768 次元ベクトル
-インデックス（[`intfloat/multilingual-e5-base`](https://huggingface.co/intfloat/multilingual-e5-base)）
-の両方を持ち、ハイブリッドランキングで結果を返します。
+`n3memorycore-mcp-lite` は、Claude に、会話をまたぐ短期の記憶を与えます。
+文章は、利用者が動かす Redis Stack に保存します。
+索引は 2 つです。BM25 の全文索引と、768 次元のベクトル索引
+（[`intfloat/multilingual-e5-base`](https://huggingface.co/intfloat/multilingual-e5-base)）です。
+検索の結果は、両方を合わせた順位で返します。
+各エントリは、保存から 7 日で Redis が消します。
 
-全ての処理はユーザー端末上で完結します。API コールもクラウド保存も
-ありません。
-
-## 提供ツール
-
-| ツール                          | 用途                                                                                |
-| ------------------------------- | ----------------------------------------------------------------------------------- |
-| `search_memory`                 | ハイブリッド検索（ベクトル + BM25、時間減衰ランキング、`session_id` ブースト）       |
-| `save_memory`                   | 短いエントリを保存（7d TTL、完全一致だけを自動拒否）                                |
-| `list_memories`                 | 直近のエントリを新しい順に一覧                                                      |
-| `delete_memory`                 | 特定のエントリを id で削除（id が親ドキュメントの場合は子チャンクごとカスケード削除）|
-| `delete_memories_by_session`    | `session_id` に紐づく記憶を一括削除 — 終了したプロジェクトを TTL 待ちなしで撤収       |
-| `repair_memory`                 | 欠損時に RediSearch インデックスを作り直す                                          |
-
-さらに、MCP の `initialize` 応答で**振る舞いの指示**をクライアントへ
-配信します。これにより「各ターン先頭で `search_memory`、応答後に
-`save_memory`」という自動保存運用が、Claude Code のフック無しでも
-成立します。
-
-## ID 階層構造
-
-N3MemoryCore は 5 つの ID フィールドで各レコードの出所と文脈を識別
-します。実利用者が触るのは `session_id`（と稀に `agent_name`）だけで、
-他は自動で埋まります。
-
-| ID | 保存場所 | 生成タイミング | 粒度 | 用途 |
-|---|---|---|---|---|
-| `id` (PK) | Redis ハッシュ | レコード作成時 (UUIDv7、時系列順) | **1 レコード** | 各記憶の一意識別子 — `delete_memory` と重複検出に使用 |
-| `owner_id` | `config.json` | 初回起動時 (UUIDv4) | **所有者 / インストール** | データの所有者識別。`save_memory` 呼び出しごとに検証され、不一致のペイロードは `owner_id mismatch` で拒否される。TAG フィールドとして保存され、フィルタリングは Python 側で行う（仕様書 §3.12） |
-| `local_id` (agent_id) | `config.json` | 初回起動時 (UUIDv4) | **エージェント / インストール** | このインストールの UUIDv4 識別子。将来の永続バックエンドとの前方互換のため全レコードに保存されるが、**Lite の `b_local` ランキングには使われない** — `b_local` は `stored_importance + access_count` のみから算出される（後述のランキング式参照） |
-| `session_id` | メモリ内またはクライアントから供給 | タスク／プロジェクト／会話ごと（任意文字列） | **タスク／プロジェクト／会話** | 同じタスク・プロジェクト・会話に属する記憶をまとめて浮上させる。**`b_session` ランキングバイアス**（`b_session_match=1.0`、`b_session_mismatch=0.6`）を駆動し、進行中の会話の記憶を、同じ Redis 内の無関係なクロスプロジェクト行より優先する。`delete_memories_by_session` のフィルタキーでもある。解決順序：呼び出し引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時の UUIDv4 フォールバック |
-| `agent_name` | Redis ハッシュ | `save_memory` 呼び出し時（任意文字列） | **エージェント表示名** | エージェントの人間可読なラベル（例：`"claude-code"`、`"claude-desktop"`）。ランキングには使用されず、表示・監査用 |
+v2.0.0 からの MCP-Lite は「N3MC-Free + MCP で、データベースは Redis」です。
+中身は次のとおりです。
+Lite v1.12.2 の検索と保存の決まりに、[N3MC Free](https://github.com/NeuralNexusNote/n3mc-free) のフック・常駐サーバー・CLI を足しました。
+さらに、フックのないアプリのために、薄い MCP の入口を足しました。
+検索と保存の決まりは、Free と Lite で別々のままです。
+詳しくは [MODIFICATIONS.md](./MODIFICATIONS.md) を見てください。
 
 ```
-owner_id  (1 つの N3MC サーバ／データ所有者)
-  └── session_id  (1 つのタスク／プロジェクト／会話)
-        └── local_id  (そのセッション内で発話するエージェント)
-              ├── agent_name  (その表示名: "claude-code" 等)
-              └── id  (1 件の記憶レコード)
+Claude Code ──hooks / CLI (HTTP)─────────────────────────┐
+                                                         ├─▶ resident server (127.0.0.1:18524, model loaded once) ─▶ Redis Stack
+Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
+                                   (thin client, no model)
 ```
 
-**実用上のガイダンス：**
+| アプリ | つながる経路 | 登録するもの |
+|---|---|---|
+| Claude Code | **フックだけ**（`UserPromptSubmit`、`Stop`）と CLI `n3mc-lite` | プラグイン、または `n3mc-lite --init` |
+| Claude デスクトップアプリと、フックのないほかのアプリ | **MCP だけ**（薄いクライアント `n3mc-workingmemory`） | 利用者が、そのアプリの設定ファイルに書く |
 
-- **名前のあるプロジェクトやタスクに従事中は `session_id` をピン留め
-  すること**。`save_memory` と `search_memory` の両方に同じ文字列
-  （例：`"proj-alpha"`、`"task-refactor-auth"`）を渡す。これにより
-  プロジェクト固有の記憶がランキング上位に押し上げられ、終了時には
-  `delete_memories_by_session` で一括撤収できる。
-- **単一エージェント運用では `agent_name` は空でよい**。複数エージェントが
-  同じ Redis を共有する場合のみ設定（`"claude-code"`、`"cursor"` 等）
-  すれば、`list_memories` の出力が読みやすくなる。
-- **`owner_id` は通常渡さない**。サーバが `config.json` の値と照合し、
-  不一致なら拒否する仕組みなので、空のままにすれば「自分の所有」として
-  扱われる。所有権を明示的に主張する必要がある特殊ケースのみ指定。
-- **1 つの Redis は 1 つのインストールで使う**。Lite は 1 つの Redis に
-  `owner_id` が 1 つ（1 台の PC、専用のコンテナ）であることを前提にしている。
-  何台かの PC や何人かが同じ Redis を指したり、古い記録が残ったまま
-  `config.json` を作り直して `owner_id` が新しくなったりすると、一方の
-  オーナーが保存した本文は、もう一方には期限が切れるまで（7 日）`duplicate`
-  として断られ、また一方の記録が検索の候補を埋めて、もう一方の記録が
-  見つからないことがある。何も消えない。インストールごとに専用の Redis を
-  使うこと。
+- **Claude Code に MCP サーバーを登録しないでください。** Claude Code は、フックと CLI から記憶を使います。
+- どちらの経路も、**同じ常駐サーバーと同じ Redis** に届きます。
+  Claude Code で話したことは、デスクトップアプリから見つかります。
+  デスクトップアプリが保存したことは、Claude Code で見つかります。
 
-## 前提条件
+## Lite と Free、どちらを使うか
 
-### 1. Redis Stack の起動
+無償の N3MemoryCore は 2 つあります。
+**Claude Code だけを使い、残る記憶がほしい方には、[N3MC Free](https://github.com/NeuralNexusNote/n3mc-free) のほうが簡単です。Docker が要りません。**
 
-Lite 版は Redis Stack（Redis + RediSearch モジュール）を必要とします。
-Docker を使うのが最も簡単です：
+| | **N3MC MCP Lite**（このリポジトリ） | **[N3MC Free](https://github.com/NeuralNexusNote/n3mc-free)** |
+|---|---|---|
+| 使えるアプリ | Claude Code（フック）と、Claude デスクトップアプリやほかの MCP 対応アプリ（MCP） | Claude Code だけ |
+| 保存されるもの | Claude Code：すべてのメッセージと応答を自動で（フック）。ほかのアプリ：AI が保存すると判断したもの（`save_memory`） | すべての発言を自動で（フック） |
+| 残る期間 | 7 日。過ぎると自動で消える | 自分で消すまで |
+| 必要なもの | Python 3.10 以上と Docker（Redis Stack） | Python 3.10 以上 |
+| 導入 | Redis Stack を起動し、プラグインを入れる（または `pip install` と `n3mc-lite --init`）。デスクトップアプリは、設定に MCP の入口を書く | `pip install n3memorycore-free` の後に `n3mc --init` |
+| 向いている使い方 | 短期の作業メモリ。Claude Code とデスクトップアプリで 1 つの記憶を共有する | Claude Code の長期記憶 |
+
+---
+
+## v2.0.0 で変わったこと
+
+v2.0.0 はメジャーバージョンです。
+Lite と Claude Code のつながり方が変わりました。
+v1.12.2 までの Lite は MCP サーバーだけで、何を保存するかはモデルが決めていました。
+
+| 以前（v1.12.2） | 以後（v2.0.0） |
+|---|---|
+| Claude Code に 7 つの `mcp__…n3mc-workingmemory__*` ツールが見えていた | **Claude Code に MCP のツールは見えなくなる。** プラグインはもう MCP サーバーを登録しない |
+| モデルが `save_memory` に渡すと決めたものだけが保存された | **空でないすべてのメッセージと応答を、フックが保存する**（コードブロックは `[code omitted]` にする）。保存は `[user]` / `[claude]` のレコードになる |
+| モデルがターンの最初に `search_memory` を呼んでいた | `UserPromptSubmit` フックが、メッセージのたびに検索する。結果は `# Recalled Memory Context` の見出しで Claude のコンテキストに入る |
+| 検索・一覧・取り出し・削除は MCP のツールだった | Claude Code では CLI が同じことをする：`n3mc-lite --search`、`--list`、`--recall-thread`、`--delete`、`--delete-session`、`--buffer`、`--repair`。表示する文はツールの文と同じ |
+| アプリごとに自分の MCP サーバーを起動し、モデル（約 440 MB）を読み込んでいた | 1 つの常駐サーバーが、モデルを 1 回だけ読み込む。MCP の入口は薄いクライアントで、モデルを読み込まない |
+| セッションの合間に動くプロセスはなかった | 常駐サーバーは、一度起動するとバックグラウンドで動き続ける |
+| pip の利用者は MCP サーバーを登録した | pip の利用者は `n3mc-lite --init` を 1 回実行して、フックを登録する。Claude Code に残った古い `n3mc-workingmemory` の登録はもう使われないので、消す |
+
+**変わらないもの**：
+PyPI の名前 `n3memorycore-mcp-lite`。
+Python パッケージ `n3mc_mcp`。
+MCP のコマンドとサーバー名 `n3mc-workingmemory`（別名 `n3mc-mcp-lite`）。
+7 つのツールの名前・引数・出力の文。
+Redis のレイアウトと設定（`redis_url`、`N3MC_REDIS_URL`）。
+7 日の TTL。
+データフォルダ `~/.n3mc-workingmemory`（`N3MC_DATA_DIR`）。
+プラグイン名 `n3mc-workingmemory`。
+検索と保存のすべての決まり。
+v1.12.2 が保存したレコードは、そのまま読めます（同じ索引、同じフィールド）。
+
+**v2.0.0 に更新した後に、既存の利用者がすること**
+
+- **プラグインの利用者**：プラグインは、MCP サーバーの代わりにフックを登録します。`uv` は今までどおり `PATH` に必要です。
+- **pip の利用者**：`n3mc-lite --init` を 1 回実行し、Claude Code を再起動します。
+  Claude Code から古い MCP の登録を消します。
+  `claude mcp remove n3mc-workingmemory -s user` を実行します。
+  プロジェクトの `.mcp.json` にあるときは、`n3mc-workingmemory` の項目を消します。
+  `--init` はこの登録を知らせますが、これらのファイルは書き換えません。
+  登録が残ると、Claude Code にフックと並んでツールがまた見えます。
+- **Claude デスクトップアプリの利用者**：項目の名前は `n3mc-workingmemory` のままです。
+  v2.0.0 では、コマンドを絶対パスで書き、`env` の項目を足します
+  （[Claude デスクトップアプリ](#step-3--claude-デスクトップアプリ任意) を見てください）。
+- **データフォルダに新しいファイルが増えます**：`audit.log`（フックの入力の原文。TTL なし）、`server.log`、`notices.json` と、小さなプロセス用のファイルです。
+  [データ保存先](#データ保存先) を見てください。
+
+---
+
+## 🚀 クイックスタート
+
+### Step 1 — Redis Stack を起動
 
 ```bash
 # 初回のみ（コンテナを作成）：
@@ -326,183 +126,329 @@ docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
 docker start redis-stack
 ```
 
-コンテナが `localhost:6379` で Redis を公開し、サーバーは自動でこれを
-見つけます。初回インストール後に `docker run` を再実行すると `Conflict.
-The container name "/redis-stack" is already in use` エラーになります
-ので、以後は `docker start redis-stack` を使ってください。
+コンテナがあるときに `docker run` をもう一度実行すると、
+`Conflict. The container name "/redis-stack" is already in use` で失敗します。
+2 回目からは `docker start redis-stack` を使います。
 
-### 2. パッケージのインストール
+### Step 2 — Claude Code（フック）
 
-**PyPI から（推奨）**：
+どちらか 1 つを選びます。
+**Claude Code に MCP サーバーを登録しないでください**
+（`claude mcp add`、`~/.claude.json`、`.mcp.json`）。
+
+**(a) プラグインマーケットプレイス（推奨。設定ファイルの編集は不要）。**
+[`uv`](https://docs.astral.sh/uv/) が `PATH` に必要です。
+Claude Code の中で実行します。
+
+```
+/plugin marketplace add NeuralNexusNote/n3mcmcp-lite
+/plugin install n3mc-workingmemory@neuralnexusnote
+```
+
+プラグインは 3 つのフックを登録します。
+`SessionStart` は、CLI のコマンドを事前に許可します。
+`UserPromptSubmit` と `Stop` は、`uvx --from n3memorycore-mcp-lite==2.0.0 …` で動きます。
+この版の番号は、パッケージの版に合わせて固定されています。
+
+**(b) pip**
 
 ```bash
 pip install n3memorycore-mcp-lite
+n3mc-lite --init
 ```
 
-または `uvx` でゼロインストール実行（Claude Code プラグインはこの経路を使用）：
+`n3mc-lite --init` は、`~/.claude/settings.json` に 2 つのフックを登録します。
+コマンドは、`n3mc-lite-hook` / `n3mc-lite-stop-hook` の絶対パスです。
+ほかの項目は残します（ほかの N3MC 製品のフックも残します）。
+書く前に、ファイルのバックアップを取ります。
+CLI のための許可のルールも足します。
+プラグインが有効なときは、フックを足しません（プラグインのフックが使われます）。
 
-```bash
-uvx --from n3memorycore-mcp-lite n3mc-workingmemory
+(a) と (b) は、どちらか 1 つだけにします。両方だと、メッセージのたびに検索が 2 回走ります。
+
+### Step 3 — Claude デスクトップアプリ（任意）
+
+設定ファイルは、アプリから開きます（Settings → Developer → Edit Config）。
+Windows でのふつうの場所は `%APPDATA%\Claude\claude_desktop_config.json` です。
+Microsoft Store 版のアプリは、別のフォルダに置くことがあります。
+`mcpServers` の下に項目を足します。すでにある項目は残します。
+保存したら、**アプリを完全に終了して、起動し直します**。
+
+pip で入れた場合：
+
+```json
+{
+  "mcpServers": {
+    "n3mc-workingmemory": {
+      "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\n3mc-workingmemory.exe",
+      "args": [],
+      "env": {
+        "N3MC_AGENT_NAME": "claude-desktop"
+      }
+    }
+  }
+}
 ```
 
-**ソースから**（コードを編集する場合）：
+プラグインの利用者（pip で入れていない場合）：
 
-```bash
-git clone https://github.com/NeuralNexusNote/n3mcmcp-lite
-cd n3mcmcp-lite
-pip install -e .
+```json
+{
+  "mcpServers": {
+    "n3mc-workingmemory": {
+      "command": "uvx",
+      "args": ["--from", "n3memorycore-mcp-lite==2.0.0", "n3mc-workingmemory"],
+      "env": {
+        "N3MC_AGENT_NAME": "claude-desktop"
+      }
+    }
+  }
+}
 ```
 
-初回起動時に ~400MB の埋め込みモデルが Hugging Face から
-`~/.cache/huggingface/` にダウンロードされます。
+- `command`：フックと同じ scripts フォルダにある `n3mc-workingmemory` の**絶対パス**を書きます
+  （Windows：`where n3mc-workingmemory`、Linux：`which n3mc-workingmemory`）。
+  アプリは、ターミナルの `PATH` を使いません。
+  フックと MCP の入口は、同じコードを動かす必要があります（[制限](#制限) を見てください）。
+- `env.N3MC_AGENT_NAME`：モデルが `agent_name` を渡さないときに、保存する名前です。アプリごとに 1 つの名前にします。
+- フックが別のデータフォルダ（`N3MC_DATA_DIR`）を使うときは、同じ `N3MC_DATA_DIR` を `env` に足します。
+- `N3MC_SESSION_ID` を足すと、このアプリの既定の `session_id` を固定できます。
+- Windows と Linux のほかの MCP クライアントも、同じように登録します（command、args、env）。
 
-> **初回インストール時には 3 つのネットワーク資源が必要です:**
-> 1. **github.com** — `/plugin marketplace add NeuralNexusNote/n3mcmcp-lite`
->    でプラグインを登録するとき（`uvx` またはソース経由でインストールする
->    場合は不要）。
-> 2. **pypi.org** — `uvx --from n3memorycore-mcp-lite`（または
->    `pip install`）がパッケージを解決するとき。
-> 3. **huggingface.co** — サーバの初回起動時に
->    `intfloat/multilingual-e5-base`（~400 MB）が `~/.cache/huggingface/` に
->    ダウンロードされるとき。
+### Step 4 — 再起動
+
+Claude Code（とデスクトップアプリ）を再起動します。
+記憶は、次のセッションから始まります。
+最初の記憶の検索は 30–60 秒かかることがあります。
+常駐サーバーが、約 440 MB の埋め込みモデルをダウンロードして読み込むためです。
+2 回目からはキャッシュを使います。
+
+### 指示書からコードを作る
+
+N3MC シリーズは「指示書が先」です。
+指示書は、AI が実装を生成できるように書かれています。
+生成するときは、**空のフォルダ**（たとえば `~/n3mcmcp-lite`）に `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）だけを入れます。
+Redis Stack を起動し、そのフォルダで Claude Code を開きます。
+「この指示書に従って n3mcmcp-lite を実装してください」と頼みます。
+AI は、最初にフォルダ・Python・Redis を確かめます。
+そのあと、パッケージを生成し、`pip install -e .` を実行します。
+`n3mc-lite --init` でフックを登録します。
+Claude デスクトップアプリが入っていれば、MCP の入口も登録します。
+最後に、すべてが起動することを確かめます。
+フォルダはその後も使われます。消したり動かしたりすると、記憶が止まります。
+4 段階の作業の流れは、指示書の付録 B にあります。
+
+---
+
+## ⚠️ 事前準備
+
+| 項目 | 要件 |
+|---|---|
+| Python | 3.10 以上 |
+| クライアント | Claude Code（フック）と、Claude デスクトップアプリまたはほかの MCP クライアント（MCP）のどちらか、または両方 |
+| Redis Stack | `localhost:6379` で動いていること（`N3MC_REDIS_URL` で別の URL にできる） |
+| pip パッケージ（自動で入る） | `mcp`（`>=1.0.0,<2.0.0`）、`redis`（`<8.0.0`）、`sentence-transformers`、`uuid-utils`、`platformdirs`、`numpy`。v2.0.0 からは `fastapi`、`uvicorn`、`pydantic`、`psutil` も |
+| `uv` | プラグインと `uvx` の形を使うときだけ |
+| OS | Windows 11 または Linux。macOS は対象外 |
+
+> **docker のコマンドに永続化の引数を付けない理由**：この版は、*わざと揮発的*に作っています。
+> 常駐サーバーは、Redis に接続するときに、自分で永続化を切ります（`CONFIG SET appendonly no` と `CONFIG SET save ""`）。
+> 手で永続化を有効にしても、次に Lite が動くときに元に戻ります。
+> `--save ""` は `docker run` の行に付けません。空の文字列が、Windows PowerShell と cmd.exe の引用符の処理で壊れるからです。
 >
-> 3 つとも、オフライン状態では明示的かつ時間制限のあるエラーで失敗
-> します（ハングしません）。2 回目以降の起動はローカルキャッシュのみ
-> を使用するため、インターネット接続は不要です。
+> **専用の Redis を使ってください。** サーバーがこの設定を変えるのは、Redis に N3MC のキーしか入っていないときだけです。
+> ほかのデータがあれば、永続化の設定は変えません。そして `shared_redis` の通知を出します。
+> N3MC Lite には **Redis Stack**（RediSearch）が必要です。
+> ふつうの Redis では、どのツールも「Redis Stack を起動してください」という案内を返します。
 
-## クライアント設定
+Redis がなくても、フックは失敗しません。
+文章は `audit.log` にだけ残ります。
+「Redis Stack を起動してください」という通知が出ます。
+あとで送り直すための待ち行列はありません。
 
-### Claude Desktop（および Claude Desktop 内の「Code」タブ）
+---
 
-**Claude Desktop アプリ**（内蔵の **Code** タブを含む）を使っている場合
-は、`.mcp.json` ではなく Desktop 用の設定ファイルを編集してください。
-`.mcp.json` はターミナルから起動する `claude` CLI 専用で、Claude
-Desktop アプリからは読まれません。
+## 特徴
 
-`%APPDATA%\Claude\claude_desktop_config.json`（Windows）または
-`~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）：
+- 💾 **自分の Redis** — 記憶は、利用者が動かす Redis（既定は自分の PC）に置きます。クラウドのサービスには置きません。AI のサービスに送られるのは、そのターンに取り出した記憶だけで、会話の一部として送られます（[詳しく](#記憶はあなたが管理するマシンに残ります)）。
+- ⚡ **Claude Code では自動** — フックが、空でないすべてのメッセージと応答を保存します。メッセージのたびに検索します。モデルの判断は関係ありません。ツールの呼び出しは要りません。
+- 🔗 **Claude Code とデスクトップアプリで 1 つの記憶** — どちらも、同じ常駐サーバーと同じ Redis に届きます。
+- 🔍 **意味で探す検索** — 言葉が違っても、関係のある過去の会話を見つけます。
+- 🌐 **はじめから多言語** — CPU だけで動きます。LLM も GPU も要りません。NFKC の正規化（`ｱﾙﾌｧ`↔`アルファ`、`１２３`↔`123`、合字）、日本語・中国語・韓国語・タイ語・ラオ語・ミャンマー語・クメール語のバイグラム、ラテン文字のダイアクリティカルマークの同一視（`café`↔`cafe`）があります。
+- 🛡️ **文字コードの安全策** — Windows では、stdin/stdout/stderr を UTF-8 に切り替えます（cp932 → UTF-8）。すべての入力から、孤立サロゲートを取り除きます。
+- 🔄 **セッションをまたぐ文脈** — **7 日**残る作業メモリです（Redis の TTL で自動で消えます）。
+- 🧠 **モデルは 1 回だけ読み込む** — 1 つの常駐サーバーが、フック・CLI・すべての MCP クライアントのために、埋め込みモデルを読み込みます。
+- 🏢 **1 人に 1 つの記憶** — 記憶は人の間で共有しません。`config.json` ごとに別の `owner_id` があります。検索は、その持ち主のレコードだけを表示します。インストールごとに 1 つの Redis を使ってください。
+- 🧹 **揮発性は設計上の特長** — 7 日で消えるので、失敗した試みや捨てた設計が、次の作業に混ざりません。
+- 💰 **トークンの無駄を減らす** — 記憶の検索は、ローカルの埋め込み（`intfloat/multilingual-e5-base`）で行います。Claude のトークンは使いません。
 
-```json
-{
-  "mcpServers": {
-    "n3mc-workingmemory": {
-      "command": "n3mc-workingmemory",
-      "args": []
-    }
-  }
-}
+## 仕組み
+
+**Claude Code（フック）**
+
+```
+User's message
+    │
+    ▼  UserPromptSubmit hook
+    ├─ 1. append the raw input to audit.log
+    ├─ 2. add missing vectors (repair, one batch)
+    ├─ 3. save Claude's previous reply from the transcript, if the Stop hook missed it
+    ├─ 4. search with the message → "# Recalled Memory Context" into Claude's context
+    └─ 5. save the message as a [user] record
+    │
+    ▼
+Claude responds
+    │
+    ▼  Stop hook
+    ├─ 1. append the raw input to audit.log
+    ├─ 2. save the reply as a [claude] record
+    └─ 3. housekeeping: keep .claude/rules/n3mc-lite-behavior.md up to date, rotate audit.log
 ```
 
-**Windows の注意点：** 上記のコマンド名指定で Claude Desktop がサーバー
-を起動できない（ハンマー／ツールアイコンが出ない）場合は、`"command"`
-をインストール済み `.exe` への絶対パスに置き換えてください。例：
+1. `UserPromptSubmit` フックは、まず入力の原文を `audit.log` に書きます。
+2. ベクトルのないレコードに、ベクトルを足します（修復。1 回に 1 まとまり）。
+3. Stop フックが前の応答を保存し損ねていれば、トランスクリプトから読んで保存します。
+4. メッセージで検索し、`# Recalled Memory Context` を Claude のコンテキストに入れます。
+5. メッセージを `[user]` のレコードとして保存します。
+6. `Stop` フックは、入力の原文を `audit.log` に書き、応答を `[claude]` のレコードとして保存します。
+7. 最後に後片付けをします。`.claude/rules/n3mc-lite-behavior.md` を新しく保ち、`audit.log` をローテーションします。
 
-```json
-"command": "C:\\Users\\<ユーザー名>\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\n3mc-workingmemory.exe"
-```
+検索は、メッセージを保存する前に行います。だから、メッセージが自分自身を見つけることはありません。
+フックは、いつも終了コード 0 で終わります。
+サーバーや Redis が止まっていても、文章は `audit.log` に残ります。何をすればよいかは、通知が知らせます。
+Claude Code への指示は、ルールファイル `.claude/rules/n3mc-lite-behavior.md` から届きます。
+このファイルは、Stop フックがプロジェクトのフォルダに書きます。
+手で編集したファイルは、置き換えません。
 
-正確なパスはターミナルで `where n3mc-workingmemory` を実行して確認
-できます。
+**Claude デスクトップアプリと、ほかの MCP 対応アプリ**
 
-**設定ファイル編集後は Claude Desktop を完全に終了してください。**
-ウィンドウを閉じるだけでは不十分です。タスクトレイの Claude アイコン
-を右クリックして Quit、もしくはタスクマネージャーで Claude 関連
-プロセスをすべて終了させてから再起動してください。
+薄い MCP の入口は、`initialize` に**振る舞いの指示**を付けて答えます。
+指示は「ターンの最初に検索する」「意味のあるやりとりのあとに保存する」です。
+ツールの呼び出しは、すべて常駐サーバーに渡します。
+これらのアプリでは、保存するかどうかはモデル次第です。
+[コンプライアンスについて](#コンプライアンスについて--mcp-は促すことしかできない) を見てください。
 
-### Claude Code（スタンドアロン CLI）
+### Claude 標準の auto-memory との違い
 
-この節は `claude` コマンドラインツール専用で、Claude Desktop 内の
-「Code」タブではありません（そちらは上の節を参照）。
+Claude Code には、標準の auto-memory（`~/.claude/projects/.../memory/`）があります。
+N3MemoryCore は、それと**競合せず、補い合います**。
 
-**`.mcp.json` はこのリポジトリに同梱されています。** リポジトリを
-クローンしてパッケージをインストールするだけで、Claude Code CLI が
-自動的に接続されます — 手動設定は不要です。
+|            | Claude auto-memory                             | N3MemoryCore RAG                                   |
+| ---------- | ---------------------------------------------- | -------------------------------------------------- |
+| **強み**   | 確実。毎セッション読み込まれる。決まった事実に向く | 会話の文脈。詳しい履歴                             |
+| **弱み**   | 会話の流れや文脈は残せない                     | 検索の質に左右される。必ず出てくるとは限らない     |
+| **向く用途** | 利用者のプロフィール、フォルダのパス、変わらない設定 | 会話の流れ、過去の決定、理由                       |
 
-他のプロジェクトから利用する場合は、そのプロジェクトの `.mcp.json`
-に以下を追加してください：
+- **毎セッション要る決まった情報**（フォルダのパス、好み）→ auto-memory
+- **会話の文脈と履歴**（議論の流れ、過去の決定）→ N3MemoryCore（7 日の窓）
 
-```json
-{
-  "mcpServers": {
-    "n3mc-workingmemory": {
-      "type": "stdio",
-      "command": "n3mc-workingmemory",
-      "args": []
-    }
-  }
-}
-```
+---
 
-### ツール自動許可（Claude Code 固有）
+## 記憶はあなたが管理するマシンに残ります
 
-Claude Code は既定で各 MCP ツール呼び出しに対してユーザー承認プロンプトを
-出します。**「AI が意識せず保存・検索する」自動ループを成立させるには**、
-`n3mc-workingmemory` のツールを Claude Code 設定の `permissions.allow` に
-事前登録しておく必要があります。
+N3MC Lite は、利用者が動かす Redis Stack に記憶を置きます。
+既定は自分の PC の Redis です。自分で選んだ Redis サーバーにもできます。
 
-**プラグイン経由インストールは自動設定** — `/plugin install n3mc-workingmemory@neuralnexusnote`
-でインストールすると、`SessionStart` フック [`hooks/install_permissions.py`](plugins/n3mc-workingmemory/hooks/install_permissions.py)
-が `~/.claude/settings.json` の `permissions.allow` にワイルドカードの
-ルールを 2 つ冪等追加します：
+- **N3MC のクラウドではなく、自分の Redis** — 記憶は `redis_url` の Redis に保存します（既定は `redis://localhost:6379/0`。環境変数 `N3MC_REDIS_URL` が優先）。N3MC のアカウントも、N3MC のクラウドサービスもありません。各エントリは、保存から 7 日で消えます（`ttl_seconds`）。
+- **常駐サーバーは自分の PC だけで待ち受ける** — `127.0.0.1:18524` で待ち受けます（`bind_host`、`server_port`）。認証はありません。だから **`bind_host` は `127.0.0.1` のままにしてください**。ほかの値にすると、記憶がネットワークに見えてしまいます（サーバーは警告を出します）。`Host` ヘッダーが `127.0.0.1` / `localhost` でない要求は断ります。MCP の入口は、アプリと stdio で話し、ポートを開きません。CLI とフックは、プロキシを通しません。
+- **ディスクに置くもの** — Redis のほかに、データフォルダに `config.json` を置きます。v2.0.0 からは **`audit.log` も置きます。これはフックの入力の原文で、すべてのプロンプトと応答を、コードブロックや貼り付けた文章も含めて、そのまま持ちます。TTL はありません**（50 MB でローテーションし、最大約 100 MB）。他人に見せない情報として扱ってください。`audit.log` は、Redis に届かなかったメッセージの最後の控えです。記憶に読み戻すものはありません。[データ保存先](#データ保存先) を見てください。
+- **埋め込みは自分の PC で作る** — 埋め込みモデルは、ローカルの CPU で動きます。検索は自分の Redis の中で動きます。検索のために外部の API は呼びません。
+- **テレメトリーなし** — N3MC は、利用の情報をどこにも送りません。コードは公開されているので、自分で確かめられます。
+- **すべて見て、消せる** — `n3mc-lite --list` / `list_memories` で新しい記憶を見られます。`--delete` / `delete_memory` と `--delete-session` / `delete_memories_by_session` で消せます。
 
-- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — プラグインが
-  提供する形のツール（Claude Code はプラグインの MCP ツールを
-  `mcp__plugin_<plugin>_<server>__<tool>` と名付け、パーミッションのルールも
-  この形で書く必要があります）
-- `mcp__n3mc-workingmemory__*` — サーバーを直接登録した場合
-  （`claude mcp add`、`.mcp.json`）の同じツール
+ネットワークを通るもの：
 
-ワイルドカードは `recall_thread` を含む 7 ツールすべてに当たります。フックは
-ルールが欠けているときだけ書き込み、ほかのエントリには触れません。`settings.json` が読み取り専用・ポリシーで固定・JSON として壊れているときは、何も変えずに、自分で足すルールを警告で表示します。
-（v1.9.x までのフックは `mcp__n3mc-workingmemory__<tool>` という素の名前を
-追加していました。これはプラグインのツール名に当たらないため、プラグインの
-利用者は呼び出しのたびに許可を求められていました。）
+- **インストール** — `pip` と `uvx` は、PyPI からパッケージと依存を取ってきます。Claude Code のマーケットプレイスは、GitHub の `NeuralNexusNote/n3mcmcp-lite` からプラグインを取ってきます。
+- **Redis Stack のイメージ** — 最初の `docker run` で、Docker Hub から `redis/redis-stack-server` を取ってきます。
+- **埋め込みモデル** — 最初の起動で、Hugging Face から `intfloat/multilingual-e5-base`（約 440 MB）を取ってきます。
+- **ほかのマシンの Redis** — `redis_url` / `N3MC_REDIS_URL` をほかのマシンにすると、保存と検索はすべてネットワークを通ります。
+- **AI が読むもの** — `# Recalled Memory Context` の塊と `search_memory` の結果は、会話の一部になります。だから、メッセージと一緒に、アプリの裏にある AI のサービス（Claude なら Anthropic）に送られます。N3MC が Redis の中身をどこかに上げることはありません。
 
-`hooks.json` のコマンドは `python` → `py`（Windows Python Launcher） →
-`python3` の順に試します。どれも `PATH` 上に無い場合は、Python を使わない
-最後の段が警告（`systemMessage`）を出し、ツールを事前許可できなかったことと
-追加すべきルールを知らせます。`uvx` が無い場合（プラグインは MCP サーバを
-`uvx --from n3memorycore-mcp-lite n3mc-workingmemory` で起動します）も同じ
-方法で、インストールコマンド（`pipx install uv`、
-`curl -LsSf https://astral.sh/uv/install.sh \| sh`）付きで知らせます。
+## ユースケース — ワーキングメモリが適している場面
 
-**プラグイン未経由のインストール**（`claude mcp add` / 手動 `.mcp.json`）の
-場合は、下記のルールを `~/.claude/settings.json`（ユーザーグローバル — 推奨）
-または `.claude/settings.json`（プロジェクトスコープ）に追記してください。
-プラグインでインストールしたが Python が無い場合は、代わりに
-`mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` を使います：
+7 日の TTL と揮発性の Redis は、**制限ではなく設計上の特長**です。
+次のような使い方に向いています。
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__n3mc-workingmemory__*"
-    ]
-  }
-}
-```
+- **エージェントによるコード生成のループ** — 失敗した試みや捨てた設計が、次の作業に混ざりません。
+- **実験・使い捨てのプロトタイプ** — 放っておけば 7 日で消えます。整理は要りません。
+- **プロジェクトの間だけの作業メモリ** — 作業やプロジェクトごとに `session_id` を固定して、文脈を分けます。
+- **1 つの作業の中で、Claude Code とデスクトップアプリを行き来する**。
 
-これがないと、`save_memory` / `search_memory` のたびに承認ダイアログが出て
-AI が停止します（ユーザーが席を外していれば動作不能）。Claude Desktop には
-ツール単位のパーミッションゲートが無いため、この設定は不要です。
+**長く残る記憶**が要るなら、作業メモリは向いていません。
+Pro 版（永続保存）を使うか、外部に控えを取ってください。
+Lite では、TTL を避けるための「永続化の工夫」（RDB スナップショット、AOF、外部へのダンプ）を禁じています。
+
+## ツールと CLI のコマンド
+
+7 つのツール（MCP）と CLI のコマンド（Claude Code）は、常駐サーバーの同じ処理を呼びます。
+返す文も同じです。
+CLI は、自動保存を促す一文を付けずに表示します。Claude Code ではフックが保存するからです。
+
+| ツール（MCP） | CLI（`n3mc-lite`） | 目的 |
+|---|---|---|
+| `search_memory` | `--search "<keywords>" [--since S] [--until U] [--limit N]` | ハイブリッド（ベクトル + BM25）検索。時間で減衰する順位と `session_id` の加点 |
+| `save_memory` | `--buffer "<text>"` または `--buffer -`（stdin） | エントリを保存（7 日の TTL。完全に同じものは断る） |
+| `list_memories` | `--list [--limit N]` | 新しい順のエントリ |
+| `recall_thread` | `--recall-thread <turn_id> [--before N] [--after N]` | ヒットの `turn_id` の前後のエントリ |
+| `delete_memory` | `--delete <id>` | 1 件を消す（親文書の id ならチャンクも消す） |
+| `delete_memories_by_session` | `--delete-session <session_id>` | ある `session_id` の記憶をまとめて消す |
+| `repair_memory` | `--repair` | 索引がなければ作り直し、ベクトルのないレコードにベクトルを足す（1 回に 200 件まで） |
+
+- Claude Code では、`--search`、`--buffer`、`--list`、`--recall-thread`、`--repair`、`--stop` を事前に許可します（`permissions.allow`）。形は、pip では `python -m n3mc_mcp.cli` と `n3mc-lite`、プラグインでは `uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite` です。
+- **`--delete` と `--delete-session` は、事前に許可しません。** 元に戻せないので、Claude Code が毎回たずねます。
+- 手で実行する `--search` には、大きさの制限がありません。フックの塊と MCP の `search_memory` の結果は、`context_max_chars` に収めます。
+
+## ID 階層構造
+
+N3MemoryCore は、5 つの ID で、各レコードの出どころと文脈を表します。
+ふつうの利用者が触るのは `session_id` だけです（`agent_name` はまれに）。
+ほかは自動で入ります。
+
+| ID                    | 保存場所          | 作られるとき                         | 単位                         | 目的 |
+|-----------------------|-------------------|--------------------------------------|------------------------------|------|
+| `id`（主キー）        | Redis のハッシュ  | レコードごと（UUIDv7。時刻順）        | **1 レコード**               | 各記憶の識別子。`delete_memory` と重複の判定に使う。 |
+| `owner_id`            | `config.json`     | 最初の起動（UUIDv4）                  | **持ち主・インストール**     | 誰のデータかを表す。`save_memory` のたびに確かめ、合わなければ `owner_id mismatch` で断る。 |
+| `local_id`（agent_id） | `config.json`     | 最初の起動（UUIDv4）                  | **エージェント・インストール** | 全行に保存するが、**Lite の `b_local` の順位には使わない**。`b_local` は `stored_importance + access_count` だけで決まる。 |
+| `session_id`          | Redis のハッシュ  | 作業・プロジェクト・会話ごと（文字列） | **作業・プロジェクト・会話** | **`b_session` の順位の補正**（`b_session_match=1.0`、`b_session_mismatch=0.6`）に使う。`delete_memories_by_session` の対象を決める。フックのレコードは Claude Code の `session_id`。MCP は、呼び出しの引数 → `N3MC_SESSION_ID` → MCP の入口が起動したときに作る UUIDv4 の順。 |
+| `agent_name`          | Redis のハッシュ  | 保存ごと（自由な文字列）              | **エージェントの表示名**     | フックのレコードは、いつも `"claude-code"`。MCP は、引数 → `N3MC_AGENT_NAME` → `initialize` でクライアントが送った名前の順。順位には使わない。 |
+
+フックのレコードには `turn_id` もあります。メッセージと、その応答を結びます。
+`--recall-thread` / `recall_thread` に渡すと、ヒットの前後の会話を読めます。
+
+**使い方の目安：**
+
+- MCP で名前のあるプロジェクトの作業をするときは、**`session_id` を固定します**。`save_memory` と `search_memory` に同じ文字列（例 `"proj-alpha"`）を渡すか、`N3MC_SESSION_ID` を設定します。
+- **`owner_id` は渡さないでください。** 持ち主であることを示す必要があるときだけ渡します。
+- **インストールごとに 1 つの Redis を使ってください。** 複数の PC や人が同じ Redis を使うと、次のことが起きます。`owner_id` を作り直して古いレコードが残っているときも同じです。ある持ち主が保存した本文は、もう一方には `duplicate` として断られます（消えるまで 7 日）。ある持ち主のレコードが検索の候補を埋め、もう一方のレコードが見つからなくなります。インストールごとに専用の Redis を用意してください。
 
 ## データ保存先
 
-Lite 版はディスク上に DB を持ちません。メモリは Redis に保存され、
-自動で失効します。ディスクには小さな `config.json` だけが
-`~/.n3mc-workingmemory/`（Windows では `%USERPROFILE%\.n3mc-workingmemory\`）に置かれます。
-環境変数 `N3MC_DATA_DIR` で上書き可能です。
+記憶は Redis にあり、自動で消えます。
+データフォルダは `~/.n3mc-workingmemory/` です（Windows：`%USERPROFILE%\.n3mc-workingmemory\`）。
+環境変数 `N3MC_DATA_DIR`（絶対パス）で変えられます。
 
-v1.10.0 から、OS 標準のアプリ用データフォルダではなくホームフォルダに置きます。
-Microsoft Store 版の Claude デスクトップアプリは、起動した MCP サーバーの
-`%LOCALAPPDATA%` を別の場所に振り替えるため、同じ PC で設定と `owner_id` が 2 つに
-分かれ、デスクトップアプリで保存した記憶がターミナルの `claude` から見えませんでした。
-最初の起動のときに、旧来の設定を 1 回だけ写します（旧来のファイルは残します）。
+| ファイル | 中身 |
+|---|---|
+| `config.json` | 設定（v1.12.2 までは、これだけ） |
+| `audit.log`、`audit.log.1` | （v2.0.0）フックの呼び出しごとの JSONL の記録。何よりも先に書く。プロンプトと応答の原文で、**TTL はない**。50 MB でローテーションするので、最大約 100 MB |
+| `n3mc-lite.pid` | （v2.0.0）常駐サーバーの PID ファイル（動いている間だけある） |
+| `server.log` | （v2.0.0）常駐サーバーの stderr（起動時に 1 MB を超えていれば空にする） |
+| `server_start_failed` | （v2.0.0）サーバーの起動に失敗した印（5 分は起動し直さない） |
+| `notices.json` | （v2.0.0）利用者の対応が要る通知。1 日に 1 回表示する |
+| `turn_id_<session>.txt` | （v2.0.0）`UserPromptSubmit` フックから `Stop` フックに渡す `turn_id`。30 日より古いものは消す |
+
+v1.10.0 から、フォルダはホームフォルダにあります（以前はプラットフォームのアプリデータのフォルダでした）。
+Microsoft Store 版の Claude デスクトップアプリは、自分が起動するプロセスの `%LOCALAPPDATA%` を別の場所に向けます。
+そのため、1 台の PC に設定と `owner_id` が 2 つできていました。
+最初の起動で、古い設定を 1 回だけコピーします（古いファイルは残します）。
+
+バックアップは想定していません。エントリは 7 日の窓で消えていきます。
+ID にかかわるのは `config.json`（`owner_id` / `local_id`）だけです。
 
 ## 設定
 
-初回起動時に `config.json` が自動生成され、`owner_id` と `local_id`
-にランダム UUID が割り当てられます。編集可能な既定値：
+最初の起動で、`config.json` を自動で作ります。`owner_id` と `local_id` にはランダムな UUID が入ります。
+変えられる既定値：
 
 ```json
 {
@@ -533,240 +479,152 @@ Microsoft Store 版の Claude デスクトップアプリは、起動した MCP 
   "rerank_phrase_weight":     0.2,
   "b_session_match":          1.0,
   "b_session_mismatch":       0.6,
-  "skip_code_blocks":         false
+  "skip_code_blocks":         false,
+  "embedding_model":          "intfloat/multilingual-e5-base",
+  "embedding_dim":            768,
+  "server_port":              18524,
+  "bind_host":                "127.0.0.1",
+  "context_max_chars":        9500
 }
 ```
 
-- `redis_url` — 接続 URL。環境変数 `N3MC_REDIS_URL` が優先される。
-- `ttl_seconds` — 保存ごとに付与される TTL（既定 7 日）。
-- `vector_min_cos` — ベクトル検索の候補にする cos 類似度の下限（既定 `0.85`）。下げる（例 0.80〜0.83）と言い回しが違っても拾いやすくなるが、関係の薄い記録も混ざる。上げる（例 0.88）と結果が短くなるが、関係のある記録も落ちやすい。目安は 0.80〜0.88。0.85 は `multilingual-e5-base` で測った値なので、`embedding_model` を変えたら測り直す。
-- `relative_min_score_ratio` — 1 位のスコアのこの倍率未満の結果を捨てる（既定 `0.6`、`0.0` で無効）。
-- `min_results`（1.10.1 から） — 下限を通った結果がこの件数に満たないとき、`search_memory` は落ちた行のうち近いものを、合計がこの件数になるまで、`#### Possibly related (weak matches — may be unrelated)` という別の見出しの下に足します（既定 `3`、`0` で補充しない）。接続した LLM には「関係があるときだけ使う」と指示しています。弱い候補は 7 日の TTL を延ばさないので、表示されても延命しません。記憶がまったく入らない質問がなくなる代わりに、検索のたびに最大 3 行、多くは関係の薄い行が増えます。
-- `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 文書や長いエントリの新しい版を保存すると、古い版も残る。内容が 0.98 以上似ている結果は同じ内容の版とみなし、新しい順に並べる。各結果に `saved=`（保存日時）が付く。
-- 設定は MCP サーバーが起動し直したときに効く（MCP クライアントを再起動する）。書き間違えて読めないときは、ファイルはそのまま残り、既定値で動く。そのことは最初の `search_memory` の結果に表示される。数値は引用符を付けずに書く。
-- `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズと重複（文字数）。閾値超の本文は親ドキュメント＋チャンク経路に入り、verbatim 復元される。
-- `access_count_*` — アクセス頻度ベース自動 importance。検索の上位 K 件にヒットすると次回以降の検索でブースト（上限あり）。**2026-11-17 から既定は無効**（`access_count_enabled: false`）。回数は引き続き数える。
-- `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索ごとに上位 K 件の TTL をリセット（リセットのみ。新規保存以上には伸びない）。
-- `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — 軽量な後段リランカー（CPU のみ）。
-- `b_session_match` / `b_session_mismatch` — 行の `session_id` が一致したときのスコア倍率（既定 `1.0`）と不一致のときの倍率（`0.6`）。`save_memory` と `search_memory` に同じ `session_id` を渡すことで、同じ Redis 内の他プロジェクトのノイズより現在プロジェクトの記憶を上位に押し上げる。両方を `1.0` にすればこのバイアスを完全に無効化できる。
-- `skip_code_blocks` — `true` にすると、`save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含むペイロードを拒否して `status: "skipped_code"` を返す。既定は `false` で、コードブロックを `[code omitted]` に置き換えて保存する（1.12.0 から）。FastAPI 版 N3MemoryCore 時代の「コードはメモリに入れない」運用を再現したい場合に有効化（git / IDE 履歴に任せ、Redis には散文の決定事項や計画だけを置きたい場合に有用）。
+- `redis_url` — 接続先の URL。環境変数 `N3MC_REDIS_URL` が優先します。
+- `ttl_seconds` — 新しい記憶とその重複防止の印に付ける TTL（既定 7 日）。
+- `vector_min_cos` — ベクトルの候補になるための、問い合わせとの近さ（コサイン）。既定は `0.85` です。目安は 0.80–0.88 です。下げると、より多く拾い、関係の薄い行も増えます。上げると、結果が短くなります。0.85 は `multilingual-e5-base` で測った値です。`embedding_model` を変えたら、測り直してください。
+- `relative_min_score_ratio` — 最高点に対してこの比より低い結果を外します（既定 `0.6`。`0.0` で無効）。
+- `min_results` — しきいを通った結果がこれより少ないときは、外した行のうち近いものを、別の見出し `#### Possibly related (weak matches — may be unrelated)` の下に足します（既定 `3`。`0` で無効）。弱い一致の行は、TTL を戻しません。
+- `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 中身が 0.98 以上似ている結果は、同じものの版として扱い、新しい順に並べます。各ヒットには `saved=` の時刻が付きます。
+- `chunk_threshold` / `chunk_overlap` — 区切りの大きさと重なり（文字数）。これより長い本文は、親文書とチャンクで保存します。ヒットすると全文が返ります。
+- `access_count_*` — よく使われる記憶の加点。**2026-11-17 から既定は無効**です（`access_count_enabled: false`）。ヒットの回数は数えます。
+- `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索のたびに、上位 K 件の TTL を戻します（戻すだけで、新しく保存したとき以上には延ばしません）。
+- `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — 合算の後の、軽い語彙での並べ替え（CPU だけ）。
+- `b_session_match` / `b_session_mismatch` — 保存された `session_id` が合う行（既定 `1.0`）と合わない行（`0.6`）に掛ける値。両方を `1.0` にすると、補正はなくなります。
+- `skip_code_blocks` — `true` にすると、3 つのバッククォートの囲みを含む内容を保存しません（`status: "skipped_code"`）。フックの保存にも効きます。既定の `false` では、コードブロックを `[code omitted]` に置き換えて保存します。
+- `embedding_model` / `embedding_dim` — 埋め込みモデルと、そのベクトルの次元。2 つは合っている必要があります。どちらかを変えたら、再起動と索引の消去が要ります。
+- `server_port`（v2.0.0）— 常駐サーバーのポート（既定 `18524`）。N3MC-Free は 18520、Pro は 18521、PostgreSQL 版は 18522、Ollama 版は 18523 を使います。1 台の PC では、N3MC の製品ごとに別のポートにします。
+- `bind_host`（v2.0.0）— 既定の `127.0.0.1` のままにします。
+- `context_max_chars`（v2.0.0）— フックの `# Recalled Memory Context` の塊と、MCP の `search_memory` の結果の最大の大きさ（既定 `9500`。2000–10000）。Claude Code は、10,000 文字を超えるフックの出力をファイルに移し、2,000 文字の抜粋だけを見せます。塊が長すぎるときは、まず順位の低い行を外し、それでも長ければ文を切ります。手で実行する `--search` は全部を見せます。
+- **変更が効くとき**：`config.json` を書き換えると、次のフック・CLI・MCP の呼び出しで常駐サーバーが起動し直します。`config.json` に書き間違いがあって読めないときは、ファイルには触らず、既定値で動きます。最初の検索の結果がそのことを知らせます。数値は引用符なしで書きます。
 
-全フィールドの詳細は仕様書 §6 を参照。
+全項目は、指示書の §6 にあります。
 
 ## 多言語対応
 
-標準装備、CPU のみ動作、LLM/GPU 不要。同じ単語をどう書こうと、検索と
-重複判定の挙動が一致します：
+はじめから入っています。CPU だけで動き、LLM も GPU も要りません。
+同じ言葉をどう打っても、検索と重複の判定は同じように動きます。
 
-| 層 | 動作 | 実例 |
+| 層 | すること | 例 |
 |---|---|---|
-| **NFKC 正規化** | SHA / 埋め込み / BM25 の前に互換形を畳み込む | `ｱﾙﾌｧ` ↔ `アルファ`、`１２３` ↔ `123`、`ﬁ` ↔ `fi` |
-| **バイグラム BM25 サイドチャネル** | 区切り文字を持たない文字体系で重複バイグラムを発行 | `記憶装置` → `記憶 憶装 装置`。韓国語 (`안녕하세요`)、タイ語 (`สวัสดี`)、ラオ語、ミャンマー語、クメール語にも適用 |
-| **発音区別フォールド** | Latin/Greek/Cyrillic の語は結合マークなしの形でも索引化 | `café` が `cafe` にヒット、`Ångström` が `Angstrom` にヒット |
-| **multilingual-e5-base 埋め込み** | 100 言語以上にまたがる多言語意味空間 | 言語横断パラフレーズ検索 |
+| **NFKC 正規化** | SHA・埋め込み・BM25 の前に、互換文字をそろえる | `ｱﾙﾌｧ` ↔ `アルファ`、`１２３` ↔ `123`、`ﬁ` ↔ `fi` |
+| **バイグラムの BM25 補助** | 空白のない文字に、重なる 2 文字の組を作る | `記憶装置` → `記憶 憶装 装置`。韓国語（`안녕하세요`）、タイ語（`สวัสดี`）、ラオ語、ミャンマー語、クメール語も同じ |
+| **ダイアクリティカルマークの同一視** | ラテン・ギリシャ・キリル文字の語を、結合記号なしでも索引に入れる | `café` が `cafe` に、`Ångström` が `Angstrom` に一致 |
+| **multilingual-e5-base の埋め込み** | 100 以上の言語にまたがる意味の空間 | 言語をまたぐ言い換えの検索 |
 
-これらは `save_memory` と `search_memory` の呼び出しごとに自動で走り
-ます。どれも保存する `content` を書き換えません。長い本文も保存したとおりの
-全文が返ります（仕様書 §3.11）。保存の入口の 2 つの決まりは
-[エンコーディング安全策](#エンコーディング安全策) を見てください。
+これらは、保存と検索のたびに動きます。
+保存する `content` は書き換えません。長い本文は、保存したとおりに全文が返ります。
 
 ## エンコーディング安全策
 
-ツール本体が動く前に、エンコーディング安全策が 2 層走ります（仕様書 §3.13）。
-Free 版の防御を一対一で移植：
+1. **UTF-8 への切り替え** — MCP の入口、フックの入口、CLI は、起動したときに `sys.stdin` / `sys.stdout` / `sys.stderr` を UTF-8 にします。日本語の Windows では、コンソールの既定のコードページが cp932 です。そのままだと、ASCII 以外のバイトがすべて壊れます。POSIX の環境はもともと UTF-8 なので、何も変わりません。
+2. **孤立サロゲートの除去** — 保存するすべての文章、すべての問い合わせ、フックの入力の全体を `sanitize_surrogates()` に通します。Windows のパイプが、Python で読めないバイトを渡すと、UTF-16 の孤立サロゲート（`U+D800`–`U+DFFF`）が出ることがあります。この対策がないと、書き込みが失敗します。
 
-1. **stdio の UTF-8 再設定** — モジュール import 時点で `sys.stdin` /
-   `sys.stdout` / `sys.stderr` を `encoding="utf-8"` に切り替える。
-   Windows 日本語環境では既定の console code page が cp932 のため、
-   この措置がないと MCP JSON-RPC チャネル上で非 ASCII バイトが軒並み
-   化ける。POSIX 系は既定で UTF-8 のため安全な no-op。
-2. **孤立サロゲートのサニタイズ** — `save_memory.content` および
-   `search_memory.query` は、`.encode("utf-8")` を伴うあらゆる経路の
-   手前で `sanitize_surrogates()` を通過する。孤立 UTF-16 サロゲート
-   ハーフ（`U+D800`–`U+DFFF`）は、Windows サブプロセスのパイプが渡し
-   てくる UTF-8 バイトを Python のデコーダが `errors="surrogateescape"`
-   でマップした場合に発生する。これは `json.loads` を素通りするが、
-   SHA1 計算・Redis HSET・埋め込み生成のいずれかの段階で
-   `UnicodeEncodeError` を投げ、本来書き込めるはずだったレコードが
-   黙って失われる。本関数は `dict` / `list` を再帰処理するため、JSON
-   ペイロードに埋まったサロゲートも 1 回でクリーンアップされる。
+空になった内容や、見える文字のない内容は、`empty content` / `empty content (no visible characters)` で断ります。
 
-保存対象が全てサロゲートだった場合、サニタイズ後は空文字列に縮退し、
-通常の empty-content 拒否経路に合流する —
-`{"status":"error","saved":false,"reason":"empty content"}` を返す。
-見える文字を 1 つも含まない本文（空白、`\x00` や `U+200B` のような制御文字・
-書式文字、区切り文字、異体字セレクタだけでできたもの）は
-`empty content (no visible characters)` で拒否する。
+保存するすべてのものに、2 つの決まりがあります。
 
-保存するものには、次の 2 つの決まりがある：
+- **外側の空白を 1 回だけ取ります** — `' \nAAA\n '` は `AAA` として保存します。
+- **コードブロックは `[code omitted]` にします** — 囲まれたブロック（```` ``` ```` … ```` ``` ````、または閉じていない囲みから最後まで）を、保存の前に置き換えます。行内のバッククォートは残します。N3MemoryCore が覚えるのは、話したことと決めたことです。コードは、プロジェクトのファイルにあるべきものです。
 
-- **前後の空白は 1 回だけ落とす** — `' \nAAA\n '` は `AAA` として保存する。
-- **コードブロックは `[code omitted]` として保存する**（1.12.0 から） — フェンス
-  （```` ``` ```` … ```` ``` ````、閉じていなければ終わりまで）で囲んだ部分を、
-  保存の前に置き換える。インラインのバッククォートは残す。N3MemoryCore が
-  覚えるのは話したことと決めたことで、コードはプロジェクトのファイルにある。
-  1.12.0 より前はコードも保存していたが、見せるときは必ず `[code omitted]`
-  にしていたので、見え方は変わらない。
-
-それ以外は、見える文字の間にある NUL やゼロ幅文字も含めて、そのまま保存する。
+フックのレコードは、役割の印で始まります：`[user] ` または `[claude] `（長い文章のチャンクは `[user 2/5] ` など）。
 
 ## ランキング式
 
 ```
-final_score = (0.7 × cosine_similarity + 0.3 × keyword_relevance) × time_decay × b_local × b_session
+final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay * b_local * b_session
 
-time_decay = 2 ^ (-経過日数 / half_life_days)             (既定の半減期: 3 日)
-b_local   = clamp(0.5, 2.0, stored_importance + access_boost)
-access_boost = min(0.5, access_count × 0.02)
-b_session = b_session_match (既定 1.0)   if 行の session_id == 実効 session
-          = b_session_mismatch (既定 0.6) それ以外
+time_decay   = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 3 days)
+b_local      = clamp(0.5, 2.0, stored_importance + access_boost)
+access_boost = min(0.5, access_count * 0.02)               (only when access_count_enabled)
+b_session    = b_session_match (default 1.0)   if row.session_id == effective_session
+             = b_session_mismatch (default 0.6) otherwise
 ```
 
-既定の半減期 3 日は TTL（7 日）より短く設定されており、Lite 版でも
-`time_decay` は実際に効きます。新鮮なメモリは 1.0、3 日経過で 0.5、
-7 日経過（失効直前）で ≈ 0.20 となり、直近の文脈がランキング上位に
-押し出されます。
+半減期は 3 日で、7 日の TTL より短いです。だから Lite では `time_decay` がよく効きます。
+保存したばかりの記憶は 1.0、3 日前のものは 0.5、7 日前のものは約 0.20 です。
 
-**自動重要度ブースト（アクセス頻度型。2026-11-17 から既定は無効）**：
-`access_count_enabled` を `true` にすると、`search_memory` が
-ある記憶を上位 5 件で返すたび、その記憶の `access_count` が +1 され、
-次回以降の検索で `b_local` が 0.02 ずつ押し上げられます（上限 +0.5）。
-LLM による重要度判定は不要で、「よく使う記憶ほど自然に上位に来る」
-自己調整ループが CPU 計算のみで成立します。既定で無効にしたのは、N3MC-Pro で
-測ったところ recall@3 が下がった（よく返った記憶が、より関係の深い記憶の上に
-来た）ためです。
+よく使われる記憶の加点は、2026-11-17 から既定で無効です。
+N3MC-Pro で測ったところ、recall@3 が下がったためです（よく返る記憶が、より関係のある記憶より上に来ました）。
+
+## ほかの N3MC 製品との共存
+
+Lite は、N3MC-Free、N3MC-Pro、MCP Pro / PostgreSQL / Ollama 版と同じ PC に入れられます。
+共有するものはありません。
+Lite には、専用のデータフォルダ（`~/.n3mc-workingmemory`）、データベース（Redis）、サーバーのポート（18524）、フックのコマンド（`n3mc-lite-hook`、`n3mc-lite-stop-hook`）、CLI（`n3mc-lite`）、ルールファイル（`.claude/rules/n3mc-lite-behavior.md`）があります。
+
+- `n3mc-lite --init` は、ほかの製品のフックを残し、そのことを知らせます。
+- 2 つの製品のフックが入っていると、Claude は製品ごとに 1 つずつ `# Recalled Memory Context` の塊を受け取ります。それぞれの記憶から取り出したものです。
+- ほかの N3MC のサーバーが Lite のポートを使っているとき、Lite はそのサーバーを使わず、止めもしません。ベクトルなしで保存し、検索はしません。`port_conflict` の通知を出し、Lite に専用の `server_port` を与えるよう求めます。
+- 同じアプリに MCP の N3MC Pro（`n3mc-longtermmemory`）がつながっているときは、MCP の指示が Lite を作業メモリとして扱います。
+
+## 制限
+
+- **7 日。** 各エントリは、保存から 7 日で消えます（検索の上位 5 件に入ると、7 日が戻ります）。`audit.log` は例外で、TTL がありません。
+- **フックのないアプリでは、保存はモデル次第です**（下を見てください）。会話の全部が残るのは Claude Code だけです。
+- **常駐サーバーが動ける必要があります。** 起動できないときは、検索はエラーか代わりの文を返します。保存は、ベクトルなしで Redis に入ります（キーワードではすぐ見つかり、ベクトルはあとで修復が足します）。
+- **すべてのクライアントで 1 つのインストール。** フック・CLI・MCP の入口は、同じ版を動かす必要があります。違うと、呼び出しのたびに、互いのサーバーを置き換えてしまいます。デスクトップアプリは、フックと同じ scripts フォルダか、同じ版に固定した `uvx` の形で登録します。
+- **プラグインと pip を一緒に使わないでください。** プラグインが有効なとき、`--init` はフックを登録しません。プラグインは、`--init` が書いたフックがあれば知らせます。
+- **まだ試験していません。** v2.0.0 は指示書です。そのコードは、まだ生成も試験もしていません。
+
+## なぜ N3MemoryCore？（組込みメモリとの違い）
+
+| 観点 | 組込みメモリ | N3MemoryCore（Lite） |
+|---|---|---|
+| **データの持ち主** | ベンダーが預かる | **自分のマシンの、自分の Redis Stack** |
+| **Claude Code での保存** | モデル次第 | **フックが、すべてのメッセージと応答を保存** |
+| **使えるクライアント** | そのベンダーの製品だけ | **Claude Code（フック）と、あらゆる MCP クライアント** |
+| **原文の取り出し** | 見えない（要約されることも） | **親文書の約束。保存したとおりの全文を返す（コードブロックは `[code omitted]`）** |
+| **検索の中身** | ブラックボックス | **BM25 + e5 ベクトル + CJK バイグラム + 時間減衰 + 軽い並べ替え。値はすべて見えて、変えられる** |
+| **確認と操作** | 画面からだけ | **一覧・取り出し・削除・`session_id` でのまとめての削除を、生のレコードに対して行える** |
+| **残る期間** | ベンダーのサービス次第 | **7 日の TTL の Redis。短命が設計だが、コンテナは自分のもの** |
+
+1 つのベンダーの製品の中で「AI がセッションをまたいで何かを覚えていればよい」だけなら、組込みメモリのほうが簡単です。
+
+## コンプライアンスについて — MCP は「促す」ことしかできない
+
+**この節は、フックのないアプリ**（Claude デスクトップアプリと、ほかの MCP クライアント）**の話です。**
+Claude Code では、モデルの判断にかかわらず、フックがすべてのメッセージと応答を保存し、メッセージのたびに検索します。
+
+MCP サーバーは、LLM にツールを呼ばせることはできません。
+MCP で使える手は 3 つです。`tools/list` のツールの説明、セッションの始めに送る `instructions`、ツールの応答の文です。
+Lite は 3 つとも使います。ツールの応答の最後には、いつも短い念押しを付けます。
+それでも、**LLM が従うかどうかは決まりません**。
+モデル、クライアントのプロンプトの組み立て方（`instructions` を要約したり落としたりするクライアントもあります）、ほかの指示によって変わります。
+ほとんどのターンは正しく保存されます。短い答えや、事実の訂正は、保存が抜けることがあります。
+
+必ず保存したいとき：
+
+- **はっきり頼む** — プロンプトに「これを N3MemoryCore に保存して」と書きます。LLM は、はっきりした頼みにはほぼ必ず従います。
+- **Claude Code を使う** — フックが、すべてのやりとりを保存します。
+- **自分のアプリから Anthropic の Messages API を呼ぶ** — `tool_use` を自分で動かし、毎ターン `save_memory` を呼びます。そのアプリは自分で書く必要があります。
+
+## アンインストール
+
+フックの登録も消えるように、AI に「N3MC Lite を削除してください」と頼みます。
+自分で行うときは、次のとおりです。
+
+1. プラグインの利用者は `/plugin uninstall n3mc-workingmemory@neuralnexusnote`。
+   pip の利用者は、`~/.claude/settings.json` のうち、コマンドが `n3mc-lite-hook` / `n3mc-lite-stop-hook` を実行する 2 つの項目を消します。
+2. 常駐サーバーのプロセス（コマンドラインに `n3mc_mcp.cli` と `--run-server` を含む）を終わらせます。または、一度サインアウトします。
+3. `pip uninstall n3memorycore-mcp-lite` でパッケージを消します。
+4. `docker rm -f redis-stack` で Redis のコンテナを止めて消します。保存した記憶はすべて消えます。
+5. `~/.n3mc-workingmemory/`（または `N3MC_DATA_DIR`）を消します。`config.json`、`audit.log` とほかのファイルが消えます。
+6. Claude デスクトップアプリの設定ファイルから、`n3mc-workingmemory` の項目を消します。
+
+プロジェクトのフォルダにある `.claude/rules/n3mc-lite-behavior.md` は、手で消してかまいません。
 
 ## 開発
 
 ```bash
-# 先に Redis Stack を起動（前提条件の節を参照）してから：
-pip install -e ".[dev]"
-pytest tests/ -q
-```
-
-テストは Redis DB インデックス `0` を対象に動作し（環境変数
-`N3MC_REDIS_TEST_URL` で変更可能）、各テスト前後に `FLUSHDB` を行います。
-RediSearch は DB 0 以外でインデックスを作成できない
-（`Cannot create index on db != 0`）ため、別 DB への分離はできません。
-**残したいデータが入っている Redis をテストに使わないでください** —
-テスト専用の Redis コンテナを用意してください。Redis に接続できない
-場合、テストは実行されずスキップされます。
-
-## Lite 版の拡張・改造
-
-振る舞いを改造したい場合（ランキング式の変更、クロスエンコーダ・リランカーの差し込み、日本語形態素解析の追加など）は、本リポジトリに同梱された設計仕様書を参照してください：
-
-- [`N3MemoryCore_MCP_Spec_JP.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_JP.md) — 完全な設計ドキュメント（日本語）
-- [`N3MemoryCore_MCP_Spec_EN.md`](https://github.com/NeuralNexusNote/n3mcmcp-lite/blob/main/N3MemoryCore_MCP_Spec_EN.md) — English version
-
-仕様書の付録 A にオプション拡張（クロスエンコーダ・リランカー、保存時チャンキング、HyDE、日本語形態素解析）の差し込み位置と候補ライブラリを記載しています。TTL・重複判定・RediSearch インデックス契約を壊さずに改造したいときの参考資料としてお使いください。
-
-## なぜ N3MemoryCore？（組込みメモリとの違い）
-
-auto-save の **信頼性** という観点では、N3MemoryCore は最近の LLM 製品の
-組込みメモリ機能（例：Claude の組込みメモリ）**と本質的に変わりません** ──
-どちらも「LLM が自発的に save ツールを呼ぶ」ことに依存し、後述の
-*コンプライアンスについて* に書いた非決定性は両方に当てはまります。
-差別化は別のところにあります：
-
-| 観点 | 組込みメモリ | N3MemoryCore（Lite） |
-|---|---|---|
-| **データ所有権** | ベンダ管理サーバ | **自分のマシンの Redis Stack** |
-| **クライアントの広さ** | ベンダ製品内のみ | **任意の MCP 準拠クライアント**（Claude Code / Cursor / Cline / Goose / 自前アプリ） |
-| **複数 AI の協調** | 単一 AI の記憶 | **`session_id` で複数エージェントが同じ記憶名前空間を共有；タスク終了時は `delete_memories_by_session` で一括掃除** |
-| **Verbatim 復元** | 不明（要約される可能性あり） | **親ドキュメント契約 — 保存したとおりの全文を返す（コードブロックは `[code omitted]`）** |
-| **検索内部** | ブラックボックス | **ハイブリッド BM25 + e5 ベクトル + CJK バイグラム + 時間減衰 + 軽量リランカー、全パラメータ可視・可変** |
-| **可視性／制御** | UI 経由のみ | **`list_memories` / `delete_memory` / `delete_memories_by_session` で生レコード操作可** |
-| **永続性** | ベンダのサービス継続期間に依存 | **インメモリ Redis、7 日 TTL** — 短命設計だがコンテナを自分で持つ。長期保存が必要なら任意の永続メモリバックエンドと組み合わせる |
-| **チューニング** | 固定 | `half_life_days` / `chunk_threshold` / `vector_min_cos` / リランク重み などすべて編集可能 |
-
-つまり N3MemoryCore Lite を動かす価値は **「より確実な auto-save」ではなく、
-「複数 AI が共有 `session_id` の下で協調できる透明・改造可能なワーキング
-メモリ層を自分で所有すること」** にあります ── 検索の挙動は編集可能、
-保存した全文が返ることは契約で保証される。（ユーザ投入成果物の長期保存が
-必要なら任意の永続メモリバックエンドと併用する。）
-
-これらの特性が運用にとって重要なら、Lite は元を取ります。「**ある一社の
-製品の中で LLM がセッション跨ぎで何かを覚えていてくれればいい**」だけなら、
-組込みメモリの方がシンプルです。
-
-## コンプライアンスについて — MCP は「促す」ことしかできない
-
-このサーバから LLM にツール呼び出しを強制することはできません。MCP プロトコル
-がサーバ側に与える働きかけ手段は次の 3 つだけです：
-
-1. **`tools/list` の各ツール `description`** — 毎ターン LLM の視野に入る
-2. **`instructions` フィールド** — セッション開始時に 1 回送られ、システムレベルの
-   ヒントとして渡される
-3. **ツール応答のテキスト** — LLM がツールを呼んだときに読む
-
-本サーバはこの 3 つすべてを利用しています：tool description には明示的な指示、
-`instructions` にはルール集、`search_memory` / `save_memory` の応答末尾には
-auto-save を促す短い reminder を埋め込んでいます。それでも、**LLM がそれに従うかは
-非決定的**です。コンプライアンスはモデルのツール呼び出しバイアス、MCP クライアントの
-プロンプト構築（`instructions` を要約・破棄するクライアントもある）、ユーザの
-プロンプトや `CLAUDE.md` など競合する別の指示に依存します。
-
-実際には **大半のターンでは正しく auto-save されますが、一部のターンでは飛びます**
-── 特に短い返答、事実訂正のターン、LLM がユーザの質問に強く集中しているターン。
-保存していてほしかった事実が次のセッションで失われていたら、「保存して」と
-明示的に言えば取り戻せます。
-
-### 確実な保存が必要なときの 3 つの経路
-
-MCP の建付けの中で、この非決定性を回避する経路は **3 通り**あります：
-
-**経路 1 — ユーザがプロンプトで明示する**（運用回避・即効）
-- 「**N3MemoryCore に保存して**」「**メモリに記録して**」をプロンプトに書く
-- LLM はだいたいユーザの明示要求には応じる
-- 利点: 何のインフラも要らない／今すぐ効く／すべての MCP クライアントで動く
-- 欠点: ユーザの認知負荷（毎回明示する必要、自動化されない）
-
-### hook による全会話保存
-
-**経路 2 — Claude Code hook で全会話保存**（Claude Code 専用・決定論的）
-- Claude Code には `Stop` などの harness レベル hook があり、これは LLM の判断を**一切介さず**
-  harness が決定論的に実行する
-- セットアップは Claude Code に依頼するだけ：
-  > 「毎ターン終わったら、Claude Code の会話全文を Lite に自動保存して」
-- Claude Code が以下を自動構築します：
-  - `~/.claude/hooks/save_transcript.py` — `transcript_path` を読んで `n3mc_mcp.database.Database`
-    を直接 import し、Lite DB に `save_memory` を呼び出すスクリプト
-  - `~/.claude/settings.json` の `hooks.Stop` セクション — 上記スクリプトを毎ターン末に
-    `async: true` で実行する設定
-- 動作仕様：
-  - **Claude が `save_memory` を呼び忘れる事故が構造的に発生しない**（harness が直接呼ぶ）
-  - MCP の往復を経由しないため、ツール呼び出しコストゼロ
-  - turn ごとの transcript は新しいエントリとして保存される（v1.10.0 から、自動で
-    拒否するのは完全一致だけ。似た内容でも更新が失われない）。`search_memory` は新しい版を
-    先に並べ、`saved=` を表示する。DB の増え方が気になるなら、transcript 全体ではなく
-    直近の往復だけを保存する
-  - 200 文字未満の短い transcript は noise として skip
-- 利点: 決定論的／LLM の傾向に依存しない／ノイズや忘却の心配なし
-- 欠点: Claude Code 専用（Cursor / Windsurf など他クライアントでは別の仕組みが必要）／
-  hook プロセスが毎ターン埋め込みモデルをロード（async なので UI ブロックなしだが CPU/IO コストはあり）／
-  **Lite は 7 日 TTL なので保存した transcript もその窓内で失効する** — 長期保存が必要なら
-  任意の永続メモリバックエンドへ同じ hook で繋ぎ替えるのが筋
-
-**経路 3 — MCP を抜けて first-party API（Anthropic Messages API）に自分で繋ぐ**（アーキテクチャ変更）
-- MCP クライアント（Claude Code 等）から外れて、`messages.create` の `tool_use` を自前のアプリで直接制御する
-- 「LLM が呼ぼうが呼ぶまいが、コード側で毎ターン `save_memory` を確実に発火する」決定論的動作を組める
-- 利点: コードが書いた通り動く／保存保証／どのモデル・どのクライアントとも独立
-- 欠点: そのオーケストレーションアプリを書く労力
-
-「**MCP 経由で LLM に丸投げする利便性**」と「**毎ターン確実に保存される保証**」は
-トレードオフの両端で、片方を取ったらもう片方は捨てる構造です。本サーバは MCP プロトコル
-が許す限りの説得材料を盛り込んでいますが、それ以上の保証はユーザ／クライアント実装者
-の選択になります（Claude Code を使っているなら経路 2 が最小コスト）。
-
-## フォークと寄稿
-
-本リポジトリは **public・Apache-2.0 ライセンス** です — 自由に
-フォーク・改変・実行してください。フォークから動かすまでの最短経路：
-
-```bash
-git clone https://github.com/<YOU>/n3mcmcp-lite
-cd n3mcmcp-lite
 # テストは使う Redis を FLUSHDB する。記憶用の Redis ではなく、テスト専用のコンテナを使う
 docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
@@ -774,25 +632,25 @@ pip install -e ".[dev]"
 N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 ```
 
-CI は push と PR ごとに同じマトリクス（Python 3.10–3.13 × Redis Stack）
-を走らせます — [`.github/workflows/test.yml`](./.github/workflows/test.yml)
-を参照。コーディング規約・仕様書を契約とする運用方針・PR チェックリスト
-の詳細は [`CONTRIBUTING.md`](./CONTRIBUTING.md)（日本語併記）に整理しています。
+RediSearch は DB 0 にしか索引を作れません。だから、別の DB 番号でテストすることはできません。
+テストは、**専用の** Redis コンテナで実行してください。
+v2.0.0 のテストの層（フック、サーバーの API、CLI、MCP クライアント、大きさの制限、共存）は、指示書の §9 にあります。v2.0.0 のコードと一緒に入ります。
 
-**フォークを Claude Code から実際に使うには**、上記の
-`pip install -e ".[dev]"` 以外に追加設定は不要です：
+CI は、push と PR のたびにテストを実行します。
+[`.github/workflows/test.yml`](./.github/workflows/test.yml) を見てください。
+開発者向けの案内（英語 + 日本語）は [`CONTRIBUTING.md`](./CONTRIBUTING.md) にあります。
 
-1. `n3mc-workingmemory` コマンドが `PATH` に通っている
-   （`which n3mc-workingmemory` で確認）
-2. リポジトリの [`.mcp.json`](./.mcp.json) が既にサーバを宣言している
-   ため、`cd n3mcmcp-lite && claude` で次のプロンプトから自動接続
-3. 他のクライアント（Claude Desktop、別プロジェクトの `.mcp.json`、
-   ツール自動許可）に登録する手順は [クイックスタート Step 3 表](#-クイックスタート--claude-code-に-3-ステップで接続)
-   に整理してあります
+## Lite 版の拡張・改造
 
-フォークを別パッケージ名で PyPI に再公開する場合は、
-[`pyproject.toml`](./pyproject.toml) の `name`、`[project.urls]`、
-console-script 名も忘れずに編集してください。
+このリポジトリは**公開されていて、Apache-2.0 ライセンス**です。
+自由にフォークし、変え、動かしてかまいません。
+動きを変えたいとき（順位の式、クロスエンコーダの並べ替え、日本語の形態素解析など）は、指示書から始めてください。
+
+- [`N3MemoryCore_MCP_Spec_EN.md`](./N3MemoryCore_MCP_Spec_EN.md) — 設計の全文（英語）
+- [`N3MemoryCore_MCP_Spec_JP.md`](./N3MemoryCore_MCP_Spec_JP.md) — 日本語版
+
+指示書の付録 A に、追加できる機能と、その差し込み口があります。
+フォークを別のパッケージ名で公開するときは、`pyproject.toml` の `name`、`[project.urls]`、コンソールスクリプトの名前も変えてください。
 
 ## トラブルシューティング
 
@@ -801,46 +659,43 @@ console-script 名も忘れずに編集してください。
 症状：
 ```
 ERROR: Could not install packages due to an OSError: [WinError 32]
-プロセスはファイルにアクセスできません。別のプロセスが使用中です。:
+The process cannot access the file because it is being used by another process:
 '...\Scripts\n3mc-workingmemory.exe' -> '...\Scripts\n3mc-workingmemory.exe.deleteme'
 ```
 
-原因：MCP クライアント（Claude Code / Claude Desktop）が
-`n3mc-workingmemory.exe` を子プロセスとして握っているため、pip がバイナリ
-を置き換えられない。
+原因：動いているプロセスが、パッケージのファイルを開いたままにしています。
+たとえば、Claude デスクトップアプリが `n3mc-workingmemory.exe` を動かしています。
 
-対処（いずれか）：
-
-1. **MCP クライアントを完全終了する。** Windows ではウィンドウを閉じる
-   だけでは不十分。タスクマネージャーで `claude` /
-   `n3mc-workingmemory.exe` / コマンドラインに `n3mc-workingmemory` を
-   含む `python.exe` をすべて終了させてから `pip install --upgrade` を
-   再実行する。
-2. **グローバルインストールを使わず `uvx` 経由で動かす** —
-   `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` はセッションごと
-   に隔離された一時環境で実行されるため、システムレベルの `.exe`
-   ロック問題が原理的に発生しない。
-
-これは Windows のファイルロック仕様であり、パッケージング側の不備では
-ない — 別の fresh venv に対するインストール（`python -m venv .venv &&
-.venv/Scripts/pip install n3memorycore-mcp-lite`）はそのまま通る。
+対処：Claude デスクトップアプリと Claude Code を完全に終了します。
+Windows では、ウィンドウを閉じるだけでは足りません。タスクマネージャーでプロセスを終わらせるか、一度サインアウトします。
+常駐サーバーのプロセス（コマンドラインに `n3mc_mcp.cli` と `--run-server` を含む）も終わらせます。
+そのあと、もう一度 `pip install --upgrade` を実行します。
 
 ### `~3memorycore-mcp-lite` 警告が pip install 時に出る
 
+次のような行が出ることがあります。
 ```
 WARNING: Ignoring invalid distribution ~3memorycore-mcp-lite
 ```
-これは過去のインストールが（典型的には上記のファイルロック問題で）
-途中で中断したことを pip が検出している警告。リーディング `~` で残った
-ディレクトリは無害だがノイズなので、手動で削除して構わない：
+これは、前のインストールが書き込みの途中で止まったことを、pip が知らせています（たいていは上のファイルロックが原因です）。
+残ったフォルダは、名前が `~` で始まります。害はありませんが、警告が出続けます。手で消してください。
 
 ```bash
 # Windows
 rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycore_mcp_lite-1.5.0.dist-info"
 ```
 
-（Python のインストール先に応じてパスを調整）
+（パスは、自分の Python のインストールに合わせてください。）
+
+### `# Recalled Memory Context` の塊に、検索が使えないと出る
+
+塊は、いつも記憶の状態を表示します。
+`the memory server is still starting` は、最初の起動でモデルをダウンロードしている間に出ます。待ってから、次のメッセージを送ってください。
+ほかの理由のときは、原因が書かれています（`see <server.log path>`、ポートを使うほかの N3MC のサーバー、Redis に届かない、など）。
+`> ⚠️ N3MC notice:` の行は、何をすればよいかを知らせます。たとえば `docker start redis-stack` です。
 
 ## ライセンス
 
-Apache License 2.0 — [LICENSE](./LICENSE) を参照。
+Apache License 2.0 です。[LICENSE](./LICENSE) を見てください。
+一部は N3MC-Free（Apache License 2.0、同じ作者）から作られています。
+[NOTICE](./NOTICE) と [MODIFICATIONS.md](./MODIFICATIONS.md) を見てください。

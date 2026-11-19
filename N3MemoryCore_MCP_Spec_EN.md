@@ -1223,7 +1223,7 @@ All on `http://127.0.0.1:<server_port>`. Every endpoint returns 403 when the `Ho
 
 ### 4.6 MCP Thin Client (v2.0.0)
 
-Everything in this section is new in v2.0.0. Its mechanics are those of the MCP entry of N3MC MCP Pro v3.0.0 §4.6; its tools, outputs and `isError` behaviour are Lite's own (§4.3, §4.4).
+Everything in this section is new in v2.0.0. Its mechanics are those of the MCP entry of N3MC MCP Pro v1.0.0 §4.6; its tools, outputs and `isError` behaviour are Lite's own (§4.3, §4.4).
 
 | Item | Value |
 |---|---|
