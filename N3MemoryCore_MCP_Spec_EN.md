@@ -1,11 +1,13 @@
-# N3MemoryCore MCP v1.9.1 [Volatile Memory over MCP]
+# N3MemoryCore MCP-Lite v2.0.0 [Volatile Memory — hooks for Claude Code, MCP for other apps]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build** uses SQLite + sqlite-vec to store memories permanently.
 >
-> **Who is this for?** Users of any MCP-compatible LLM client (Claude Desktop, Claude Code, and others) who want searchable, short-lived memory shared across sessions within a 7-day window.
+> **What it is made of (v2.0.0)**: MCP-Lite = N3MC-Free + MCP, with Redis as the database. Concretely: the search and save rules of Lite v1.12.2 (this document, §3), plus Free's hooks, resident server and CLI (§3.15, §12, §13), plus a thin MCP entry for applications without hooks (§4.6). Free and Lite keep separate search and save rules.
 >
-> **Transport**: Model Context Protocol over stdio (JSON-RPC). Tested on Windows 11 and Ubuntu with Python 3.12 and Redis Stack 7.x.
+> **Who is this for?** Claude Code users (through **hooks** — every message and reply is saved and searched automatically) and users of other MCP-compatible applications such as the Claude desktop app (through **MCP**), who want searchable, short-lived memory shared across sessions within a 7-day window. (v2.0.0)
+>
+> **Transport**: Claude Code: hooks and a CLI that talk to a resident server on `127.0.0.1` over HTTP. Other applications: Model Context Protocol over stdio (JSON-RPC) to a thin MCP entry, which forwards to the same resident server (v2.0.0). Tested on Windows 11 and Ubuntu with Python 3.12 and Redis Stack 7.x. macOS is not a target.
 
 ## ⚠️ Disclaimer & Distribution Terms
 
@@ -20,7 +22,7 @@ By using this software, you agree to the terms above.
 
 - **License**: Apache License 2.0. See the `LICENSE` file for details.
 
-> **Removal (Uninstall)**: `pip uninstall n3memorycore-mcp-lite` removes the package. Stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly. Delete `${N3MC_DATA_DIR}` (or the platform default data dir) to remove `config.json`. Also remove the `n3mc-workingmemory` entry from your MCP client's config file.
+> **Removal (Uninstall)**: Ask the AI "Please remove N3MC Lite" so that the hook entries are removed too, or do it yourself: (1) plugin users: `/plugin uninstall n3mc-workingmemory@neuralnexusnote`; pip users: remove the two entries of `~/.claude/settings.json` whose command runs `n3mc-lite-hook` / `n3mc-lite-stop-hook` (v2.0.0); (2) end the resident server process (its command line contains `n3mc_mcp.cli` and `--run-server`), or sign out once (v2.0.0); (3) `pip uninstall n3memorycore-mcp-lite` removes the package; (4) stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly; (5) delete `${N3MC_DATA_DIR}` (default `~/.n3mc-workingmemory/`) to remove `config.json`, `audit.log` and the other files of §7; (6) remove the `n3mc-workingmemory` entry from the Claude desktop app's config file. `.claude/rules/n3mc-lite-behavior.md` in your project folders can be deleted by hand.
 >
 > **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, the **Pro build** offers persistent storage.
 
@@ -36,7 +38,7 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | ---------------------- | ----------------------------------------- | -------------------------------------- |
 | Storage engine         | Redis Stack (RediSearch module)           | SQLite + sqlite-vec (local file)       |
 | Durability             | **7 d TTL per entry**, ephemeral         | Permanent, disk-persistent             |
-| Disk footprint         | Only `config.json` (< 1 KB)               | `n3memory.db` grows with history       |
+| Disk footprint         | `config.json` (< 1 KB); since v2.0.0 also the hook's `audit.log` (raw prompts and replies, rotated at 50 MB, up to ~100 MB) and small process files (§7) | `n3memory.db` grows with history       |
 | External dependency    | User-run Redis Stack container            | None (self-contained)                  |
 | `time_decay` relevance | Meaningful (3-day half-life; fresh=1.0, 7d≈0.20) | Meaningful (90-day half-life) |
 | Re-indexing / repair   | `FT.CREATE` is idempotent; no migrations  | Schema + model migration markers       |
@@ -48,8 +50,48 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 - No write ever creates a key without a TTL. A write to a record that already exists (`access_count`, a re-embedded vector, a guard reset) happens only while the record still exists, checked and written in one atomic step (v1.7.3, §3.3).
 - Expiration is delegated to Redis; no background cleanup job runs.
 - Restarting the Redis container with its volume removed wipes all memory immediately.
+- (v2.0.0) The contract covers Redis. The hook's `audit.log` (§7, §12) is a separate append-only file of the raw hook input with no TTL; it is the last-resort copy for a message that could not reach Redis, not a memory: nothing reads it back into search. **Decided 2026-11-19: `audit.log` is kept as in Free** (rotated at 50 MB, at most about 100 MB), although it outlives the 7-day window.
 
 **No cross-session guarantee beyond 7 d.** Unlike the Pro build, the Lite spec deliberately forbids any "persistence hack" — do not add RDB snapshots, AOF rewrite, or external dumps to circumvent the TTL. If durability is needed, use the Pro build.
+
+---
+
+## What changed in v2.0.0
+
+v2.0.0 is a MAJOR version (Semantic Versioning): the way Lite connects to Claude Code changed. Up to v1.12.2 (whose specification was titled v1.9.1) Lite was an MCP server only; the model decided what to save. From v2.0.0 Lite is "N3MC-Free + MCP, with Redis as the database".
+
+**Shape**
+
+```
+Claude Code ──hooks / CLI (HTTP)─────────────────────────┐
+                                                         ├─▶ resident server (127.0.0.1:18524, model loaded once) ─▶ Redis Stack
+Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
+                                   (thin client, no model)
+```
+
+**Which application uses what**
+
+| Application | Connects through | Registered by |
+|---|---|---|
+| Claude Code | **the hooks only** (`UserPromptSubmit`, `Stop`) and the CLI `n3mc-lite` (§12, §13) | the plugin, or `n3mc-lite --init` |
+| Claude desktop app and other applications without hooks | **MCP only** (the thin client `n3mc-workingmemory`, §4.6) | the user, in the application's configuration file (§8) |
+
+- **Claude Code no longer uses MCP.** The plugin registers the hooks and no longer registers the MCP server in Claude Code; `n3mc-lite --init` never registers it either. Do not register the MCP server in Claude Code.
+- Both paths reach **the same resident server and the same Redis**: what is said in Claude Code is found from the desktop app, and what the desktop app saves is found in Claude Code.
+
+**What existing users see after the update**
+
+| Before (v1.12.2) | After (v2.0.0) |
+|---|---|
+| Claude Code showed the seven `mcp__…n3mc-workingmemory__*` tools | **Claude Code no longer shows the MCP tools.** The plugin does not register the MCP server any more |
+| Only what the model chose to pass to `save_memory` was saved | **Every non-empty message and reply is saved by the hooks** (fenced code blocks as `[code omitted]`), as `[user]` / `[claude]` records (§3.16) |
+| The model called `search_memory` at the start of a turn | The `UserPromptSubmit` hook searches with every message and puts the result into Claude's context under `# Recalled Memory Context` (§12) |
+| Search, list, recall and delete were MCP tools | In Claude Code the CLI gives the same: `n3mc-lite --search`, `--list`, `--recall-thread`, `--delete`, `--delete-session`, `--buffer`, `--repair` (§13). The text they print is the tool's text |
+| Each application started its own MCP server and loaded the model (~440 MB) | One resident server loads the model once (§3.15); the MCP entry is a thin client that never loads it (§4.6) |
+| No process ran between sessions | The resident server keeps running in the background after it was started |
+| pip users: register the MCP server | pip users: run `n3mc-lite --init` once to register the hooks (§12). An old `n3mc-workingmemory` registration in Claude Code is no longer used; setup removes it (§8) |
+
+**What did not change**: the PyPI name `n3memorycore-mcp-lite`, the Python package `n3mc_mcp`, the MCP command and server name `n3mc-workingmemory` (alias `n3mc-mcp-lite`), the seven tools with the same names, arguments and output texts, the Redis layout and settings (`redis_url`, `N3MC_REDIS_URL`), the 7-day TTL, the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the plugin name `n3mc-workingmemory`, and every search and save rule of §3. Records saved by v1.12.2 stay readable (same index, same fields).
 
 ---
 
@@ -60,9 +102,10 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 | Item                          | Requirement                                                              |
 | :---------------------------- | :----------------------------------------------------------------------- |
 | Python                        | 3.10 or higher                                                           |
-| MCP-compatible client         | Claude Desktop, Claude Code, or any other MCP client                     |
+| Client                        | Claude Code (hooks, v2.0.0), and/or the Claude desktop app or any other MCP client (MCP) |
 | Redis Stack                   | Running on `localhost:6379` (or any URL set via `N3MC_REDIS_URL`)        |
-| pip packages (auto-installed) | `mcp` (**`>=1.0.0,<2.0.0`**) `redis` (`<8.0.0`) `sentence-transformers` `uuid-utils` `platformdirs` `numpy` |
+| pip packages (auto-installed) | `mcp` (**`>=1.0.0,<2.0.0`**) `redis` (`<8.0.0`) `sentence-transformers` `uuid-utils` `platformdirs` `numpy`, and since v2.0.0 `fastapi` `uvicorn` `pydantic` `psutil` (the resident server and its process checks, §3.15) |
+| OS                            | Windows 11 or Linux. macOS is not a target                               |
 
 ### Quick Start
 
@@ -104,9 +147,9 @@ Re-running the `docker run` command after the container exists fails with `Confl
 #### Method A: Generate from the spec (primary, recommended)
 
 1. **Start Redis Stack** (above).
-2. **Hand the spec to an AI and ask it to implement**: open the AI in an **empty folder** (for example `~/n3mcmcp-lite`) with only this spec in it — the AI first checks the folder, Python and Redis ([§1](#1-vision), "Setup checks") and stops with instructions if something is missing. Then give `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`) to Claude and ask "implement n3mcmcp-lite per this spec." The AI generates the package layout, RediSearch index, MCP tool registration, and stdio launch. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
-3. **Install and register (done by the AI)**: the AI runs `pip install -e .` in the project root, registers the server in Claude Code (and Claude Desktop, if present) with this PC's absolute path, and checks that it starts ([§8 "Automatic registration after code generation"](#automatic-registration-after-code-generation-method-a--required)). You do not edit any config file.
-4. **Restart the client.** The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
+2. **Hand the spec to an AI and ask it to implement**: open Claude Code in an **empty folder** (for example `~/n3mcmcp-lite`) with only this spec in it — the AI first checks the folder, Python and Redis ([§1](#1-vision), "Setup checks") and stops with instructions if something is missing. Then give `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`) to Claude and ask "implement n3mcmcp-lite per this spec." The AI generates the package layout, RediSearch index, the resident server, the hooks, the CLI and the MCP thin client. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
+3. **Install and register (done by the AI)**: the AI runs `pip install -e .` in the project root, registers the **hooks** in Claude Code with `n3mc-lite --init` (v2.0.0), registers the MCP entry in the Claude desktop app if it is installed, and checks that everything starts ([§8 "Automatic registration after code generation"](#automatic-registration-after-code-generation-method-a--required)). You do not edit any config file.
+4. **Restart the client.** The first memory search after the restart may take 30–60 seconds as the ~440 MB embedding model is downloaded and loaded by the resident server.
 
 #### Method B: Install the package (bonus)
 
@@ -118,21 +161,23 @@ If you just want to run it quickly from the published package:
      ```bash
      pip install n3memorycore-mcp-lite
      ```
-   - **uvx** (zero-install, isolated env — requires [`uv`](https://docs.astral.sh/uv/)):
+   - **uvx** (zero-install, isolated env — requires [`uv`](https://docs.astral.sh/uv/)), for the Claude desktop app:
      ```bash
-     uvx --from n3memorycore-mcp-lite n3mc-workingmemory
+     uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-workingmemory
      ```
-   - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin configures `uvx` launch for you, but `uv` must still be on PATH):
+   - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin runs the hooks through `uvx` for you, but `uv` must still be on PATH):
      ```
      /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
      /plugin install n3mc-workingmemory@neuralnexusnote
      ```
-3. **Register the server** in your MCP client's config (see [§8](#8-mcp-client-configuration)). Skip this step when installing via the plugin marketplace — the plugin registers the server automatically.
-4. **Restart the client.** The first tool call may take 30–60 seconds as the ~400 MB embedding model is downloaded and loaded.
+3. **Connect the applications** (v2.0.0):
+   - **Claude Code**: plugin users do nothing — the plugin registers the hooks. pip users run `n3mc-lite --init` once (§12). Do not register the MCP server in Claude Code.
+   - **Claude desktop app** (and other MCP clients): register the MCP entry in the application's config (see [§8](#8-client-configuration)).
+4. **Restart the client.** The first memory search may take 30–60 seconds as the ~440 MB embedding model is downloaded and loaded by the resident server.
 
 ### Data Backup
 
-Not applicable. See the [Lite: Volatile Memory](#lite-volatile-memory) section — the build is explicitly ephemeral. `config.json` (containing `owner_id` / `local_id` UUIDs) is the only on-disk artifact and can be copied if the user wants to keep the same owner identity across re-installs.
+Not applicable. See the [Lite: Volatile Memory](#lite-volatile-memory) section — the build is explicitly ephemeral. `config.json` (containing `owner_id` / `local_id` UUIDs) is the only file that matters for identity and can be copied if the user wants to keep the same owner identity across re-installs. Since v2.0.0 the data folder also holds `audit.log` (the raw hook input, §12) and process files (§7); they are not memories and need no backup.
 
 ---
 
@@ -142,10 +187,12 @@ Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector +
 
 The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; the **Pro build** swaps the storage layer from Redis to SQLite + sqlite-vec while preserving the MCP surface.
 
+**(v2.0.0) Hooks for Claude Code.** Behavioral instructions cannot make the model save (§11). For Claude Code, which has hooks, v2.0.0 adds Free's hooks: the `UserPromptSubmit` hook saves the user's message and searches with it, the `Stop` hook saves the reply, so every exchange is saved and every message gets the matching memories without any tool call. The MCP instructions stay for applications without hooks. The search and save rules are Lite's own (§3) in both paths; only the way they are called differs.
+
 > **⚠️ Setup checks (Method A — do these first, in this order, before writing any file)**: checks 1–3 stop the setup when they fail; check 4 fixes the problem itself. These checks exist because a setup on a second PC (2026-11-16) started in a folder that already held a copy of an earlier setup from another PC, with Docker stopped, only Python 3.15 installed and `.mcp.json` pointing at the other PC's Python; the implementing session could neither build nor start the server. Stop at the first of checks 1–3 that fails and show the user what to do.
 
-> **1. Install folder check**: Method A writes the code into the folder the AI is open in (the current working directory): `pyproject.toml`, `README.md`, `tests/`, `n3mc_mcp/` and the other files of §2. That folder stays in use after setup: with `pip install -e .` the MCP client runs the code from it, so deleting or moving it later stops the server.
-> 1. Show the user the absolute path of the current working directory and this message: "N3MC Lite will be installed in this folder: <absolute path>. The code will stay here; deleting or moving this folder later stops the memory server. Continue? (yes/no)". **Wait for the user's answer.** Continue only on a clear yes.
+> **1. Install folder check**: Method A writes the code into the folder the AI is open in (the current working directory): `pyproject.toml`, `README.md`, `tests/`, `n3mc_mcp/` and the other files of §2. That folder stays in use after setup: with `pip install -e .` the hooks, the resident server and the MCP entry run the code from it, so deleting or moving it later stops the memory.
+> 1. Show the user the absolute path of the current working directory and this message: "N3MC Lite will be installed in this folder: <absolute path>. The code will stay here; deleting or moving this folder later stops the memory hooks and the memory server. Continue? (yes/no)". **Wait for the user's answer.** Continue only on a clear yes.
 > 2. Before asking, look at the folder. If it contains anything other than this specification file (`N3MemoryCore_MCP_Spec_EN.md` / `_JP.md`), `.claude/`, `.git/` and the files of an earlier setup of this product (`n3mc_mcp/`, `tests/`, `.mcp.json`, `pyproject.toml` whose `name` is `n3memorycore-mcp-lite`), **do not ask: abort** and display: "This folder already contains other files (for example a project of yours). Setting up here could overwrite them. Create an empty folder such as `~/n3mcmcp-lite`, open the AI there, and run this setup again." Never overwrite or mix into an existing project.
 > 3. If the folder holds an earlier setup, say so in the message (with the version in its `pyproject.toml`) and ask whether to regenerate the code from this specification or keep it. An earlier setup may have been copied from another PC: any absolute path in `.mcp.json` or `.claude/settings*.json` that does not exist on this PC must be replaced with this PC's path when the server is registered (§8); never keep a path that does not exist.
 > 4. Do not install into the home folder itself (`~`) or a system folder.
@@ -174,7 +221,8 @@ The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Market
 > **⚠️ First-run download**: `sentence-transformers` downloads the `multilingual-e5-base` model (~440 MB) on first tool use. The server will appear unresponsive during this time — this is expected. Subsequent starts complete in seconds once cached.
 
 > **Important: Character Limits (Design Constraints)**
-> - Auto-save per entry: **50–200 characters recommended** (one fact per entry).
+> - Hook saves (Claude Code, v2.0.0): every non-empty message and reply is saved whole, with no length or skip-pattern filter; long ones take the parent-document path below (§3.16).
+> - Auto-save per entry (MCP `save_memory`): **50–200 characters recommended** (one fact per entry).
 > - Search query: **2,000 characters** (configurable via `search_query_max_chars`).
 > - Vector search: Only the first **~2,000 characters** of any record are semantically searchable (embedding model limit: 512 tokens). Beyond this, content is stored and BM25-searchable but invisible to vector similarity.
 > - **Large text handling (two modes)**:
@@ -187,27 +235,65 @@ The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Market
 
 ```
 n3memorycore-mcp-lite/
-├── pyproject.toml                  # Package metadata, entry point 'n3mc-workingmemory' (+ deprecated alias 'n3mc-mcp-lite')
+├── pyproject.toml                  # Package metadata and the five console scripts (below)
+├── README.md / README_JP.md        # User guide (generated from this spec)
+├── LICENSE / NOTICE / CHANGELOG.md / PHILOSOPHY.md
+├── N3MemoryCore_MCP_Spec_EN.md / _JP.md   # this specification
 ├── n3mc_mcp/                       # Python package
-│   ├── __init__.py                 # Version marker
-│   ├── __main__.py                 # Entry point: python -m n3mc_mcp
-│   ├── server.py                   # MCP server definition + 7 tools (6 base + recall_thread §4.3.1)
-│   ├── instructions.py             # Behavioral instructions delivered at initialize
-│   ├── database.py                 # Redis layer: index, CRUD, TTL, dedup
+│   ├── __init__.py                 # Version marker (__version__ = "2.0.0")
+│   ├── __main__.py                 # Entry point: python -m n3mc_mcp (= the MCP thin client, run())
+│   ├── server.py                   # (v2.0.0) MCP thin client: stdio, tools/list, forwards tools/call to the resident server (§4.6); run()
+│   ├── tooldefs.py                 # (v2.0.0) The seven Tool definitions of §5 (3), shared by the thin client and the resident server
+│   ├── tools.py                    # (v2.0.0) The tool handlers, nudges, _render_search, notices (§4.3, §5 (2)–(4)); run inside the resident server
+│   ├── instructions.py             # Behavioral instructions delivered at initialize (§5 (1))
+│   ├── app.py                      # (v2.0.0) Resident FastAPI server: /health /shutdown /buffer /search /repair /tools/{name} (§4.5)
+│   ├── cli.py                      # (v2.0.0) CLI `n3mc-lite`: --init --stop --hook-submit --save-claude-turn --run-server --search --buffer --list --recall-thread --delete --delete-session --repair; ensure_server, _start_server, _notify (§3.15, §12, §13)
+│   ├── lite_hook.py                # (v2.0.0) UserPromptSubmit hook entry: audit.log → `cli --hook-submit`
+│   ├── lite_stop_hook.py           # (v2.0.0) Stop hook entry: audit.log → `cli --save-claude-turn` → `cli --stop`
+│   ├── context.py                  # (v2.0.0) `# Recalled Memory Context` block, context_size, size limit (§3.17)
+│   ├── database.py                 # Redis layer: index, CRUD, TTL, dedup (+ role prefixes §3.16, direct save without vectors)
 │   ├── processor.py                # Embedding, ranking, CJK tokenization, reranker
 │   ├── config.py                   # config.json load/save + UUID generation
-│   └── paths.py                    # config location (~/.n3mc-workingmemory/) + legacy platformdirs path for migration
-├── tests/
-│   ├── conftest.py                 # Skips if Redis Stack not reachable
-│   ├── test_database.py
-│   ├── test_processor.py
-│   └── test_server.py
+│   └── paths.py                    # data folder (~/.n3mc-workingmemory/) and its files (§7) + legacy platformdirs path for migration
+├── plugins/n3mc-workingmemory/     # Claude Code plugin (§8, §12)
+│   ├── .claude-plugin/plugin.json  # (v2.0.0) no "mcpServers" any more
+│   └── hooks/
+│       ├── hooks.json              # (v2.0.0) SessionStart + UserPromptSubmit + Stop
+│       └── install_permissions.py  # SessionStart: permission rules for the CLI commands (§8)
+├── .claude-plugin/marketplace.json # Marketplace entry; metadata.version = package version
+├── tests/                          # pytest suite (§9)
+│   ├── conftest.py
+│   ├── test_database.py  test_processor.py  test_server.py  test_regressions.py
+│   └── test_hooks.py  test_api.py  test_cli.py  test_mcp_client.py  test_context_limit.py  test_coexistence.py   # (v2.0.0)
 └── examples/
-    ├── claude_desktop_config.json
-    └── claude_code_mcp.json
+    └── claude_desktop_config.json  # (v2.0.0) the desktop registration of §8 (claude_code_mcp.json is removed: Claude Code uses hooks)
 ```
 
 `config.json` lives in **`~/.n3mc-workingmemory/`** (see [§7](#7-data-location)). No database file exists on disk — memory state lives entirely in Redis.
+
+**Console scripts (v2.0.0)**
+
+| Script | Maps to | Purpose |
+|---|---|---|
+| `n3mc-workingmemory` | `n3mc_mcp.__main__:run` | MCP thin client (the command the Claude desktop app starts) |
+| `n3mc-mcp-lite` | `n3mc_mcp.__main__:run` | Deprecated alias of `n3mc-workingmemory` (pre-1.5 configs) |
+| `n3mc-lite` | `n3mc_mcp.cli:main` | CLI for Claude Code and humans (§13) |
+| `n3mc-lite-hook` | `n3mc_mcp.lite_hook:main` | UserPromptSubmit hook (§12) |
+| `n3mc-lite-stop-hook` | `n3mc_mcp.lite_stop_hook:main` | Stop hook (§12) |
+
+The resident server is started as `python -m n3mc_mcp.cli --run-server` (§3.15); `python -m n3mc_mcp.cli` is also the command form the rules file gives Claude (§12).
+
+**`pyproject.toml` (v2.0.0)**: keep the current file (hatchling build backend, metadata, keywords, classifiers, `[tool.hatch…]` sections) and change only:
+
+- `version = "2.0.0"`.
+- `dependencies`: the current six (`mcp>=1.0.0,<2.0.0`, `redis>=5.0.0,<8.0.0`, `sentence-transformers>=2.7.0`, `uuid-utils>=0.6.0`, `platformdirs>=4.0.0`, `numpy>=1.26.0`) plus `fastapi>=0.110`, `uvicorn>=0.27`, `pydantic>=2.0`, `psutil>=5.9` (Free's lower bounds).
+- `[project.optional-dependencies] dev`: add `httpx>=0.27` (FastAPI `TestClient`).
+- `[project.scripts]`: the five scripts of the table above.
+- The classifier `Operating System :: OS Independent` becomes `Operating System :: Microsoft :: Windows` and `Operating System :: POSIX :: Linux` (macOS is not a target).
+
+`.claude-plugin/marketplace.json` `metadata.version` and `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` `version` are the package version (`2.0.0`). **The `uvx` commands are pinned to the same version (decided 2026-11-19)**: every `uvx --from n3memorycore-mcp-lite==<version>` in this document (the plugin's hooks, the permission rules, the rules file's `{cli}`, the desktop registration) names the package version; a release changes all of them together with the two `version` fields. Without the pin, the plugin and a pip installation could run different versions, whose servers have different `code_version`s and replace each other (§4.6).
+
+**Files kept as they are (not generated from this specification)**: `SECURITY.md`, `CONTRIBUTING.md`, `docs/`, `.github/` (issue and PR templates, `workflows/test.yml`, `workflows/pypi-publish.yml`), `server.json` (MCP registry entry), `.gitignore`, the evaluation scripts `tests/eval_*.py`, and `tests/test_cross_session.py` (decided 2026-11-19: kept). Regenerating the code must not delete or rewrite them. (v2.0.0: until now this list existed only in the repository.) When the CI matrix in `.github/workflows/test.yml` is edited by hand, it lists Windows and Linux only.
 
 ---
 
@@ -223,23 +309,23 @@ n3memorycore-mcp-lite/
 > |---|------|---------|-----|--------|
 > | 1 | redis-py 8.0 defaults to **RESP3** | `FT.SEARCH` always returns 0 results | Handle the RESP3 dict response (current impl) + pin `redis<8.0.0`, or `from_url(..., protocol=2)` | [§3.3](#33-redis-connection--ttl) |
 > | 2 | BM25 score not fetched | Keyword search disabled (degrades to vector-only) | `.with_scores().scorer("BM25")` | [§3.6](#36-ranking-formula) |
-> | 3 | NFKC normalization not applied | Full-/half-width dupes & search drift | NFKC on embedding, dedup hash and the BM25 text (not on stored `content`) | [§3.7](#37-tokenization--punctuation) |
+> | 3 | NFKC normalization not applied | Full-/half-width dupes & search drift | NFKC on embedding, dedup hash and the BM25 text (not on stored `content`) | [§3.7](#37-text-tokenization--punctuation-handling) |
 > | 4 | Model load **blocks** startup | MCP connection timeout (~40s) | Import the library before stdio; construct the model in the background after stdio + lock (importing in the background deadlocks on Windows) | [§3.9](#39-startup-sequence--self-recovery) |
-> | 5 | `doc.id` is the **full key** (`mem:<uuid>`) | `mem:mem:...` ghost keys (TTL-less orphans) / `[doc×0]` / delete fails | Normalize to bare UUID with `_doc_bare_id()` | [§3.12](#312-tag-query-uuid-constraint--python-side-filtering) |
-> | 6 | `SCAN mem:*` also matches `mem:sha:*` | `HGET` fails with `WRONGTYPE` | Exclude by prefix or catch the exception | [§3.12](#312-tag-query-uuid-constraint--python-side-filtering) |
+> | 5 | `doc.id` is the **full key** (`mem:<uuid>`) | `mem:mem:...` ghost keys (TTL-less orphans) / `[doc×0]` / delete fails | Normalize to bare UUID with `_doc_bare_id()` | [§3.12](#312-uuid-tag-query-constraint--python-side-owner-filtering) |
+> | 6 | `SCAN mem:*` also matches `mem:sha:*` | `HGET` fails with `WRONGTYPE` | Exclude by prefix or catch the exception | [§3.12](#312-uuid-tag-query-constraint--python-side-owner-filtering) |
 > | 7 | `serverInfo.version` / `instructions` unset | Empty version / instructions not advertised | `Server(name, version=, instructions=)` | [§4.2](#42-initialize-response) |
-> | 8 | No `turn_id` in `search_memory` output | `recall_thread` can't be called (workflow breaks) | Add `turn_id` to RETURN and to the markdown | [§4.3.1](#431-retrieval-extensions) |
-> | 9 | Running pytest during the Evidence Report | `FLUSHDB` wipes live data | Stop pytest during §10 / use a separate Redis | [§9](#9-tests-pytest) |
+> | 8 | No `turn_id` in `search_memory` output | `recall_thread` can't be called (workflow breaks) | Add `turn_id` to RETURN and to the markdown | [§4.3.1](#431-retrieval-extension-tools) |
+> | 9 | Running pytest during the Evidence Report | `FLUSHDB` wipes live data | Stop pytest during §10 / use a separate Redis | [§9](#9-testing-pytest) |
 > | 10 | Measuring "0.5s steady state" over the MCP round-trip | Looks like 5–10s, false negative | 0.5s is a pure server-side target | [§10](#10-self-evaluation-evidence-report) |
 > | 11 | Tests pointed at the live Redis | `FLUSHDB` wipes the user's working memory | Tests run only against `N3MC_REDIS_TEST_URL`; there is no default | [§9](#9-testing-pytest) |
 > | 12 | Control characters / CJK punctuation left in the BM25 query | `Syntax error` (BM25 silently skipped) / 0 BM25 hits for `「記憶装置」は？` | Control chars → space; strip CJK and full-width punctuation too | [§3.7](#37-text-tokenization--punctuation-handling) |
 > | 13 | Redis checked only at startup / connection errors swallowed | After `docker start redis-stack` the server still says Redis is down; a Redis that stops later yields `_No memories found._` | `ensure_connected()` (PING / reconnect) before every tool; re-raise `ConnectionError` / `TimeoutError` | [§3.9](#39-startup-sequence--self-recovery) |
 > | 14 | Config in `%LOCALAPPDATA%` | The Store (MSIX) Claude desktop app redirects its MCP servers' `%LOCALAPPDATA%` → two `config.json`, two `owner_id`s; memories saved from the desktop app are invisible to terminal `claude` and vice versa | Keep the config in `~/.n3mc-workingmemory/` (not redirected); migrate once | [§7](#7-data-location) |
-> | 15 | Plugin auto-approve rules use the plain server name / hook failure only exits non-zero | Plugin users are prompted on every memory call; with no Python the only sign is `SessionStart hook error … python: command not found` | Allow `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` (+ `mcp__n3mc-workingmemory__*`); Python-free fallback prints `systemMessage` JSON and exits 0 | [§8](#auto-approve-tool-calls-claude-code-only) |
+> | 15 | Plugin auto-approve rules use the plain server name / hook failure only exits non-zero | Plugin users are prompted on every memory call; with no Python the only sign is `SessionStart hook error … python: command not found` | Allow `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` (+ `mcp__n3mc-workingmemory__*`); Python-free fallback prints `systemMessage` JSON and exits 0 | [§8](#auto-approve-claude-code-only) |
 > | 16 | `mcp` without an upper bound | A fresh install (`uvx`, `pip`, plugin) gets `mcp` 2.x and the server dies on import: `AttributeError: 'Server' object has no attribute 'list_tools'` — `/mcp` shows only `Connection closed` | Pin `mcp>=1.0.0,<2.0.0` in `pyproject.toml` until the server is ported to the 2.x API | [Setup](#prerequisites) |
 > | 17 | Model download retried on every call / degraded search not reported | Offline first run: each `save_memory` ~24 s, each `search_memory` ~12 s; keyword-only results look normal | Retry at most once a minute; notice on every degraded `search_memory`, `detail` on `save_memory` | [§3.9](#39-startup-sequence--self-recovery) |
 > | 18 | Only `strip()` decides "empty" | `\x00`, a lone `U+200B` or `U+FEFF` is saved as a memory that shows as nothing | Reject content with no visible character (`has_visible_text`); store everything else verbatim | [§3.13](#313-encoding-safety) |
-> | 19 | `min_score` / relative cut judged on the final score | Records older than ~2 days and every record saved before the MCP server restarted (another `session_id`) fall under 0.6 × the top score and disappear | Judge both floors on `filter_score` (no `time_decay`, no `b_session`); order by the final score | [§3.14](#314-search-result-shaping-v170) |
+> | 19 | `min_score` / relative cut judged on the final score | Records older than ~2 days and every record saved before the MCP server restarted (another `session_id`) fall under 0.6 × the top score and disappear | Judge both floors on `filter_score` (no `time_decay`, no `b_session`); order by the final score | [§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172) |
 > | 20 | Only `socket_connect_timeout` set | A Redis that accepts the connection but never answers (`docker pause`, sleep/resume) blocks `PING` forever; the event loop and every later tool call hang | `socket_timeout=5`; a read timeout is a lost connection | [§3.9](#39-startup-sequence--self-recovery) |
 > | 21 | `config.json` created by every starting process | Two servers starting together get different `owner_id`s; one of them saves records nobody sees after the next start | Exclusive create, re-read if it exists; temp file + `os.replace` for every write | [§6](#6-configuration) |
 > | 22 | Parent document written before the chunks | A failure between the two writes leaves `doc:` + `docsha:` without chunks: unsearchable, and re-saving is rejected as `duplicate` for 7 days | Embed every chunk first, take the guard with `SET NX`, then write parent and chunks in one pipeline (release the guard on failure) | [§3.8](#38-duplicate-rejection-v170-exact-only) |
@@ -249,6 +335,12 @@ n3memorycore-mcp-lite/
 > | 26 | Tool calls wait for the model lock without limit | During the first-run download (minutes) every tool call blocks and may hit the client's tool timeout | Wait at most 20 s, then continue keyword-only with a notice | [§3.9](#39-startup-sequence--self-recovery) |
 > | 27 | TTL refresh skips the dedup guards; BM25 terms ANDed; unreadable `since` ignored | Frequently used records can be saved twice after 7 days; sentence-like queries get no keyword hits; `since="yesterday"` searches everything | Refresh guards with the record; join terms with OR; reject unreadable time bounds | [§3.3](#33-redis-connection--ttl), [§3.7](#37-text-tokenization--punctuation-handling), [§4.3.1](#431-retrieval-extension-tools) |
 > | 28 | "Does the key exist?" and the write sent as separate commands | A record deleted (`delete_memory` from another process) or expired between the check and the write comes back as a hash holding only `access_count` or `embedding`, **with no TTL** — it never expires and nothing deletes it; a guard reset after the record was deleted blocks saving the same content for 7 days | Check and write in **one Lua script** (`EXISTS` then `HINCRBY` / `HSET` / `SET … EX`) | [§3.3](#33-redis-connection--ttl) |
+> | 29 | (v2.0.0) The MCP entry imports the model or prints to stdout | Each application loads ~440 MB again; a stray `print()` corrupts the JSON-RPC stream | The thin client imports neither `sentence_transformers` nor `torch`; nothing but MCP messages on stdout | [§4.6](#46-mcp-thin-client-v200) |
+> | 30 | (v2.0.0) `urllib.request.urlopen` for `127.0.0.1` | With `HTTP_PROXY` set (company PCs) every request goes to the proxy; the server looks down and every hook waits | Open requests with `build_opener(ProxyHandler({}))` | [§3.15](#315-resident-server-v200) |
+> | 31 | (v2.0.0) Endpoints written as `async def` | A long `/repair` or search blocks `/health`; the CLI decides there is no server and starts another | Plain `def` for every endpoint that touches Redis or the model | [§3.15](#315-resident-server-v200) |
+> | 32 | (v2.0.0) Hooks of the plugin and of `--init` both registered | Two searches injected per message; the `[user]` and `[claude]` records of one exchange get different `turn_id`s | `--init` registers nothing while the plugin is enabled; the plugin's SessionStart hook reports `--init` hooks | [§14](#14-coexistence-with-other-n3mc-products-v200) |
+> | 33 | (v2.0.0) Hook output longer than 10,000 characters | Claude Code moves it to a file and Claude sees a 2,000-character preview | `context_max_chars` (default 9,500) on the hook's and the MCP `search_memory`'s block | [§3.17](#317-context-size-limit-v200) |
+> | 34 | (v2.0.0) A hook that raises or exits non-zero when Redis or the server is down | Claude Code shows a hook error on every message; the prompt is lost | `audit.log` first; direct save without a vector; a notice; exit 0 | [§12](#12-claude-code-hooks-v200) |
 
 ### 3.1 ID Hierarchy
 
@@ -259,8 +351,8 @@ N3MemoryCore uses 5 ID fields to identify the origin and context of each record:
 | `id` (PK)    | Redis hash      | Per record (UUIDv7, time-ordered)  | **One record**       | Unique identifier for each memory — used for deletion and dedup                                    |
 | `owner_id`   | `config.json`   | First startup (UUIDv4)             | **Owner**            | Identifies whose data this is — stored as a TAG field and returned in results; filtering is done in Python (see §3.12) |
 | `local_id` (agent_id)   | `config.json`   | First startup (UUIDv4)             | **Agent / install**  | UUIDv4 identifier for the install. Stored for compatibility; not used in Lite ranking.            |
-| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which process wrote the record. Override per call via the `save_memory` / `search_memory` argument or the `N3MC_SESSION_ID` env var. **Lite applies the same `b_session` ranking as Pro** (match=1.0, mismatch=0.6 by default). Pinning a consistent `session_id` per project surfaces that project's memories above unrelated cross-project rows in the same Redis instance. Also serves as the filter key for `delete_memories_by_session`. |
-| `agent_name`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`).                                   |
+| `session_id` | In-memory       | Per server process startup (UUIDv4) | **Server process**   | Identifies which process wrote the record. Override per call via the `save_memory` / `search_memory` argument or the `N3MC_SESSION_ID` env var. **Lite applies the same `b_session` ranking as Pro** (match=1.0, mismatch=0.6 by default). Pinning a consistent `session_id` per project surfaces that project's memories above unrelated cross-project rows in the same Redis instance. Also serves as the filter key for `delete_memories_by_session`. **(v2.0.0)** "Server process" means the MCP entry process (the thin client resolves the default — argument → its `N3MC_SESSION_ID` → its own startup UUIDv4 — and always sends it, §4.6), so the meaning for MCP clients is unchanged. Hook records carry Claude Code's `session_id` from the hook input (§12). |
+| `agent_name`   | Redis hash      | Per `save_memory` call (free-form) | **Agent display**    | Human-readable label (e.g. `"claude-desktop"`, `"claude-code"`). **(v2.0.0)** Hook records: always `"claude-code"`. MCP: the `agent_name` argument, else `N3MC_AGENT_NAME`, else the client's `clientInfo.name`, else empty (§4.6). |
 
 ### 3.2 Embeddings
 
@@ -497,7 +589,7 @@ Set `lexical_rerank_enabled: false` in config to skip this pass (candidates are 
 
 `time_decay` and `b_session` decide **which records come first**, not whether a record is shown: a 3-day-old record or one saved before the server restarted (another `session_id`) still appears when it is as relevant as the top hit, just lower in the list. The rerank boost is added to both values.
 
-The v1.7.0 shaping steps that run around this formula (vector floor, newest version first, relative cut) are in [§3.14](#314-search-result-shaping-v170).
+The v1.7.0 shaping steps that run around this formula (vector floor, newest version first, relative cut) are in [§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172).
 
 ### 3.7 Text Tokenization & Punctuation Handling
 
@@ -581,11 +673,19 @@ If the parent-level check passes, a single `save_memory` call (v1.7.1):
 
 > **⚠️ Why (v1.7.1, Lite review LM1)**: v1.7.0 wrote the parent and `docsha:` in a first pipeline and computed the chunk embeddings and wrote the chunks afterwards. A failure in between (connection lost, embedding exception) left a parent and a guard without chunks: the document could not be found (search hits chunks only), and re-saving it was rejected as `duplicate` for 7 days (reproduced).
 
-> **⚠️ No near-duplicate (similarity) rejection (removed in v1.7.0)**: v1.6.x also rejected a new entry when an existing one had `cos_sim >= dedup_threshold` (0.95), for short entries and for whole documents. With `multilingual-e5` that threshold cannot tell "the same content again" from "an updated version" or "a different item with the same shape": a fact saved again with a new value ("the budget is 120" after "the budget is 100"), or a setting sheet re-made with a few values changed, scores ≥ 0.95 and **the new version was silently discarded** (`near_duplicate`) — the user's latest decision never reached memory. Only exact duplicates are rejected now. When both versions come back, `search_memory` puts the newest first and shows `saved=` times ([§3.14](#314-search-result-shaping-v170)). The `dedup_threshold` config key is ignored.
+> **⚠️ No near-duplicate (similarity) rejection (removed in v1.7.0)**: v1.6.x also rejected a new entry when an existing one had `cos_sim >= dedup_threshold` (0.95), for short entries and for whole documents. With `multilingual-e5` that threshold cannot tell "the same content again" from "an updated version" or "a different item with the same shape": a fact saved again with a new value ("the budget is 120" after "the budget is 100"), or a setting sheet re-made with a few values changed, scores ≥ 0.95 and **the new version was silently discarded** (`near_duplicate`) — the user's latest decision never reached memory. Only exact duplicates are rejected now. When both versions come back, `search_memory` puts the newest first and shows `saved=` times ([§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172)). The `dedup_threshold` config key is ignored.
 
 > **⚠️ One Redis = one installation (second review of 2026-11-17, L01)**: the guards `mem:sha:<sha1>` and `docsha:<sha1>` are made from the body alone — they do not contain `owner_id`. On a Redis used by one installation (the setup this document describes: one PC, a dedicated container, one `config.json`) this is the "exact duplicate" rule above. If two `owner_id`s share one Redis — several PCs or people pointing at the same Redis, or a `config.json` that was re-created with a new `owner_id` while the old records are still there — a body that one owner saved is answered `duplicate` for the other, and nothing is saved for the other owner until the guard expires with the record (`ttl_seconds`, 7 days by default). Nothing is deleted. The Lite build keeps this design; use one Redis per installation.
 
 ### 3.9 Startup Sequence & Self-Recovery
+
+> **(v2.0.0) Where these steps run.** Since v2.0.0 the Redis connection, the index and the embedding model live in the **resident server** (`python -m n3mc_mcp.cli --run-server`, §3.15), not in the MCP entry. Read this section with these substitutions:
+> - "the server" / "the MCP server" / "the process" = the resident server process. `_main()` = `run_server()` in `cli.py`.
+> - "before the stdio loop begins accepting requests" = before uvicorn starts listening. Steps 1–3 run there; step 4 (model) is started in a background thread by the FastAPI lifespan, so `/health` answers within seconds and a tool call that arrives during the load follows the 20-second rule below (keyword-only with the "still loading" notice).
+> - The library import of the "Split the load in two" note still runs synchronously before uvicorn starts (it is harmless there and keeps one code path); the model construction runs in the background thread.
+> - "the MCP client shows the server as connected" (§4.4): the thin client always answers `initialize` and `tools/list` itself (§4.6).
+> - "restart the MCP client" (to apply a setting): the resident server restarts by itself on the next hook, CLI or MCP call after `config.json` changed (`code_version`, §3.15).
+> - The MCP entry (thin client) runs none of these steps: it loads no model and never connects to Redis, except for the direct save of §4.6 "When the server is not available".
 
 The server's `_main()` runs these steps in order, **before** the stdio loop begins accepting requests:
 
@@ -729,6 +829,8 @@ Free build's defenses (`n3mc_hook.py` stream reconfigure + `core/processor.py`
 on Windows-Japanese hosts.
 
 **(1) stdio UTF-8 reconfigure** — at module import time of `n3mc_mcp.server`
+(v2.0.0: and at module top of `n3mc_mcp.cli`, `n3mc_mcp.lite_hook` and
+`n3mc_mcp.lite_stop_hook`, before the first `sys.stdin.read()` — Free's rule)
 (before any other import that might touch stdout/stderr), each of `sys.stdin`,
 `sys.stdout`, `sys.stderr` is switched to `encoding="utf-8"` if the stream
 implements `reconfigure()` (Python 3.7+). On Windows-Japanese hosts the default
@@ -748,7 +850,9 @@ for _stream_name in ("stdin", "stdout", "stderr"):
             pass
 ```
 
-**(2) Lone-surrogate sanitization** — every `save_memory.content`,
+**(2) Lone-surrogate sanitization** — (v2.0.0: also the whole hook JSON
+right after parsing, the previous reply read from the transcript, and the
+`--search` argument, as in Free §4.5) every `save_memory.content`,
 `save_memory.agent_name`, `save_memory.session_id`, `save_memory.turn_id`
 (these three since the final review of 2026-11-18, L-01; a value without
 surrogates is unchanged) and `search_memory.query` is passed through
@@ -911,6 +1015,118 @@ _If several versions of the same content appear, the one with the newest `saved`
 - `turn=` is omitted when the row has no `turn_id`; `[doc×N]` only for parent documents.
 - **Weak matches (v1.7.2)**: rows marked `_weak` are printed after every normal row, under `#### Possibly related (weak matches — may be unrelated)`, in the same `### …` form. The heading is printed only when there is at least one weak row.
 - **No normal rows but weak rows (v1.7.2)**: print `_No memories found._` (the text of an empty result), then the weak-matches heading and rows. The version sentence is not printed in this case. With neither normal nor weak rows, the output stays `_No memories found._`.
+- **(v2.0.0)** The same rendering is used inside the hook's `# Recalled Memory Context` block (§3.17, §12). Lite has **no** separate Q-A exchanges block (Free's `## Previous matching Q-A exchanges`): a hit is a record or a whole parent document, and the conversation around it is read with `recall_thread` / `--recall-thread`.
+
+### 3.15 Resident Server (v2.0.0)
+
+Everything in this section is new in v2.0.0 and is taken from N3MC-Free §3 "Resident FastAPI Server", with Lite's names. The server runs Lite's core — the `Database` of §3.3–§3.14, the embedding model of §3.2 / §3.9, and the tool handlers of §4.3 — and nothing else holds the model.
+
+**Why a resident server**: the hooks run as a new process on every message; loading the model there would cost 13–40 s per message (§3.9). Up to v1.12.2 each MCP client started its own server process and each loaded the model; one resident server loads it once for the hooks, the CLI and every MCP client.
+
+- **Port**: `server_port` in `config.json`, default **`18524`**. The other N3MC products use 18520 (Free), 18521 (Pro), 18522 (PostgreSQL edition) and 18523 (Ollama edition), so Lite can run on the same PC as any of them (§14).
+- **Bind address**: `bind_host` (default `127.0.0.1`). **Keep the default.** The server has no authentication; any other value exposes the memory to the network. If another value is configured, print a warning to stderr at startup.
+- **Start**: `python -m n3mc_mcp.cli --run-server` (`run_server()`), started by `ensure_server` (below) from the CLI commands that use the server, the hooks and the MCP thin client. The PID file is created with an exclusive create (`open(path, "x")`) so that two processes checking at the same time do not both start a server.
+- **Communication**: HTTP over TCP (`http://127.0.0.1:<server_port>`), JSON bodies, UTF-8. **Never through a proxy**: open every request with `urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=…)`, not `urllib.request.urlopen`. (Free F16: with `HTTP_PROXY` set and no `NO_PROXY` for `127.0.0.1`, every request went to the proxy and the server looked down.)
+- **Host header check**: every endpoint returns 403 unless the `Host` header is `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding from a web page could otherwise read the memory). The CLI and the thin client always send `Host: 127.0.0.1:<port>`; tests set the header explicitly (FastAPI's `TestClient` sends `testserver`).
+- **Endpoints do not block each other**: every endpoint that touches Redis or the model is a plain `def` (FastAPI runs it in its thread pool), so `/health` keeps answering during a long save or `/repair`. Consequences for Lite's core, which ran in one event loop up to v1.12.2: one `Database` per server process (redis-py's client and pool are thread-safe); `ensure_connected()` and the reconnect of §3.9 run under one `threading.Lock`; the notice list (`cfg["_notices"]` and the "already shown" set) is changed under a lock; `get_model()` keeps its double-checked lock (§3.9).
+- **Timeouts (client side)**: `/health` and `/shutdown` 5 s; `/buffer`, `/search`, `/repair` 30 s (Free); `/tools/<name>` 300 s (a `save_memory` of a long document embeds hundreds of chunks on the CPU, and an MCP client waits for the tool result anyway). After asking a server to stop, wait until its port is free for at most 15 s, polling every 0.3 s; a process that must be ended is `terminate()`d, waited for 5 s, then `kill()`ed. `/shutdown` answers first and ends the process 0.3 s later. uvicorn runs with `log_level='error'`.
+
+#### Server identity (`/health`)
+
+`GET /health` returns `{"status": "ok", "root": "<absolute path of the data folder>", "code_version": "<16 hex chars>", "pid": 12345}`.
+
+- `root`: the absolute data folder (`N3MC_DATA_DIR` or `~/.n3mc-workingmemory`), compared with `os.path.normcase(os.path.abspath(...))`.
+- `code_version`: the first 16 hex characters of a SHA-256 over the contents of `app.py`, `tools.py`, `tooldefs.py`, `instructions.py`, `context.py`, `database.py`, `processor.py`, `config.py`, `paths.py` and `cli.py`, followed by the contents of `config.json` (the key-sorted `json.dumps(..., sort_keys=True)` when it parses as a JSON object, otherwise the raw bytes; nothing when the file is missing). Whitespace or key order alone does not change it. **Editing `config.json` therefore restarts the server on the next call**, which is how a changed setting takes effect.
+- `pid`: the server's process id.
+
+#### Server check and replacement (`ensure_server`)
+
+`_health_decision(health)` returns one of `'ok'`, `'stale'`, `'foreign'`, `'legacy'`, `'none'`:
+
+| Response | Verdict | Action |
+|---|---|---|
+| Same `root`, same `code_version` | Healthy | Use it |
+| Same `root`, different `code_version` | Our own stale server | Stop it and start a new one |
+| Different `root` | Another folder's server | **Do not stop it. Do not use it.** See "When the port belongs to another folder's server" |
+| No `root` | Needs verification | Stop it only if psutil confirms it is our own server; otherwise treat it as another folder's server (`root` shown as `(unknown: the server did not report its folder)`) |
+| No response | No server | See "PID file handling" |
+
+- Run by: `--hook-submit`, `--save-claude-turn`, `--search`, `--buffer`, `--list`, `--recall-thread`, `--delete`, `--delete-session`, `--repair`, and the MCP thin client (§4.6). Not by `--init`, `--stop` or `--run-server`.
+- **How to stop (`_stop_stale_server`)**: `POST /shutdown` with `{"root": "<our data folder>"}`. Only a server that does not know `/shutdown` is terminated, after psutil verification. **Never stop a process by the number in the PID file** (the number may have been reused).
+- **psutil verification (`_is_own_server_process`)**: take the PID from `/health`'s `pid`, or from the process listening on the port (`psutil.net_connections`). It is "our own server" only if its command line contains both `n3mc_mcp.cli` and `--run-server`, and the data folder resolved from its `N3MC_DATA_DIR` environment variable (default `~/.n3mc-workingmemory`) equals ours. psutil missing, permission denied or anything not matching → "cannot verify": do not stop it; emit the notice `stale_server` ("Cannot stop the old N3MC Lite server. Another program may be using server_port <port>. Check server_port in config.json and restart manually."). If our own stale server cannot be stopped, keep using it (it serves the same Redis).
+- **PID file handling**: when `/health` does not answer and the process of the PID-file number is verified to be this folder's server (it is starting), keep the PID file and poll `/health` for up to 60 s (every 0.5 s). Still starting after 60 s (the first start downloads the model): do not start another server, do not delete the PID file; this call goes on without the server (below). Otherwise (dead process, reused number) delete the PID file and start the server. If `import psutil` fails anyway, treat a PID-file process as "still starting" for 60 s after the file's modification time and as dead afterwards.
+- Once a server we started answers, clear the notices `stale_server`, `port_conflict` and `server_start_failed`.
+
+#### Starting the server (`_start_server`)
+
+1. `subprocess.Popen([sys.executable, "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`; truncate `server.log` first when it is larger than 1 MB. Detached: on Windows `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, elsewhere `start_new_session=True`, so the server outlives the hook or MCP entry that started it. The `-m` form is required (package-relative imports); never start it by file path. Its stdout never reaches a hook's or the MCP entry's stdout.
+2. Poll `/health` every 0.5 s for up to 60 s. If the child exits meanwhile (`proc.poll() is not None`), stop waiting at once.
+3. On that early exit: emit `server_start_failed` ("The N3MC Lite memory server could not start (exit code <n>). See <server.log path> for the reason."), write the time to the marker file `server_start_failed` in the data folder, delete the PID file if it holds the child's PID, and go on without the server. If `Popen` itself raises, go on without the server (one stderr line).
+4. While the marker is younger than 5 minutes, do not try to start the server again; go straight to the no-server path. Delete the marker and clear the notice once a server answers.
+5. A child still alive after 60 s is still starting: leave it running ("still starting" rule above).
+
+#### `/shutdown`
+
+`POST /shutdown` with `{"root": str}`: only when `root` equals the server's own data folder does it answer `{"status": "ok"}` and exit 0.3 s later (deleting the PID file if it holds its own PID); otherwise 403. Tests replace `_request_shutdown` and the HTTP senders so nothing reaches a real server.
+
+#### When the port belongs to another folder's server
+
+`ensure_server` returns False, keeps that server's `root` in `_FOREIGN_SERVER_ROOT` and emits `port_conflict` ("Another N3MC server (<root>) is using port <port>. Give N3MC Lite its own server_port in <config.json path>."). Then, so that no record goes into another product's memory:
+
+- Hook saves go to Redis directly without a vector (§3.16 "Direct save"); the MCP `save_memory` does the same (§4.6).
+- Searches are not made: the hook and `--search` print `# Recalled Memory Context\n\n_(memory search unavailable: another N3MC folder's server is using port <port>)_\n`.
+- `--repair`, `--list`, `--recall-thread`, `--delete`, `--delete-session` and the other MCP tools print or return the backend error of §4.6 "When the server is not available" with that reason.
+
+#### Notices (`_notify`)
+
+Notices that need human action and come from outside the server — `stale_server`, `port_conflict`, `server_start_failed`, `redis_unreachable` (§12), `save_failed` (§12), `rules_md_edited:<hash>` (§12) — go through Free's `_notify(key, message)`:
+
+1. Print to stderr.
+2. Append `{"ts", "hook": "notice", "key", "message"}` to `audit.log` (only once for the same key and message).
+3. Keep it in `notices.json` in the data folder — one JSON object `{<key>: {"message": <text>, "last_shown": <epoch seconds or null>}}`, written through a temporary file and `os.replace` — and show it **once a day** per key (when `last_shown` is null or at least 86,400 s old; showing sets `last_shown`).
+4. `_clear_notice(key)` removes it when the cause is gone.
+
+**Where notices are shown** (`_take_notices()` of the server): the first successful search of either kind — the hook's or CLI's `/search`, or the MCP `search_memory` — shows Lite's in-process notices of §6 (`config_unreadable`, `config_type`, `shared_redis`, `config_refused`, `index_dim_mismatch`; once per server process, as in §6) followed by the `notices.json` notices that are due (once a day), as `> ⚠️ N3MC notice: <message>` lines. The degraded-model notice of §3.9 is added on every degraded search as before. The degraded-state placeholders of the hook and the CLI (§12) also print the due `notices.json` notices, right after the heading, because the server may be the thing that is broken.
+
+In tests, `notices.json`, `audit.log`, the PID file, `server.log` and the marker always live in a temporary data folder.
+
+### 3.16 Hook records: role prefixes and direct save (v2.0.0)
+
+Hook saves go through `POST /buffer` (§4.5), which calls Lite's `save_memory` of §3.8 / §3.11 / §3.13 with one extra argument, `role` (`"user"` or `"claude"`). **Every rule of `save_memory` applies unchanged** — lone-surrogate removal, the outer `strip()`, the empty and invisible-content checks, `skip_code_blocks`, `[code omitted]`, the chunk threshold, Lite's chunking (`chunk_threshold` 400 / `chunk_overlap` 100, §5 (7)), the parent document, exact-duplicate rejection with `mem:sha:` / `docsha:`, the guard taken with `SET NX`, one pipeline, and the TTL. `importance` is 1.0. The role prefix is added **after** `purify` and before the length decision, as follows (Free's `add_chunk_prefixes` format):
+
+| Body after `strip()` and `purify` (`B`) | What is stored |
+|---|---|
+| `len(B) <= chunk_threshold` | One standalone record `mem:<id>` whose `content` is `[<role>] ` + `B`. |
+| `len(B) > chunk_threshold` | `chunks = chunk_text(B, chunk_threshold, chunk_overlap)` (Lite's chunking on `B`, without the prefix). The parent document `doc:<id>` has `content` = `[<role>] ` + `B`. Chunk *i* of *N* has `content` = `[<role> i/N] ` + chunk *i*; when `chunk_text` returns one chunk (a body up to 19 characters longer than the threshold, §3.11), it is `[<role>] ` + that chunk. |
+
+- The length decision uses `B`, not the prefixed text, so a text takes the same path whether it comes from a hook or from MCP.
+- The guards hash what is stored, **within the exchange** (decided 2026-11-19, below): `mem:sha:<turn_id>:<sha1(NFKC([<role>] B))>` for a standalone record, `docsha:<turn_id>:<sha1(NFKC([<role>] B))>` for a parent. They are taken with `SET NX` and carry the record's TTL, like Lite's guards. A hook save without a `turn_id` does not happen (§12 always has one). The chunk embeddings are made from the prefixed chunk text (`"passage: " + content`), like any stored `content`.
+- One space follows the closing bracket. The parent document is "verbatim" apart from this prefix.
+- `agent_name` = `"claude-code"`, `session_id` = Claude Code's `session_id` from the hook input (empty → the server's default, §3.1), `turn_id` = the exchange's `turn_id` (§12).
+- **The MCP `save_memory` has no `role`** and stores exactly what it stored in v1.12.2 (no prefix).
+- **Hook saves: exact duplicates only within the same exchange (decided 2026-11-19).** For a hook save, the exact-duplicate check (§3.8) compares only with records of the same `turn_id`, as Free does, so **every message and reply is stored**: `ok` sent in two exchanges is stored twice, once in each. Inside one exchange the check still works: when the Stop hook and the transcript recovery of §12 both save the same reply under the same `turn_id`, the second save is answered `duplicate`. **The MCP `save_memory` keeps Lite's rule** (§3.8: exact duplicates across all records), because it has no `role` and stores exactly what v1.12.2 stored.
+- **`skip_code_blocks: true` also applies to hook saves (decided 2026-11-19: kept as it is)**: a message or reply containing a fence is answered `skipped_code` and not stored. The default is `false`, which stores it with `[code omitted]`.
+
+**`/buffer` response**: the `save_memory` result dict of §4.3 as JSON (`saved`, `duplicate`, `skipped_code`, or `error` with its `reason`), HTTP 200; when Redis is unreachable, HTTP 503 with `{"status": "error", "saved": false, "reason": "<backend_hint>"}`.
+
+**Direct save (without the server)**: when the server is not available (no answer, still starting, failed to start, another folder's server on the port, a timeout, or an HTTP error other than 503), the hook — and the MCP `save_memory` (§4.6) — saves directly to Redis from its own process: `Database(cfg).save_memory(..., role=…, embed=False)`. This is the same function with `embed=False`: it never imports `sentence_transformers` and never computes an embedding, so every record (standalone record or chunk) is written **without the `embedding` field**, exactly like a save while the model is unavailable (§3.9 step 4). Such records are found by BM25 at once and get their vector from Lite's repair (`repair_memory` / `/repair`, §3.10), which the hook calls on every message (§12). Before the direct save the process connects and runs `ensure_index()` as in §3.9 (it does not run `enforce_ephemeral()`; the server does that when it connects). When Redis is unreachable too, nothing is saved: `audit.log` already holds the text (§12), and the notice `redis_unreachable` is emitted. **Nothing is queued for resending.**
+
+### 3.17 Context size limit (v2.0.0)
+
+Taken from N3MC-Pro §5 "Context size limit" and adapted to Lite's result shape (Lite has no Q-A exchanges block, §3.14).
+
+**Why**: Claude Code caps a hook's plain stdout at 10,000 characters; longer output is moved to a file and Claude sees only a 2,000-character preview (measured in Pro, 2026-11-18: with 20 results the block was over 10,000 characters for 45 % of 138 questions). Lite's hits can be whole parent documents, so a single hit can exceed the cap.
+
+- **Where it applies**: the hook's `# Recalled Memory Context` block (`--hook-submit`) and the MCP `search_memory` result (it goes into the model's context too, and the limit of a tool result differs between clients). Both use `max_chars = context_max_chars` (§6, default 9,500, allowed 2,000–10,000). A manual `--search` is **not** limited. The degraded-state placeholders (§12) are not limited.
+- **Rendering only**: the search itself, its TTL refresh and its `access_count` increments (§3.14 step 7) run on the full result before rendering; the limit removes text from the output only.
+- **Size** (`context_size(text)`): the number of UTF-16 code units of the text (a character outside the BMP counts as 2), plus the number of line breaks (each line break counts as 2: a Windows pipe may deliver it as CR LF). The output fits when `context_size(output) + 2 <= max_chars`.
+- **Parts** of the output, in order: the **head** (hook: `# Recalled Memory Context`, `Search query: <query>` and an empty line; MCP: nothing), the **notices**, the **version sentence**, the **normal rows** (joined with `\n\n---\n\n`), the **weak part** (heading and weak rows), and the **trail** (MCP: `_NUDGE_AFTER_SEARCH`; hook: nothing). The parts other than the head and the trail are joined with `\n\n` exactly as in §3.14 / §5 (4).
+- **Shortening**: render the full output first; when it fits, use it unchanged. Otherwise, in order, stopping as soon as it fits:
+  1. Remove normal rows from the lowest-ranked one, one at a time, while more than 3 remain. After the last kept normal row add the part `_(N lower-ranked match(es) omitted to keep this block within the context limit.)_` (N = removed rows), joined with `\n\n` (not with `---`).
+  2. (Pro's step "remove Q-A exchanges" has nothing to remove in Lite and is skipped.)
+  3. Cut the text: take the output without the trail, and keep its longest prefix (trailing whitespace removed) for which prefix + `\n\n` + `_(cut here to keep this block within the context limit.)_` + trail fits. This is also how a long parent document among the kept rows is shortened.
+- Notices and weak rows are never removed by step 1 (weak rows exist only when fewer than `min_results` rows passed, so the output is short then). The head and the trail are never removed.
+- The rules file (§12) tells Claude that a manual `--search` with the same keywords shows what was left out; the MCP instructions are not changed for this.
 
 ---
 
@@ -920,13 +1136,16 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 stdio. The server reads JSON-RPC lines from `stdin` and writes responses to `stdout`. Logs go to `stderr`. On Windows, `stdin`/`stdout`/`stderr` are reconfigured to UTF-8 at startup (see [§3.13](#313-encoding-safety) for the full encoding-safety contract, including lone-surrogate sanitization on every tool input).
 
+**(v2.0.0)** "The server" in §4.1 and §4.2 is the MCP thin client `n3mc-workingmemory` (§4.6). It answers `initialize` and `tools/list` itself and forwards every `tools/call` to the resident server (§3.15, §4.5), which runs the tool handlers of §4.3. No new network port is opened: the MCP side is stdio only, and the resident server listens on `127.0.0.1` only.
+
 ### 4.2 `initialize` response
 
 The server advertises:
 - `protocolVersion` — **negotiated by the MCP SDK (v1.7.3)**: the version the client sent in `initialize` when the SDK supports it (`mcp` 1.27: `2024-11-05`, `2025-03-26`, `2025-06-18`, `2025-11-25`), otherwise the SDK's latest. Do not pin it in code. (Up to v1.7.2 this line read `"2024-11-05"`; a client that asks for `2025-06-18` gets `2025-06-18`.)
 - `serverInfo: { name: "n3mc-workingmemory", version: <package __version__> }`
 - `capabilities.tools` with `listChanged: false`
-- `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.**
+- `instructions:` — a multi-line string delivering behavioral guidance (see [§5](#5-behavioral-instructions-auto-save-strategy)). **The Lite instruction text explicitly tells the LLM that memory expires after 7 days.** (v2.0.0: rules 1 and 2 also say what a client that has the hooks' `# Recalled Memory Context` block does, §5 (1).)
+- (v2.0.0) The thin client answers `initialize` within 2 seconds: it loads no model and does not wait for the resident server (§4.6).
 
 > **⚠️ Implementation note (don't forget to set version / instructions)**: `serverInfo.version` and `instructions` can be **passed as `Server()` constructor arguments** (`Server(name, version=__version__, instructions=INSTRUCTIONS)`). Forget this and the version is easily empty and the instructions never advertised. Passing them to the constructor lets `create_initialization_options()` pick them up automatically. Depending on the MCP SDK version, also assigning `init_options.instructions` afterward makes it reliable.
 
@@ -936,12 +1155,14 @@ Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §
 
 | Name            | Inputs                                    | Behavior                                                              |
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Results are shaped and rendered as in [§3.14](#314-search-result-shaping-v170) (vector floor, newest version first, relative cut, `saved=` times). **When fewer than `min_results` (default 3) rows pass the floors, the closest dropped rows are added under `#### Possibly related (weak matches — may be unrelated)` (v1.7.2); the tool description tells the LLM: weak matches did not pass the relevance floors and are often unrelated — use one only when it is actually relevant to the question; if it is not, ignore it and do not mention it.** The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
+| `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Results are shaped and rendered as in [§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172) (vector floor, newest version first, relative cut, `saved=` times). **When fewer than `min_results` (default 3) rows pass the floors, the closest dropped rows are added under `#### Possibly related (weak matches — may be unrelated)` (v1.7.2); the tool description tells the LLM: weak matches did not pass the relevance floors and are often unrelated — use one only when it is actually relevant to the question; if it is not, ignore it and do not mention it.** The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | Body ≤ `chunk_threshold`: exact dedup only (§3.8), then HSET + EXPIRE. Returns `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking; a value that is not a number — including `NaN` (e.g. the string `"nan"`) — returns `{"saved": false, "status": "error", "reason": "importance must be numeric (got <value>)"}` and nothing is saved (a `NaN` used to pass the clamp and was stored as `2.0`, the highest importance). When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
 | `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. A `limit` below 1 is treated as 1 (a negative value used to cut rows from the end of the list instead). Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). **Pages through the index (v1.7.1)**: fetch newest first in pages of 200 (`LIMIT <offset> 200`, sorted by `timestamp_epoch` desc) and keep paging until `limit` standalone memories of this owner are collected or the index is exhausted. (v1.7.0 read one block of `max(limit × 5, 200)` rows; after a 260-chunk document the block held only chunks, and a standalone memory saved just before it was not listed — Lite review LM6.) |
 | `delete_memory` | `id: string`                              | Only records of the configured `owner_id` (another owner's id → `{"status":"not_found","id":...}`, v1.7.1). **The id may be given bare (`<uuid>`, as `search_memory` / `list_memories` print it) or with one leading `doc:` or `mem:` prefix; one such prefix is removed first (v1.7.3, §3.12 bare-UUID rule), and the response's `id` is the bare UUID.** If the id is a parent (`doc:<uuid>` exists), cascade-deletes the parent, `docsha:`, and every chunk listed in its `chunk_ids` (§3.11). Otherwise `DEL mem:<uuid>` + `DEL mem:sha:<sha1>` atomically. |
 | `delete_memories_by_session` | `session_id: string`         | Bulk-delete every standalone memory, parent document, child chunk, and sha guard tied to the given `session_id`, scoped to the configured `owner_id`. Response: `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. When nothing matches: `{"status":"not_found", "session_id": ..., "deleted": 0}` (a re-call is a safe no-op). **Irreversible — confirm `session_id` with the user before calling.** Lite-only (see [§10 Test 6](#10-self-evaluation-evidence-report)). |
 | `repair_memory` | —                                         | `ensure_index()` and adding missing vectors (up to 200 per call); see [§3.10](#310-repair). |
+
+**(v2.0.0) Where the tools run**: the handlers below run inside the resident server (`tools.py`, called by `POST /tools/<name>`, §4.5); the thin client returns their text unchanged (§4.6). Their arguments, behaviour and output texts are those of v1.12.2, with one addition: the `search_memory` text is kept within `context_max_chars` (§3.17). The CLI of §13 calls the same handlers and prints the same text without the reminder.
 
 All tool responses are a single `TextContent` element. `save_memory` / `delete_memory` / `delete_memories_by_session` / `repair_memory` return JSON strings; `search_memory` / `list_memories` return human-readable markdown. **Every response also ends with a short auto-save reminder** (separated by `\n---\n`) — the [§11](#11-save-guarantees-and-the-limit-of-the-mcp-protocol) nudge channel. **This includes every error response (v1.7.3)**: the `Error: …` text of §4.4 (an unreadable `since` / `until`, an unexpected exception, the backend error of `search_memory` / `list_memories` / `recall_thread`) and the JSON with `"status": "error"` (e.g. a non-numeric `importance`). The error text stays first, so the `Error: ` prefix of §4.4 is unchanged. (v1.7.2 sent these without the reminder.) Callers that machine-parse the JSON should use a streaming decoder (e.g. `json.JSONDecoder().raw_decode()`) that returns the first JSON document and ignores the trailing markdown nudge.
 
@@ -956,7 +1177,7 @@ All tool responses are a single `TextContent` element. `save_memory` / `delete_m
 | `since` | `string` (ISO 8601 date or datetime) | Restrict to entries saved at or after this timestamp. Date-only inputs are interpreted as `00:00:00`. |
 | `until` | `string` (ISO 8601 date or datetime) | Restrict to entries saved at or before this timestamp. Date-only inputs are interpreted as `23:59:59.999999`. |
 
-**Time zone (v1.7.1)**: a date-only value or a datetime without an offset is read in the **server's local time zone** — the same clock as `saved=` in the output ([§3.14](#314-search-result-shaping-v170)) — and converted to epoch seconds. A value with an offset (`2026-11-13T09:00:00+09:00`, `…Z`) is used as given. `T` or a space may separate date and time.
+**Time zone (v1.7.1)**: a date-only value or a datetime without an offset is read in the **server's local time zone** — the same clock as `saved=` in the output ([§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172)) — and converted to epoch seconds. A value with an offset (`2026-11-13T09:00:00+09:00`, `…Z`) is used as given. `T` or a space may separate date and time.
 
 **Unreadable values (v1.7.1)**: if `since` or `until` is given but cannot be parsed (`yesterday`, `2026/11/13`, `2026-13-01`), the search is not run and the response is a `TextContent` `Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 or 2026-11-13T09:00:00+09:00 (got '<value>')` (`until` likewise). If `since` is later than `until`: `Error: since is later than until`. Since v1.7.3 the §4.3 reminder follows either text. An empty string means "no bound".
 
@@ -974,11 +1195,81 @@ Either bound may be specified alone. These do not alter the ranking formula. The
 
 **Operational rule**: The connected LLM SHOULD pass a hit's `turn_id` to `recall_thread` when the snippet returned by `search_memory` is insufficient to answer. End users do not need to invoke this tool directly.
 
-> **⚠️ Implementation note (emit `turn_id` in the `search_memory` response)**: For the operational rule above to work, the LLM must be able to read the `turn_id` to pass to `recall_thread` from the `search_memory` results. Therefore **include each hit's `turn_id` in the `search_memory` markdown output** (omit when empty). In practice, add `turn_id` to the `RETURN_FIELDS` of `_vector_search` / `_bm25_search`; on parent resolution, fetch `turn_id` from `doc:<pid>` and put it on the row dict; and emit it in the final markdown as `turn=<turn_id>` in each hit's heading line ([§3.14](#314-search-result-shaping-v170)). Without this, `recall_thread` is effectively uncallable (the spec's operational workflow does not close).
+> **⚠️ Implementation note (emit `turn_id` in the `search_memory` response)**: For the operational rule above to work, the LLM must be able to read the `turn_id` to pass to `recall_thread` from the `search_memory` results. Therefore **include each hit's `turn_id` in the `search_memory` markdown output** (omit when empty). In practice, add `turn_id` to the `RETURN_FIELDS` of `_vector_search` / `_bm25_search`; on parent resolution, fetch `turn_id` from `doc:<pid>` and put it on the row dict; and emit it in the final markdown as `turn=<turn_id>` in each hit's heading line ([§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172)). Without this, `recall_thread` is effectively uncallable (the spec's operational workflow does not close).
 
 ### 4.4 Error Handling
 
 Tool exceptions are caught in the dispatch layer and returned as `TextContent` with a leading `"Error: "` prefix. The server never crashes the stdio loop due to a tool-level exception. Redis availability is checked on every call and lost connections are re-established automatically; while Redis is unreachable the dispatcher returns the backend error with the recovery hint instead of invoking the tool (see [§3.9](#39-startup-sequence--self-recovery) "Redis availability on every tool call"). An MCP client therefore shows the server as **connected** even while Redis is down — by design: the instructions and tools stay available, so the LLM can tell the user what to do (§5 rule 4).
+
+**(v2.0.0)** The same holds while the resident server is not available: the thin client stays connected and answers each tool with the texts of §4.6 "When the server is not available". `isError` is never set; every error is the text of a normal result, as in v1.12.2.
+
+### 4.5 Resident Server Endpoints (v2.0.0)
+
+All on `http://127.0.0.1:<server_port>`. Every endpoint returns 403 when the `Host` header is not local (§3.15). Every endpoint except `/health` and `/shutdown` is a plain `def`.
+
+| Method | Path | Used by | Body | Answer |
+|---|---|---|---|---|
+| `GET` | `/health` | `ensure_server` | — | `{"status": "ok", "root", "code_version", "pid"}` (§3.15) |
+| `POST` | `/shutdown` | `_stop_stale_server` | `{"root": str}` | `{"status": "ok"}`, or 403 when `root` is not the server's (§3.15) |
+| `POST` | `/buffer` | the hooks (`--hook-submit`, `--save-claude-turn`) | `{"content": str, "role": "user" \| "claude", "agent_name": str?, "session_id": str?, "turn_id": str?}` | The `save_memory` result dict (§3.16), HTTP 200; Redis unreachable → 503 with `{"status": "error", "saved": false, "reason": "<hint>"}` |
+| `POST` | `/search` | `--hook-submit`, `--search` | `{"query": str, "session_id": str?, "since": str?, "until": str?, "limit": int?, "max_chars": int?}` | `{"text": "<# Recalled Memory Context block>"}` (§12 "Search output"). `max_chars` given → the limit of §3.17; absent → no limit. Unreadable `since` / `until`, or `since` later than `until` → 400 with `{"detail": "<the Error: text of §4.3.1>"}`. Redis unreachable → 503 with `{"detail": "<hint>"}` |
+| `POST` | `/repair` | `--hook-submit` | `{}` | The `repair_memory` result dict of §3.10 (one call: `ensure_index()` and up to 200 vectors); Redis unreachable → 503 with `{"status": "error", "message": "<hint>"}` |
+| `POST` | `/tools/{name}` | the MCP thin client (`nudge=1`), the CLI (`nudge=0`) | the tool's arguments as one JSON object (anything else is read as `{}`) | `{"text": "<the tool's result text>"}`, always HTTP 200 (errors are in the text, as in §4.3 / §4.4). The handler is the v1.12.2 handler of §4.3, including the per-call `ensure_connected()` and the backend errors of §3.9, plus the size limit of §3.17 for `search_memory`. Query parameter `nudge` (default `1`): `0` leaves out the reminder of §5 (2) |
+
+- **No other endpoints.** Free's `/list` is not needed (listing is the `list_memories` tool), and Free's Pro-only `/delete`, `/gc` and `/import` do not exist (deleting is the `delete_memory` / `delete_memories_by_session` tools; Redis expires records itself).
+- An unknown `{name}` returns `{"text": "Error: unknown tool '<name>'" + _NUDGE_GENERIC}` (without the reminder when `nudge=0`).
+- `nudge=0` exists because the reminders tell the model to call `save_memory`; in Claude Code the hooks save, so the CLI prints the tool's text without them.
+- `/search` and `/tools/search_memory` both run Lite's `search_memory` (§3.14). `/search` wraps the rendered text in the hook's heading (§12); `/tools/search_memory` returns the v1.12.2 text.
+
+### 4.6 MCP Thin Client (v2.0.0)
+
+Everything in this section is new in v2.0.0. Its mechanics are those of the MCP entry of N3MC MCP Pro v3.0.0 §4.6; its tools, outputs and `isError` behaviour are Lite's own (§4.3, §4.4).
+
+| Item | Value |
+|---|---|
+| Module | `n3mc_mcp/server.py` (`run()`; `__main__.py` calls it) |
+| Commands | `n3mc-workingmemory`, alias `n3mc-mcp-lite` |
+| Transport | stdio only |
+| Library | `mcp` 1.x (`>=1.0.0,<2.0.0`), the low-level `mcp.server.lowlevel.Server` and `mcp.server.stdio.stdio_server` |
+| `serverInfo` | `name` = `n3mc-workingmemory`, `version` = `__version__` |
+| Configuration | the same `config.json` and data folder as the server (`load_config()`, `N3MC_DATA_DIR`; §6, §7) — it needs `server_port` |
+
+1. **stdout belongs to MCP.** `run()` first reconfigures stdin / stdout / stderr to UTF-8 (§3.13 (1)). Nothing but MCP messages is written to stdout; warnings, `_notify` output and library messages go to stderr.
+2. **No model, no Redis.** The module imports neither `sentence_transformers` nor `torch` (directly or through `processor.py`'s model code), and opens no Redis connection, except for the direct save below. `import_backend()` and the background model load of §3.9 are not run here.
+3. **Starting the server.** Right after start, `run()` calls `ensure_server(cfg)` once **in a background thread**, so `initialize` is answered at once (a server start can take up to 60 s, §3.15). `_start_server` sends the child's stdout to `DEVNULL` and stderr to `server.log`, so the child never writes into the MCP stream.
+4. **`initialize` / `tools/list`** are answered locally: the instructions of §5 (1) and the seven Tool definitions of §5 (3) (`tooldefs.py`, shared with the server). They work without the server.
+5. **Input check off**: register the handler with `server.call_tool(validate_input=False)`; when the installed `mcp` refuses that argument (`TypeError`), register it with `server.call_tool()`. Newer `mcp` 1.x versions check the arguments against the schema before the handler runs, which would replace Lite's own texts (for example the `importance must be numeric` JSON of §4.3) with the SDK's.
+6. **Each `tools/call`**:
+   1. Arguments that are not a JSON object are read as `{}`. An unknown tool name is answered locally with `Error: unknown tool '<name>'` + `_NUDGE_GENERIC` (no request).
+   2. `search_memory` and `save_memory`: when `session_id` is missing or blank, set it to the entry's session — `N3MC_SESSION_ID` of this process, else one UUIDv4 made when this process started. **Why**: in v1.12.2 the default session was per MCP server process; the resident server is shared by every client and outlives them, so the thin client sends its own default to keep the v1.12.2 meaning (`b_session`, `delete_memories_by_session`).
+   3. `save_memory`: when `agent_name` is missing or blank, set it to (1) the environment variable `N3MC_AGENT_NAME`, (2) otherwise the `clientInfo.name` the client sent in `initialize`, (3) otherwise leave it empty (v1.12.2 stored an empty string). Each value after `strip()`, used only when not empty.
+   4. Run `ensure_server(cfg)` in a worker thread (`asyncio.to_thread`), so the stdio loop keeps reading. A server that stopped while the entry was running is started again here.
+   5. `POST /tools/<name>?nudge=1` with the arguments; return `TextContent(type="text", text=<the answer's "text">)` **unchanged**.
+   6. Any exception inside the handler gives `Error: <message>` + `_NUDGE_GENERIC` (the v1.12.2 rule of §4.4) and one stderr line; the entry never exits because of a tool call.
+7. **Ending.** When the application closes stdin, the entry exits. It never sends `/shutdown`: the server was started detached and the hooks use it too.
+
+#### When the server is not available
+
+"Not available" = `ensure_server` returned without a usable server (still starting after 60 s, the start failed or was skipped within 5 minutes of a failure, another folder's server holds the port), or the `/tools` request failed (connection error, timeout, non-2xx answer). `<reason>` is one of `the memory server is still starting (the first start downloads the embedding model, ~440 MB)`, `the memory server could not start; see <server.log path>`, `another N3MC folder's server is using port <port>`, or the request error.
+
+| Tool | Answer |
+|---|---|
+| `save_memory` | **Direct save** of §3.16 (`role` none, `embed=False`), with the v1.12.2 argument checks of §4.3 (`importance`, `owner_id`) done locally first. The result JSON is the `save_memory` result with `"warning": "embedding_unavailable"` and `"detail": "The N3MC Lite memory server was not available (<reason>), so this entry was saved without a vector. It is found by keywords now and gets its vector from repair_memory once the server runs."`, then `_NUDGE_AFTER_SAVE`. When Redis is unreachable too: the backend error JSON of §3.9 item 2 (`{"status": "error", "saved": false, "reason": "<backend_hint>"}`) + `_NUDGE_GENERIC` |
+| `search_memory`, `list_memories`, `recall_thread` | `Error: memory backend unreachable. The N3MC Lite memory server is not available (<reason>). It is started automatically; retry in a minute.` + `_NUDGE_GENERIC` (the prefix of §3.9 item 2, so rule 4 of the instructions applies) |
+| `delete_memory`, `delete_memories_by_session` | `{"status": "error", "reason": "The N3MC Lite memory server is not available (<reason>). Nothing was deleted; retry in a minute."}` + `_NUDGE_GENERIC` |
+| `repair_memory` | `{"status": "error", "message": "The N3MC Lite memory server is not available (<reason>). Retry in a minute."}` + `_NUDGE_GENERIC` |
+
+**Why save directly**: a fact the model decided to save would otherwise be lost; the hooks do the same (§3.16), and Lite has saved without vectors since v1.7.0 whenever the model was unavailable. A direct save that races with a server save of the same text after a timeout is resolved by the `SET NX` guard (§3.8): one record.
+
+#### Registering in other applications
+
+See §8 "Claude Desktop". Never register the thin client in Claude Code (§8 "Claude Code").
+
+#### Limits of this design
+
+- **In applications without hooks, saving is up to the model** (§11). The instructions and reminders ask it to save; full conversations are kept only in Claude Code.
+- **The resident server must be able to run** (Python with the dependencies of §2). When it cannot start, searches return the error above and saves go in without vectors.
+- **One installation for all clients.** The hooks, the CLI and the thin client must run the same code: a copy of another version has another `code_version`, and each would replace the other's server on every call (§3.15). Register the desktop app with the absolute path of the same scripts folder the hooks use, or — for plugin users — with the same `uvx --from n3memorycore-mcp-lite==2.0.0 …` form (§8). The plugin's `uvx` commands are pinned to the package version (§2), so the plugin and the desktop app run the same version as long as both use this release.
 
 ---
 
@@ -986,12 +1277,14 @@ Tool exceptions are caught in the dispatch layer and returned as `TextContent` w
 
 Because MCP has no equivalent of Claude Code's `UserPromptSubmit` / `Stop` hooks, the auto-save behavior is expressed as **natural-language instructions** returned in the `initialize` response. The connected LLM reads them as system guidance.
 
+**(v2.0.0)** These instructions are for applications that use MCP (the Claude desktop app and others). Claude Code uses the hooks and gets its guidance from the rules file `.claude/rules/n3mc-lite-behavior.md` (§12). One text is sent to every client; it does not know whether the client has hooks, so rules 1 and 2 say what to do when the context already holds a `# Recalled Memory Context` block (the hooks put it there): search only when the block is not enough, and save only when the user asks. A client without the block keeps the v1.12.2 behaviour (search every turn, save automatically). This matters only when an old MCP registration is still present in Claude Code next to the hooks (§8).
+
 The instructions require the LLM to:
 
 0. **Pro coexistence policy** — When `n3mc-longtermmemory` (N3MemoryCore Pro, persistent SQLite+sqlite-vec) is also registered in the same session, treat Lite as working memory (in-session progress notes, temporary debug state, disposable intermediate results) and Pro as the canonical long-term store (user profile / preferences, project specs, architecture decisions, world-building, API contracts, research summaries — anything worth keeping across sessions). When in doubt, prefer Pro. With Pro connected, the TTL warning (rule 7) is generally unnecessary — simply route long-lived content to Pro instead. Without Pro, this server is the sole store: accept all content and activate rule 7 when the user signals permanence. Do NOT double-save the same fact to both servers.
 
-1. **Search first, then acknowledge when you recall** — call `search_memory` at the start of every user turn with a concise query reflecting the user's intent. When the retrieved snippets actually shape the reply (i.e. you are recalling information saved in an earlier turn), open the reply with a short acknowledgment **in the user's language**, e.g. Japanese 「前回の回答がメモリに保存されています。」 or English "Pulling this from earlier memory in this session." **If no relevant memory was found, or if retrieval did not influence the answer, do not announce anything.** Never announce the mere act of searching — only the act of recalling.
-2. **Save every substantive exchange — automatic, no permission asked** — saving is silent and automatic. The user should NEVER have to say "save this" or "remember that"; the LLM saves by default and does NOT ask for confirmation. After each meaningful turn, call `save_memory` to persist (a) the user's paraphrased intent, (b) **the LLM's own substantive output** — decisions, plans, and especially any creative or generated content the user may refer back to later: world-building, character settings, design sketches, code architecture, research summaries, outlines (if more than a sentence or two of work went into producing it, save it), and (c) key facts, preferences, and unresolved questions. One `save_memory` call per distinct fact, 50–200 chars each (long content → rule 3). Exact duplicates are auto-rejected server-side, so err on the side of saving more. Near-duplicates are **not** rejected: an updated fact or a re-made document is saved as a new entry, and `search_memory` shows the newest version first. **Note**: the Lite text explicitly reminds the LLM that entries vanish after 7 d — it is a rolling scratchpad, not a permanent archive.
+1. **Search first, then acknowledge when you recall** — (v2.0.0: when the context already holds a `# Recalled Memory Context` block, call `search_memory` only when that block is not enough; otherwise as follows) call `search_memory` at the start of every user turn with a concise query reflecting the user's intent. When the retrieved snippets actually shape the reply (i.e. you are recalling information saved in an earlier turn), open the reply with a short acknowledgment **in the user's language**, e.g. Japanese 「前回の回答がメモリに保存されています。」 or English "Pulling this from earlier memory in this session." **If no relevant memory was found, or if retrieval did not influence the answer, do not announce anything.** Never announce the mere act of searching — only the act of recalling.
+2. **Save every substantive exchange — automatic, no permission asked** — (v2.0.0: when the context holds a `# Recalled Memory Context` block, every message and reply is already saved by the hooks: do not call `save_memory` on every turn, only when the user asks to remember something; otherwise as follows) saving is silent and automatic. The user should NEVER have to say "save this" or "remember that"; the LLM saves by default and does NOT ask for confirmation. After each meaningful turn, call `save_memory` to persist (a) the user's paraphrased intent, (b) **the LLM's own substantive output** — decisions, plans, and especially any creative or generated content the user may refer back to later: world-building, character settings, design sketches, code architecture, research summaries, outlines (if more than a sentence or two of work went into producing it, save it), and (c) key facts, preferences, and unresolved questions. One `save_memory` call per distinct fact, 50–200 chars each (long content → rule 3). Exact duplicates are auto-rejected server-side, so err on the side of saving more. Near-duplicates are **not** rejected: an updated fact or a re-made document is saved as a new entry, and `search_memory` shows the newest version first. **Note**: the Lite text explicitly reminds the LLM that entries vanish after 7 d — it is a rolling scratchpad, not a permanent archive.
 3. **Long content — save the full body in one call (verbatim recall)** — when the turn produces OR receives a long body the user may want back verbatim — a user-pasted spec / article / log (code blocks are stored as `[code omitted]`, §3.13), **OR a long creative setting / world / character sheet / design doc the LLM just generated** — pass the FULL text to a single `save_memory` call. The server automatically creates a parent document + chunks, indexes chunks for search, and returns the full parent body on recall (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Rough threshold: **> ~400 chars → save as one full-body call**. Shorter summarizable content → rule 2 (multiple short facts). Do NOT split a long verbatim-worthy body into many short summaries — that destroys recall fidelity.
 4. **Handle tool errors visibly — never generate long content blind** — if `search_memory` / `save_memory` returns a server error (Redis unreachable, connection refused, timeout, "start Redis Stack" hint, etc.), **STOP and surface the failure to the user in their language BEFORE generating any long creative or spec content**. Rationale: with the backend down, every subsequent `save_memory` also fails silently, so a long setting / design doc / code architecture produced during the outage is lost the moment the session closes — and the user will not realize the memory layer was broken until recall fails. Required behavior: (a) announce the failure succinctly (e.g. "Memory backend is unreachable — save/search are offline right now"), (b) relay the recovery hint the tool returned (e.g. `docker run -p 6379:6379 redis/redis-stack-server:latest`), (c) ask whether to proceed without memory (so the user knows this session will not persist) or to pause until the backend is restored. Short factual replies may proceed, but must still mention the error once so the user knows saves are failing.
 5. **Skip noise** — do not save greetings, clarifying questions, or mechanical acknowledgements.
@@ -1013,7 +1306,7 @@ The full text is in [`n3mc_mcp/instructions.py`](./n3mc_mcp/instructions.py).
 
 Up to here this document pointed at the code for some texts and left some rules out. The code is regenerated from this document, so everything below is part of the specification. **Where a summary above differs from a text below, the text below is the one to implement** (for example, rule 8 of the delivered instructions is the `session_id` rule; `skip_code_blocks` is a note inside rule 2).
 
-**(1) The instructions returned at `initialize` — `INSTRUCTIONS` in `n3mc_mcp/instructions.py`.** Exactly this text, followed by one line feed. Do not rephrase, reorder or translate it.
+**(1) The instructions returned at `initialize` — `INSTRUCTIONS` in `n3mc_mcp/instructions.py`.** Exactly this text, followed by one line feed. Do not rephrase, reorder or translate it. (v2.0.0: the two paragraphs that start with `HOOK CLIENTS:` in rules 1 and 2 are new, and the next paragraph of each now starts with `Otherwise,` / `Without that block,` and is wrapped again; every other paragraph is the v1.12.2 text.)
 
 `````text
 N3MemoryCore — Lite (Ephemeral Memory)
@@ -1053,8 +1346,13 @@ BEHAVIORAL RULES
    an expectation of permanence.
 
 1. SEARCH FIRST, THEN ACKNOWLEDGE WHEN YOU USE MEMORY
-   At the start of every user turn, call `search_memory` with a concise
-   representation of the user's intent (key nouns + verbs). Use the
+   HOOK CLIENTS: if your context already contains a "# Recalled Memory
+   Context" block (the N3MC Lite hooks of Claude Code put it there), the
+   memory was already searched for this message. Call `search_memory`
+   only when that block is not enough.
+
+   Otherwise, at the start of every user turn, call `search_memory` with a
+   concise representation of the user's intent (key nouns + verbs). Use the
    returned snippets as context when formulating your answer.
 
    When your answer actually draws on retrieved memories (i.e. you are
@@ -1071,9 +1369,15 @@ BEHAVIORAL RULES
    Do not announce the mere act of searching — only the act of recalling.
 
 2. SAVE AFTER EVERY SUBSTANTIVE EXCHANGE — AUTOMATIC, NO PERMISSION ASKED
-   Saving is silent and automatic. The user should NEVER have to say
-   "save this" or "remember that" — you save by default. Do NOT ask the
-   user whether to save. Do NOT wait for the user to confirm. Just save.
+   HOOK CLIENTS: if your context contains a "# Recalled Memory Context"
+   block, every message and reply is already saved by the hooks. Do NOT
+   call `save_memory` on every turn; call it only when the user asks you
+   to remember something.
+
+   Without that block, saving is silent and automatic. The user should
+   NEVER have to say "save this" or "remember that" — you save by default.
+   Do NOT ask the user whether to save. Do NOT wait for the user to
+   confirm. Just save.
 
    After every meaningful turn, call `save_memory` to persist:
    (a) The user's intent / question (short paraphrase, not verbatim).
@@ -1270,7 +1574,7 @@ BEHAVIORAL RULES
     memories were found).
 `````
 
-**(2) The reminders appended to every tool result — `n3mc_mcp/server.py`.** `search_memory` results end with `_NUDGE_AFTER_SEARCH`; `save_memory` results end with `_NUDGE_AFTER_SAVE`; every other result — including every error result and the answer to an unknown tool name (`Error: unknown tool '<name>'`) — ends with `_NUDGE_GENERIC`.
+**(2) The reminders appended to every tool result — `n3mc_mcp/tools.py` (v1.12.2: `server.py`).** (v2.0.0: added by the resident server unless `/tools/<name>` is called with `nudge=0`, §4.5; the texts are unchanged.) `search_memory` results end with `_NUDGE_AFTER_SEARCH`; `save_memory` results end with `_NUDGE_AFTER_SAVE`; every other result — including every error result and the answer to an unknown tool name (`Error: unknown tool '<name>'`) — ends with `_NUDGE_GENERIC`.
 
 `````python
 _NUDGE_AFTER_SEARCH = (
@@ -1296,7 +1600,7 @@ _NUDGE_GENERIC = (
 )
 `````
 
-**(3) The tool definitions returned by `tools/list` — `list_tools()` in `n3mc_mcp/server.py`.** Seven tools. The descriptions, the argument descriptions, the `minimum` / `maximum` / `default` values and the `required` lists are what the connected model reads; write them exactly as below.
+**(3) The tool definitions returned by `tools/list` — `list_tools()` in `n3mc_mcp/server.py`.** (v2.0.0: the `Tool` list lives in `n3mc_mcp/tooldefs.py`; the thin client's `list_tools()` returns it. The definitions are unchanged.) Seven tools. The descriptions, the argument descriptions, the `minimum` / `maximum` / `default` values and the `required` lists are what the connected model reads; write them exactly as below.
 
 `````python
 @app.list_tools()
@@ -1522,7 +1826,7 @@ async def list_tools() -> list[Tool]:
 
 - `list_memories`: when nothing is stored, `_No memories stored._`. Otherwise one block per entry, `**<tag> [<id>]** <first 19 characters of timestamp>` + line feed + the purified content, where `<tag> ` is present only when the entry has a tag (`[doc×N]` for a parent document); blocks are joined with `\n\n---\n\n`. The content of a parent document is its first 200 characters, followed by `…` only when it was longer than 200. Standalone memories (at most `limit`) and all parent documents are merged, sorted by the timestamp string descending, and cut to `limit`. A `limit` that is missing, empty or 0 is 20; a value below 1 is 1.
 - `recall_thread`: an empty `turn_id` returns `{"status": "error", "reason": "turn_id required"}`; no rows returns `{"status": "not_found", "turn_id": "<turn_id>"}`. Otherwise one block per row, `<marker>**<tag> [<id>]** <first 19 characters of timestamp>` + line feed + the purified content, where `<marker>` is `▶ ` for rows of the requested turn and two spaces for the others; blocks are joined with `\n\n---\n\n`. The range runs from the first row of the turn minus `before` to its last row plus `after`, and includes rows of other turns that lie in between. A parent document is shown in full here (not cut to 200 characters).
-- `search_memory`: hits are joined with `\n\n---\n\n`; the notices, the version sentence, the hits, the weak-match heading and the weak hits are joined with one empty line (`\n\n`).
+- `search_memory`: hits are joined with `\n\n---\n\n`; the notices, the version sentence, the hits, the weak-match heading and the weak hits are joined with one empty line (`\n\n`). (v2.0.0: then the size limit of §3.17.)
 
 **(5) Which characters are expanded to bigrams (§3.7) — `n3mc_mcp/processor.py`.** `_is_cjk(ch)` is true when the code point lies in one of these ranges; "CJK run" in §3.7 means a run of such characters. A run of a single such character is kept as that one character.
 
@@ -1594,15 +1898,20 @@ Complete schema (missing fields auto-filled with defaults below):
   "b_session_mismatch":       0.6,
   "skip_code_blocks":         false,
   "embedding_model":          "intfloat/multilingual-e5-base",
-  "embedding_dim":            768
+  "embedding_dim":            768,
+  "server_port":              18524,
+  "bind_host":                "127.0.0.1",
+  "context_max_chars":        9500
 }
 ```
+
+The last three keys are new in v2.0.0. An existing `config.json` gets them filled in with their defaults on the next start (the "missing fields" rule below).
 
 - `redis_url` — connection URL. `N3MC_REDIS_URL` env var overrides this field.
 - `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 7 d). Lowering it is fine; raising it far beyond a week defeats the purpose of the Lite and will be flagged during review.
 - `search_result_limit` — max results returned by `search_memory`.
-- `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — search result shaping ([§3.14](#314-search-result-shaping-v170)). `vector_min_cos` (0.85) and `version_sim_threshold` (0.98) were measured with `multilingual-e5-base`; re-measure them for another `embedding_model`. A sensible `vector_min_cos` range is 0.80–0.88 (lower: more recall, more loosely related rows; higher: shorter results, related rows dropped more easily). Changes take effect when the MCP server process restarts (restart the MCP client).
-- `min_results` (v1.7.2) — when fewer results than this pass the floors, the shortfall is filled with **weak matches** — candidates the floors dropped, shown under a separate heading and never TTL-refreshed (default `3`; [§3.14](#314-search-result-shaping-v170) step 6). Set to `0` to disable the fill. Changes take effect when the MCP server process restarts.
+- `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — search result shaping ([§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172)). `vector_min_cos` (0.85) and `version_sim_threshold` (0.98) were measured with `multilingual-e5-base`; re-measure them for another `embedding_model`. A sensible `vector_min_cos` range is 0.80–0.88 (lower: more recall, more loosely related rows; higher: shorter results, related rows dropped more easily). Changes take effect when the MCP server process restarts (restart the MCP client).
+- `min_results` (v1.7.2) — when fewer results than this pass the floors, the shortfall is filled with **weak matches** — candidates the floors dropped, shown under a separate heading and never TTL-refreshed (default `3`; [§3.14](#314-search-result-shaping-v170-weak-match-fill-since-v172) step 6). Set to `0` to disable the fill. Changes take effect when the MCP server process restarts.
 - `dedup_threshold` and `context_char_limit` (v1.6.x) are **removed** — ignored if present in an existing `config.json` (no need to delete them).
 - `min_score` — excludes results whose `filter_score` (the score without `time_decay` and `b_session`, [§3.6](#36-ranking-formula)) is below this value (default `0.2`). Set to `0.0` to disable. **The filter is applied after lexical rerank ([§3.6](#36-ranking-formula))** — it judges the score including phrase/coverage boosts, so a candidate just below the threshold at fusion time can be rescued by the rerank boost.
 - `search_query_max_chars` — max characters used from a query (default `2000`; embedding model caps at ~512 tokens).
@@ -1612,6 +1921,10 @@ Complete schema (missing fields auto-filled with defaults below):
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (see [§3.6](#36-ranking-formula)). Setting `enabled` to `false` passes the fused score through unchanged.
 - `b_session_match` / `b_session_mismatch` — the `b_session` factor in the ranking formula (see [§3.6](#36-ranking-formula)). For each row, the search compares the request's `effective_session` (per-call argument → `N3MC_SESSION_ID` env var → per-process startup UUID) against the row's stored `session_id`: matches multiply the score by `b_session_match` (default `1.0`), mismatches by `b_session_mismatch` (default `0.6`). Set both to `1.0` to disable the bias entirely (all rows symmetric).
 - `skip_code_blocks` — when `true`, `save_memory` rejects any content containing a triple-backtick fence (```` ``` ````) and returns `{"status": "skipped_code", "saved": false}`. Default `false` (inherit the FastAPI-era N3MemoryCore behavior where users who did not want code in memory could opt out). Heuristic only — the fence marker is the signal; mixed prose+code is rejected wholesale. With `false`, the body is saved with its code blocks replaced by `[code omitted]` (v1.9.0, §3.13). The LLM is instructed (§5) to avoid retrying the same payload on `skipped_code` and to save a prose description instead.
+- `server_port` (v2.0.0) — the port of the resident server (default `18524`, §3.15). Free uses 18520, Pro 18521, the PostgreSQL edition 18522 and the Ollama edition 18523; keep a port of its own for each N3MC product on one PC (§14).
+- `bind_host` (v2.0.0) — the address the resident server listens on. Keep the default `127.0.0.1` (§3.15).
+- `context_max_chars` (v2.0.0) — the largest size of the hook's `# Recalled Memory Context` block and of the MCP `search_memory` result, counted as in §3.17 (default `9500`). Claude Code moves hook output over 10,000 characters to a file and leaves a 2,000-character preview, so the allowed range is 2000–10000. A manual `--search` is not limited.
+- **When a change takes effect (v2.0.0)**: editing `config.json` changes the resident server's `code_version`, so the next hook, CLI or MCP call stops the server and starts a new one that reads the file (§3.15). Where this section says "when the MCP server process restarts (restart the MCP client)", read "on the next call after the edit".
 - `embedding_model` / `embedding_dim` — the embedding model name (default `intfloat/multilingual-e5-base`) and its output vector dimension (default `768`). See [§3.2](#32-embeddings). Made configurable so the operator can pick the quality / resource / language tradeoff while the product stays language-neutral. `embedding_dim` MUST match the actual output dimension of `embedding_model` — the RediSearch vector index (`DIM`) is built from this value, so a mismatch breaks save and search. Changing either requires a **process restart + index flush** (Lite's 7-day TTL means stale data expires on its own if left). With the defaults unchanged, behavior is identical to prior versions.
 
 **Unreadable or mistyped `config.json` (v1.7.0)** — users edit this file by hand (e.g. to tune `vector_min_cos`), so typos are expected. **Never overwrite it.**
@@ -1637,6 +1950,9 @@ Complete schema (missing fields auto-filled with defaults below):
 | `half_life_days` | number | > 0 |
 | `bm25_min_threshold`, `access_count_weight`, `access_count_max_boost`, `rerank_weight`, `rerank_phrase_weight` | number | ≥ 0 |
 | `min_score`, `vector_min_cos`, `relative_min_score_ratio`, `version_sim_threshold`, `b_session_match`, `b_session_mismatch` | number | 0–1 |
+| `server_port` (v2.0.0) | integer | 1–65535 |
+| `context_max_chars` (v2.0.0) | integer | 2000–10000 |
+| `bind_host` (v2.0.0) | string | any (a value other than `127.0.0.1` prints a warning, §3.15) |
 
 - "Integer" means a JSON integer: `604800.5` and also `768.0` are rejected. v1.7.0 accepted them; `ttl_seconds: 604800.5` (or `0`, or a negative value) made every `save_memory` fail with a Redis `DataError`, `embedding_dim: 768.0` made `FT.CREATE` fail at start, and `chunk_overlap >= chunk_threshold` (e.g. only `chunk_threshold` lowered to 100) made `chunk_text` loop forever on a body without breaks — none with a notice.
 - An out-of-range value is handled like a wrong type: only that key uses its default, and `config_type` names it.
@@ -1649,7 +1965,7 @@ Complete schema (missing fields auto-filled with defaults below):
 > **⚠️ Why (v1.7.1, Lite review LH3)**: v1.7.0 let every starting process generate its own `owner_id` and write the file. Starting 8 processes at once, 5 times out of 5 all 8 ended up with different `owner_id`s and 7 kept running with an ID that was not in the file; their saves returned `saved: true`, but search and list filter by `owner_id`, so those memories were invisible from the next start on. The Claude desktop app on the development PC starts two registrations at the same moment.
 
 - **While `config.json` is unreadable** (the run uses fresh in-memory IDs, table above), every `save_memory` response adds `"warning": "config_unreadable", "detail": "config.json could not be read, so this entry was saved under a temporary owner_id and will not be visible after the server restarts. Fix <path> and restart the MCP client."` (v1.7.1; v1.7.0 warned only on the first search — Lite review LL9). The warning is added to responses that saved something. If the entry was also saved without a vector, the two are combined: `"warning": "embedding_unavailable; config_unreadable"` and the two `detail` texts joined with a space.
-- **Notices**: `load_config()` collects these messages in `cfg["_notices"]` (a list of strings, each starting with its key, e.g. `config_type: …`) and prints each to `stderr`. The connection layer adds `shared_redis` / `config_refused` (§3.4) and `index_dim_mismatch` (§3.9) to the same list. The server prepends each notice **once**, to the output of the first successful `search_memory` call after the notice was added (an error response must still start with `Error:`, so the notices wait for the next successful search), as `> ⚠️ N3MC notice: <message>` lines, so the connected LLM can tell the user (§5 rule 11). A notice added later in the process — `shared_redis` after a reconnect, for example — is therefore shown on the next successful search (v1.7.1; v1.7.0 showed notices only on the first search of the process, so later ones were never shown). Fixing the cause and restarting the client clears them.
+- **Notices**: `load_config()` collects these messages in `cfg["_notices"]` (a list of strings, each starting with its key, e.g. `config_type: …`) and prints each to `stderr`. The connection layer adds `shared_redis` / `config_refused` (§3.4) and `index_dim_mismatch` (§3.9) to the same list. The server prepends each notice **once**, to the output of the first successful `search_memory` call after the notice was added (an error response must still start with `Error:`, so the notices wait for the next successful search), as `> ⚠️ N3MC notice: <message>` lines, so the connected LLM can tell the user (§5 rule 11). A notice added later in the process — `shared_redis` after a reconnect, for example — is therefore shown on the next successful search (v1.7.1; v1.7.0 showed notices only on the first search of the process, so later ones were never shown). Fixing the cause and restarting the client clears them. **(v2.0.0)** "The process" is the resident server; "the first successful `search_memory`" is the first successful search of either kind (the MCP `search_memory`, or the hook's or CLI's `/search`, §3.15 "Where notices are shown"); fixing `config.json` restarts the server by itself (`code_version`). Every process that reads `config.json` (the CLI, the hooks, the thin client) still prints these messages to its own stderr.
 
 > **Multi-account on a single PC**: each OS user runs the server under their own `config.json`, so each has its own `owner_id`. Lite does not share memories between owners: search and list show only the records of the configured `owner_id` (§3.12). Do not point two accounts at one Redis — the duplicate guards do not contain `owner_id`, so a body saved by one account is answered `duplicate` for the other (§3.8), and the other account's records can fill the search candidates (§3.12). Give each account its own Redis (another container on another port, set in its `redis_url`). Memories are shared only between servers that use the same `config.json` (the same `owner_id`), for example the Claude desktop app and the terminal `claude` of one account. (Until the final review of 2026-11-18, L-02, this note said that two accounts could share a Redis by setting the same `redis_url`.)
 
@@ -1660,7 +1976,15 @@ Complete schema (missing fields auto-filled with defaults below):
 By default, only `config.json` lives on disk, in **`~/.n3mc-workingmemory/`** (the user's home directory; on Windows `%USERPROFILE%\.n3mc-workingmemory\`). Override via the environment variable `N3MC_DATA_DIR` (absolute path).
 
 Files inside the data directory:
-- `config.json` — configuration (the only on-disk artifact)
+- `config.json` — configuration (up to v1.12.2 the only on-disk artifact)
+- (v2.0.0) `n3mc-lite.pid` — PID file of the resident server (exists only while it runs, §3.15)
+- (v2.0.0) `server.log` — stderr of the resident server (truncated when over 1 MB at a start, §3.15)
+- (v2.0.0) `server_start_failed` — marker of a failed server start (5-minute back-off, §3.15)
+- (v2.0.0) `notices.json` — notices that need human action (§3.15)
+- (v2.0.0) `audit.log`, `audit.log.1` — JSONL audit trail of every hook call, written before anything else; it holds the raw prompts and replies, **including code blocks and pasted text, with no TTL** (§12). Treat it as private data. Rotated at 50 MB by `--stop`, so at most about 100 MB is kept.
+- (v2.0.0) `turn_id_<session>.txt` (`turn_id.txt` without a session) — the `turn_id` handed from the UserPromptSubmit hook to the Stop hook (§12); files older than 30 days are removed by `--stop`
+
+These files are flat in the data folder (Free keeps them in a `.memory/` subfolder; Lite has no database file to separate them from). `audit.log` is the only file that keeps conversation text beyond Redis's TTL; it exists because the hook must not lose a message when Redis is down (§12).
 
 > **⚠️ Why the home directory, not the platform app-data directory (v1.7.0)**: up to v1.6.x the config lived in the platform user-data directory (`%LOCALAPPDATA%\n3mc-workingmemory\n3mc-workingmemory\` on Windows, via `platformdirs`). The Microsoft Store (MSIX) build of the Claude desktop app runs the MCP servers it launches inside its package container, and Windows **redirects their reads and writes under `%LOCALAPPDATA%`** to `%LOCALAPPDATA%\Packages\<package>\LocalCache\Local\…`. The same PC therefore had two `config.json` files with two different `owner_id`s — one for servers launched by the desktop app, one for servers launched from a terminal (`claude`, scripts) — and because search and list filter by `owner_id` (§3.12), memories saved from one were invisible to the other, on the same Redis. The home directory is not redirected, so every launcher reads the same file.
 
@@ -1668,27 +1992,55 @@ Files inside the data directory:
 
 ---
 
-## 8. MCP Client Configuration
+## 8. Client Configuration
+
+> **(v2.0.0) Which application uses what.** Claude Code uses **the hooks only**; the Claude desktop app and other applications without hooks use **MCP only** (see "What changed in v2.0.0"). This section was titled "MCP Client Configuration" up to v1.12.2.
 
 ### Claude Desktop
 
-`%APPDATA%\Claude\claude_desktop_config.json` (Windows) or
-`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+The desktop app starts the MCP servers listed in `claude_desktop_config.json`. Open it from the app (Settings → Developer → Edit Config); the usual place on Windows is `%APPDATA%\Claude\claude_desktop_config.json`, and the Microsoft Store version of the app may keep it in another folder, so prefer opening it from the app. Add the entry under `mcpServers` (keep the entries already there), save, and **quit the app completely and start it again**.
+
+pip installation (v2.0.0: absolute path and `env`):
 
 ```json
 {
   "mcpServers": {
     "n3mc-workingmemory": {
-      "command": "n3mc-workingmemory",
-      "args": []
+      "command": "C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\n3mc-workingmemory.exe",
+      "args": [],
+      "env": {
+        "N3MC_AGENT_NAME": "claude-desktop"
+      }
     }
   }
 }
 ```
 
-### Claude Code
+Plugin users (no pip installation; the hooks run through `uvx`):
 
-Three equivalent paths are supported. Pick one; do not combine.
+```json
+{
+  "mcpServers": {
+    "n3mc-workingmemory": {
+      "command": "uvx",
+      "args": ["--from", "n3memorycore-mcp-lite==2.0.0", "n3mc-workingmemory"],
+      "env": {
+        "N3MC_AGENT_NAME": "claude-desktop"
+      }
+    }
+  }
+}
+```
+
+- `command`: **the absolute path** of `n3mc-workingmemory` from the same scripts folder the hooks use (Windows: `where n3mc-workingmemory`; Linux: `which n3mc-workingmemory`). The app does not use the `PATH` of your terminal. Hooks and MCP must run the same code (§4.6 "Limits of this design").
+- `env.N3MC_AGENT_NAME` (v2.0.0): the name stored as `agent_name` when the model does not pass one (§4.6). Use one name per application.
+- When the hooks use another data folder (`N3MC_DATA_DIR`), add the same `N3MC_DATA_DIR` to `env`; otherwise the desktop app would use `~/.n3mc-workingmemory`, another `config.json` and another `server_port`.
+- `N3MC_SESSION_ID` may be added to pin the default `session_id` of this application (§3.1).
+- Other MCP clients on Windows or Linux are registered the same way (command, args, env).
+
+### Claude Code (hooks — v2.0.0)
+
+**Do not register the MCP server in Claude Code** (`claude mcp add`, `~/.claude.json`, `.mcp.json`). Claude Code gets its memory from the hooks (every message and reply saved, the matching memories put into every turn) and from the CLI `n3mc-lite` (§12, §13). Two ways to install:
 
 **(a) Plugin marketplace (recommended — no manual config file)**
 
@@ -1697,96 +2049,129 @@ Three equivalent paths are supported. Pick one; do not combine.
 /plugin install n3mc-workingmemory@neuralnexusnote
 ```
 
-The plugin ships a `plugin.json` that launches the server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`. Requires `uv` on PATH.
-
-**(b) Project-local `.mcp.json` (manual, when cloning the repo or pip-installing)**
+Requires `uv` on PATH. `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` keeps its metadata and has **no `mcpServers` key** any more (v2.0.0). `plugins/n3mc-workingmemory/hooks/hooks.json` registers three hooks:
 
 ```json
 {
-  "mcpServers": {
-    "n3mc-workingmemory": {
-      "type": "stdio",
-      "command": "n3mc-workingmemory",
-      "args": []
-    }
-  }
-}
-```
-
-**(c) Project-local `.mcp.json` via uvx (no prior install needed)**
-
-```json
-{
-  "mcpServers": {
-    "n3mc-workingmemory": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite", "n3mc-workingmemory"]
-    }
-  }
-}
-```
-
-Restart the client after editing the config. Ensure Redis Stack is running *before* the client starts the server — otherwise the first tool call returns the "start Redis Stack" hint.
-
-### Automatic registration after code generation (Method A — required)
-
-**Method A ends with the server registered and verified by the AI. The user's only remaining step is a full restart.** Do not ask the user to edit any config file, and do not finish Phase 1 with a working package that no client is connected to. Do this right after `pip install -e .` succeeds:
-
-1. **Find the entry point on this PC.** Take the scripts folder of the Python that ran `pip install -e .` (`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`, or the venv's `Scripts\` / `bin/`) and check that `n3mc-workingmemory.exe` (Windows) or `n3mc-workingmemory` exists there. Use that **absolute path**, not the bare command name: Claude Code may start the server with a `PATH` that does not contain the scripts folder.
-2. **Remove stale registrations.** Run `claude mcp remove n3mc-workingmemory -s user` (a "not found" error is fine). In the install folder, if `.mcp.json` has an `n3mc-workingmemory` entry whose command does not exist on this PC (for example a path from another PC), remove that entry and keep the other servers.
-3. **Register for Claude Code (user scope)**: `claude mcp add -s user n3mc-workingmemory -- "<absolute path>"`. User scope makes the working memory available in every folder. If the `claude` command is not on `PATH`, add the same server to the top-level `mcpServers` object of `~/.claude.json` instead — `{"type": "stdio", "command": "<absolute path>", "args": []}` — after copying the file to a backup, keeping every other key, and writing it atomically (temporary file in the same folder, then replace).
-4. **Pre-approve the tools**: add `mcp__n3mc-workingmemory__*` to `permissions.allow` in `~/.claude/settings.json` (same merge rules as [Auto-approve tool calls](#auto-approve-tool-calls-claude-code-only): back up, re-read before writing, keep existing rules, write atomically).
-5. **Claude Desktop**: if `%APPDATA%\Claude\claude_desktop_config.json` (Windows) exists, add the same server there too, with the same backup and merge rules.
-6. **Verify before telling the user to restart.** Start the registered command once yourself, send an MCP `initialize` request followed by `tools/list` over stdio, check that the seven tools of §4.3 are listed, then stop the process. The first `initialize` can take about 17 s while the model loads (§3.9). If `claude` is available, `claude mcp get n3mc-workingmemory` must show the absolute path from step 1. If any check fails, fix it and repeat; do not hand over a registration that does not start.
-7. **Finish with one message**: "Setup is complete. Fully exit Claude Code (and Claude Desktop) and open it again — the memory server connects on the next start." Add the Windows full-exit steps from Appendix B ("Fully restart Claude Code between Phase 1 and Phase 2").
-
-> **⚠️ Why (2026-11-16)**: a code-generation setup on a second PC ended with a package installed but no working registration: the folder's `.mcp.json` pointed at `C:\Users\<other PC user>\…\Python312\Scripts\n3mc-workingmemory.exe`, which did not exist there. Up to this version, Method A said only "register the server (§8)", and §8 showed the bare command name, which depends on `PATH`. Code generation is the primary install path for Lite, so it must end in a connected server without manual configuration.
-
-### Auto-approve tool calls (Claude Code only)
-
-By default, Claude Code prompts the user for each MCP tool call. **For the auto-save loop to work without the LLM blocking mid-turn**, pre-approve the `n3mc-workingmemory` tools — otherwise every `save_memory` / `search_memory` call pops a Yes/No dialog and stalls the connected AI when the user is away from the keyboard.
-
-**Plugin install auto-configures this** — installing via `/plugin install n3mc-workingmemory@neuralnexusnote` ships a `SessionStart` hook ([`hooks/install_permissions.py`](./plugins/n3mc-workingmemory/hooks/install_permissions.py)) that idempotently adds **two wildcard rules** to `permissions.allow` in `~/.claude/settings.json`:
-
-- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — the tools **as the plugin provides them**. Claude Code names a plugin's MCP tools `mcp__plugin_<plugin-name>_<server-name>__<tool>` and permission rules must use that plugin-scoped form ([permissions docs](https://code.claude.com/docs/en/permissions.md), "Servers that a plugin provides").
-- `mcp__n3mc-workingmemory__*` — the same tools when the server is registered directly (`claude mcp add`, `.mcp.json`).
-
-Wildcards cover all seven tools, including `recall_thread`, and any tool added later. The hook writes only when a rule is missing, never removes entries the user already has (e.g. the explicit per-tool list from v1.6.x), and leaves unrelated fields untouched. **Writing (v1.7.1, Lite review LL2)**: re-read the file immediately before writing and merge the missing rules into what is there at that moment (another program may have changed it since the first read), then write a temporary file in the same folder and `os.replace` it onto `settings.json`, so an interrupted write never leaves a truncated file.
-
-**When `settings.json` cannot be updated (v1.7.0)** — if a rule is missing but the file cannot be read as a JSON object (invalid JSON, wrong top-level type, `permissions` / `allow` of the wrong type) or cannot be written (read-only file, no permission, locked by a corporate policy), the hook does **not** change anything and reports it instead of failing silently: one `stderr` line (kept in Claude Code's debug log) and the same `systemMessage` + `additionalContext` JSON as below, e.g. `[n3mc-workingmemory] Could not update ~/.claude/settings.json (PermissionError: …), so the memory tools were not pre-approved and Claude Code will ask for permission on every memory call. Make the file writable, or add "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" to permissions.allow yourself.` It still exits 0. Nothing is reported when the rules are already present (a read-only file that already has them is fine). v1.6.x swallowed these errors: exit 0, no output (found by the A8 test).
-
-> **⚠️ v1.6.x auto-approve never matched the plugin (fixed in v1.7.0)**: v1.6.x added six explicit `mcp__n3mc-workingmemory__<tool>` rules. Those names match a directly registered server but **not** the plugin-scoped tool names, so plugin users were asked for permission on every `search_memory` / `save_memory` call — the stall the auto-approve was meant to prevent — and `recall_thread` was missing from the list altogether.
-
-**Python fallback and visible failure** — the `hooks.json` command tries `python` → `py` (Windows Python Launcher) → `python3` in a `||` chain. If **none** is on `PATH`, a fourth, Python-free step prints one JSON object to stdout and exits 0:
-
-```json
-{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory tools may not be pre-approved and Claude Code may ask for permission on every memory call. Install Python 3, or add \"mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
-```
-
-The fourth step also runs when a Python step exists but exits non-zero (an exception before the script's own handler), so the text names both causes (v1.7.1, Lite review LL7; the script itself always exits 0, so this is rare). `systemMessage` is shown to the user as a warning, and `additionalContext` lets the connected LLM explain it. A plain non-zero exit is **not** enough: Claude Code reports a failed `SessionStart` hook only as a `SessionStart hook error` notice in the transcript carrying the first stderr line (`python: command not found`), which says neither what breaks nor how to fix it, and the `/plugin` Errors tab lists plugin *load* errors (invalid `hooks.json`, bad paths), not hook *runtime* failures ([hooks docs](https://code.claude.com/docs/en/hooks.md), [plugin troubleshooting](https://code.claude.com/docs/en/plugins/troubleshooting.md)). v1.6.x relied on the Errors tab and was effectively silent.
-
-The same hook also performs a **`uvx` pre-flight check**: the plugin manifest ([`.claude-plugin/plugin.json`](./plugins/n3mc-workingmemory/.claude-plugin/plugin.json)) launches the MCP server via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so a missing `uvx` would otherwise surface only as an opaque `ENOENT` in the MCP launcher. The hook calls `shutil.which("uvx")` and, if not found, prints the same kind of JSON (`systemMessage` + `additionalContext`) with a bilingual install hint (`pipx install uv`, `curl -LsSf https://astral.sh/uv/install.sh | sh`, plus the docs URL) and exits 0. When both apply, the messages are combined into one JSON object (a hook's stdout must be a single JSON object). The object is written with `json.dumps(..., ensure_ascii=True)` — ASCII only, non-ASCII characters as `\uXXXX` escapes, which a JSON reader turns back into the same text: the script does not switch its stdout to UTF-8, and on a Japanese Windows it is cp932, while the `uvx` hint contains Japanese (final review of 2026-11-18, L-03; until then the JSON was written with `ensure_ascii=False`). `settings.json` itself is still written as UTF-8 with `ensure_ascii=False`.
-
-**If you installed without the plugin** (`claude mcp add`, manual `.mcp.json`), add the block below manually (wildcard form: `mcp__n3mc-workingmemory__*`). **If you installed the plugin but no Python interpreter is available**, add `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` instead (the plugin-scoped name). Put the rules in `~/.claude/settings.json` (user-global — recommended) or `.claude/settings.json` (per-project):
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__n3mc-workingmemory__search_memory",
-      "mcp__n3mc-workingmemory__save_memory",
-      "mcp__n3mc-workingmemory__list_memories",
-      "mcp__n3mc-workingmemory__delete_memory",
-      "mcp__n3mc-workingmemory__delete_memories_by_session",
-      "mcp__n3mc-workingmemory__repair_memory",
-      "mcp__n3mc-workingmemory__recall_thread"
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<COMMAND A, below, as a JSON string>"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite-hook --uvx" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite-stop-hook --uvx" }
+        ]
+      }
     ]
   }
 }
 ```
 
-> Claude Desktop has no per-tool permission gate, so this step is unnecessary there. Claude Code does not (as of 2026-04) accept a `permissions` field in `plugin.json`, so the plugin ships a `SessionStart` hook that idempotently patches the user's `settings.json` (see "Plugin install auto-configures this" above).
+COMMAND A (the shell command; in `hooks.json` it is written as a JSON string, with `"` and `\` escaped):
+
+```text
+python "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || py "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || python3 "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || echo '{"systemMessage": "<FALLBACK>", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<FALLBACK>"}}'
+```
+
+`<FALLBACK>` is the text of the fallback JSON in "Auto-approve" below (with its `\"` escapes). Only the text changed from v1.12.2.
+
+- `--uvx` tells the hook entries that this installation runs through `uvx`, so the rules file and the plugin's permission rules name the `uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite` command form (§12). Without it the `python -m n3mc_mcp.cli` form is used (pip installations).
+- The resident server is started by the hook process with its own `sys.executable` (`-m n3mc_mcp.cli --run-server`, §3.15), i.e. inside the `uvx` environment.
+- **Start-up time of `uvx` (measured 2026-11-19, Windows 11, uv 0.11.7, package already in the uv cache; median of 10 runs after one warm-up)**: `python -c pass` with the system Python 125 ms; `uvx --from n3memorycore-mcp-lite==2.0.0 python -c pass` 316 ms (pinned `==1.12.2`: 317 ms); `uvx --from n3memorycore-mcp-lite==1.12.2 python -c "import n3mc_mcp.config"` 503 ms. So `uvx` adds about 0.19 s to each hook start, and each message starts two hooks (`UserPromptSubmit` and `Stop`). Not measured: the v2.0.0 hook code itself (it does not exist yet), a run that must download or refresh the package, and Linux. **Decided 2026-11-19: the plugin's hooks run through `uvx`; the added time is accepted.** The `uvx` command is pinned to the package version (decided 2026-11-19, §2).
+
+**(b) pip**
+
+```bash
+pip install n3memorycore-mcp-lite
+n3mc-lite --init
+```
+
+`n3mc-lite --init` registers the two hooks in `~/.claude/settings.json` with the absolute paths of `n3mc-lite-hook` / `n3mc-lite-stop-hook` and adds the permission rules below (§12 "`--init`"). Restart Claude Code; memory starts with the next session.
+
+**Old MCP registrations (v1.12.2 and earlier)**: an `n3mc-workingmemory` entry in Claude Code (user scope in `~/.claude.json`, or a project's `.mcp.json`) is no longer used. `n3mc-lite --init` reads `~/.claude.json` and the current folder's `.mcp.json` (read only) and, when it finds one, prints `An MCP registration of n3mc-workingmemory was found in Claude Code (<file>). Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s user` (for `.mcp.json`: `remove the "n3mc-workingmemory" entry from <file>`). It does not edit these files. If it stays, Claude Code shows the tools again next to the hooks; the instructions then tell the model not to save every turn (§5).
+
+Restart the client after editing any config. Ensure Redis Stack is running before the first message — otherwise the hooks keep the text only in `audit.log` and show the "start Redis Stack" notice (§12).
+
+### Automatic registration after code generation (Method A — required)
+
+**Method A ends with the hooks registered and verified by the AI. The user's only remaining step is a full restart.** Do not ask the user to edit any config file, and do not finish Phase 1 with a working package that no client uses. Do this right after `pip install -e .` succeeds:
+
+1. **Find the entry points on this PC.** Take the scripts folder of the Python that ran `pip install -e .` (`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`, or the venv's `Scripts\` / `bin/`) and check that `n3mc-lite`, `n3mc-lite-hook`, `n3mc-lite-stop-hook` and `n3mc-workingmemory` (`.exe` on Windows) exist there. Use **absolute paths**, not bare command names: Claude Code may run commands with a `PATH` that does not contain the scripts folder.
+2. **Remove stale MCP registrations from Claude Code (v2.0.0).** Run `claude mcp remove n3mc-workingmemory -s user` (a "not found" error is fine). In the install folder, if `.mcp.json` has an `n3mc-workingmemory` entry, remove that entry and keep the other servers. If the `claude` command is not on `PATH`, remove the `n3mc-workingmemory` entry from the top-level `mcpServers` object of `~/.claude.json` instead — after copying the file to a backup, keeping every other key, and writing it atomically (temporary file in the same folder, then replace). **Why**: Claude Code uses the hooks; a registration left from v1.12.2 would show the tools again and make the model save on its own next to the hooks.
+3. **Register the hooks**: run `<absolute path of n3mc-lite> --init` (§12). It writes the hooks and the permission rules into `~/.claude/settings.json`, keeping every other entry (other N3MC products' hooks included, §14). If it reports that the plugin is enabled, the plugin's hooks are in use and nothing more is needed.
+4. **Claude Desktop**: if `%APPDATA%\Claude\claude_desktop_config.json` (Windows) exists, add the pip entry of "Claude Desktop" above with the absolute path from step 1, with the same backup and merge rules.
+5. **Verify before telling the user to restart.**
+   - The hook gate of §10 item 7.1 prints `OK`.
+   - `<absolute path of n3mc-lite> --search "setup check"` prints a block that starts with `# Recalled Memory Context` (this starts the resident server; the first start may take minutes while the model downloads — a "still starting" placeholder is acceptable, then repeat until a real result or `_No memories found._` appears).
+   - Start `n3mc-workingmemory` once yourself, send an MCP `initialize` followed by `tools/list` over stdio, check that the seven tools of §4.3 are listed (the answer comes within 2 seconds, §4.6), then close its stdin.
+   - If `claude` is available, `claude mcp get n3mc-workingmemory` must report that no such server exists.
+   - If any check fails, fix it and repeat; do not hand over a setup that does not work.
+6. **Finish with one message**: "Setup is complete. Fully exit Claude Code (and Claude Desktop) and open it again — memory starts with the next session." Add the Windows full-exit steps from Appendix B ("Fully restart Claude Code between Phase 1 and Phase 2").
+
+> **⚠️ Why (2026-11-16)**: a code-generation setup on a second PC ended with a package installed but no working registration: the folder's `.mcp.json` pointed at `C:\Users\<other PC user>\…\Python312\Scripts\n3mc-workingmemory.exe`, which did not exist there. Up to that version, Method A said only "register the server (§8)", and §8 showed the bare command name, which depends on `PATH`. Code generation is the primary install path for Lite, so it must end in a working setup without manual configuration. (v2.0.0: the registration is now the hooks; the absolute-path rule is kept for the hook commands and the desktop entry.)
+
+### Auto-approve (Claude Code only)
+
+**(v2.0.0)** Claude Code no longer has MCP tools for this server. The hooks are run by Claude Code itself and need no permission; what needs approval is the CLI commands Claude runs when it searches on its own (§13). Without a rule, every `--search` asks the user.
+
+**pip (`PERMISSION_RULES`, written by `n3mc-lite --init`)** — added to `permissions.allow` in `~/.claude/settings.json` (only the missing ones; nothing is removed):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m n3mc_mcp.cli --search *)",
+      "Bash(python -m n3mc_mcp.cli --buffer *)",
+      "Bash(python -m n3mc_mcp.cli --list*)",
+      "Bash(python -m n3mc_mcp.cli --recall-thread *)",
+      "Bash(python -m n3mc_mcp.cli --repair*)",
+      "Bash(python -m n3mc_mcp.cli --stop*)",
+      "Bash(n3mc-lite --search *)",
+      "Bash(n3mc-lite --buffer *)",
+      "Bash(n3mc-lite --list*)",
+      "Bash(n3mc-lite --recall-thread *)",
+      "Bash(n3mc-lite --repair*)",
+      "Bash(n3mc-lite --stop*)"
+    ]
+  }
+}
+```
+
+**Plugin (`hooks/install_permissions.py`, SessionStart)** — the same six commands in the `uvx` form, `Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search *)` … `Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --stop*)`. The v1.12.2 rules `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` and `mcp__n3mc-workingmemory__*` are no longer added; existing ones are left alone (they match nothing now).
+
+- **`--delete` and `--delete-session` are never pre-approved**: they are irreversible (§4.3), so Claude Code asks the user each time — the same confirmation the tools' descriptions ask the model to get.
+- The `python -m n3mc_mcp.cli` form is the one the rules file gives Claude (Free §4 ②: the bash subshell Claude Code spawns does not reliably have the scripts folder on `PATH`; `python` is). The `n3mc-lite` form is for interactive use.
+
+The plugin hook keeps the v1.12.2 mechanics, with texts about the CLI commands instead of the MCP tools:
+
+- **Writing**: re-read `settings.json` immediately before writing, merge only the missing rules, write a temporary file in the same folder and `os.replace` it; never remove entries; leave unrelated fields untouched (v1.7.1, LL2).
+- **When `settings.json` cannot be updated**: change nothing, print one stderr line and the `systemMessage` + `additionalContext` JSON, exit 0: `[n3mc-workingmemory] Could not update ~/.claude/settings.json (<ErrorType>: …), so the memory commands were not pre-approved and Claude Code will ask for permission when Claude searches the memory. Make the file writable, or add "Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search *)" to permissions.allow yourself.` Nothing is reported when the rules are already present.
+- **Python fallback and visible failure**: the `hooks.json` command tries `python` → `py` → `python3`; if none works (or the script exits non-zero), a Python-free step prints one JSON object and exits 0:
+
+```json
+{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory commands may not be pre-approved and Claude Code may ask for permission when Claude searches the memory. Install Python 3, or add \"Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search *)\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
+```
+
+- **`uvx` pre-flight**: `shutil.which("uvx")`; if missing, the same kind of JSON with the bilingual install hint of v1.12.2 (`pipx install uv`, `curl -LsSf https://astral.sh/uv/install.sh | sh`, the docs URL), now saying that the memory **hooks** cannot run without `uvx`. Combined into one JSON object with any other message; written with `json.dumps(..., ensure_ascii=True)` (L-03).
+- **(v2.0.0) Double registration check**: if `~/.claude/settings.json` also holds hooks of a pip installation (`is_own_hook` of §12 matches an entry), add to the same JSON: `[n3mc-workingmemory] The N3MC Lite hooks are registered twice: by this plugin and by "n3mc-lite --init" in ~/.claude/settings.json. Every message is then searched twice. Remove the two n3mc-lite-hook / n3mc-lite-stop-hook entries from ~/.claude/settings.json, or uninstall the plugin.` (§14). The script never removes hooks itself.
+
+> Claude Desktop has no per-tool permission gate, so none of this is needed there. Claude Code does not (as of 2026-04) accept a `permissions` field in `plugin.json`, so the plugin ships a `SessionStart` hook that patches the user's `settings.json`.
 
 ---
 
@@ -1814,6 +2199,16 @@ N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
 
 Tests auto-skip (not fail) if `N3MC_REDIS_TEST_URL` is unset or Redis Stack is not reachable there. Tests that do not need Redis (ranking, shaping, config) run without it.
 
+**Protect real data (v2.0.0, mandatory)**: an autouse fixture in `conftest.py`, for every test:
+
+- points `N3MC_DATA_DIR` at a new temporary folder and every path of `paths.py` derived from it (`config.json`, the PID file, `server.log`, the start-failure marker, `notices.json`, `audit.log`, `turn_id_*.txt`) — also the module-level copies in `cli.py`, `lite_hook.py`, `lite_stop_hook.py` and `server.py` — so no test reads or writes `~/.n3mc-workingmemory`;
+- writes into that temporary `config.json` the test Redis URL and a **`server_port` of its own**: a free port taken by binding a socket to `127.0.0.1:0` once per test session. Tests never use 18524 (the real Lite server), 18520 (Free) or 18521 (Pro);
+- sets `HOME` and `USERPROFILE` to a temporary folder, so `--init`, the plugin's permission script and the `~/.claude.json` check read and write temporary files; **the real `~/.claude/settings.json` is never read or written**;
+- replaces `_request_shutdown` and the HTTP senders (`_post`, `_get`) with fakes unless the test starts its own server on its own port (the HTTP layer tests use FastAPI's `TestClient` with `Host: 127.0.0.1:<port>`);
+- stops every server a test started (by `/shutdown` to its own port) before the test ends.
+
+Use `monkeypatch.setattr` / `monkeypatch.setenv` and let pytest restore them at the end of the test. **Never call `monkeypatch.undo()`** inside a test: it restores the real paths in the middle of the test, and later writes go to the real data folder.
+
 > **⚠️ Destructive test DB**: RediSearch can only create indexes on DB 0 (`Cannot create index on db != 0`), so the test suite FLUSHDBs DB 0 before and after every test. Do **not** point `N3MC_REDIS_TEST_URL` at a Redis instance that holds data you care about — run a dedicated container for testing.
 
 > **⚠️ Do not run pytest during the Evidence Report (§10)**: §10 saves and searches real memories against a live MCP server (the same DB 0). Running `pytest` in the middle of it means **`FLUSHDB` wipes the §10 data along with everything else**, so verification suddenly turns up "no results" and gets confusing. While running §10, stop pytest or point the tests at a separate (dedicated) Redis on another container/host.
@@ -1827,8 +2222,16 @@ n3mcmcp-lite/
     ├── test_database.py     # Layer 1: Redis / RediSearch unit tests (CRUD, schema, TTL, dedup, BM25, KNN)
     ├── test_processor.py    # Layer 2: ranking math, embeddings, purify, chunking, reranker
     ├── test_server.py       # Layer 3: MCP tool dispatch E2E (isolated `config.json` + flushed DB 0)
-    └── test_regressions.py  # Layer 4: v1.7.0 fixes (query cleaning, exact-only dedup, pre-filter, shaping, config)
+    ├── test_regressions.py  # Layer 4: v1.7.0 fixes (query cleaning, exact-only dedup, pre-filter, shaping, config)
+    ├── test_hooks.py        # Layer 5 (v2.0.0): hook flow, role prefixes, direct save
+    ├── test_api.py          # Layer 6 (v2.0.0): resident server endpoints and process management
+    ├── test_cli.py          # Layer 7 (v2.0.0): CLI commands
+    ├── test_mcp_client.py   # Layer 8 (v2.0.0): MCP thin client
+    ├── test_context_limit.py # Layer 9 (v2.0.0): context size limit
+    └── test_coexistence.py  # Layer 10 (v2.0.0): --init, plugin files, coexistence with Free / Pro
 ```
+
+**(v2.0.0) Layer 3** keeps its tests; the tool handlers are now in `tools.py` (called as `/tools/<name>` handlers inside the resident server), and the assertions on the texts are unchanged.
 
 ### Layer 1: `tests/test_database.py` (34 tests)
 
@@ -1915,6 +2318,88 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestPluginHookAsciiStdout` (final review of 2026-11-18, L-03) | With `uvx` missing, the hook's stdout is one ASCII-only line whose `systemMessage` still contains the Japanese hint after `json.loads` |
 | `TestPublicRepoHygiene` (final review of 2026-11-18, L-05) | `tests/eval_uvx_missing.py` contains no absolute user path (the folders to strip are the `PATH` entries that hold `uvx`); `metadata.version` of `.claude-plugin/marketplace.json` equals the package version |
 
+(v2.0.0) `TestPluginHook` and `TestPluginHookAsciiStdout` now check the CLI permission rules (`Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search *)` …) instead of the MCP rules, and that `--delete` / `--delete-session` are not among them.
+
+### Layer 5: `tests/test_hooks.py` (v2.0.0)
+
+Fake embeddings (no model). Classes marked *Redis* need `N3MC_REDIS_TEST_URL`. The server is either a `TestClient` of `app.py` behind the faked `_post`, or absent.
+
+| Test class | What it covers |
+|---|---|
+| `TestAuditFirst` | Both hook entries append `{"ts", "hook", "raw", "payload"}` to `audit.log` before anything else, also when the server and Redis are down and when stdin is not JSON (`payload` = `{"raw": …}`); `raw` is cut to 4,096 characters; a failing `audit.log` write does not stop the hook |
+| `TestTurnIdHandoff` (*Redis*) | `--hook-submit` makes a new `turn_id`, writes `turn_id_<session>.txt` (name sanitized, 64 characters) and saves `[user]` with it; `--save-claude-turn` reads it and saves `[claude]` with the same `turn_id`; the file is not cleared; without a file a new UUID is used; an image-only prompt still writes a new `turn_id` and saves no `[user]` |
+| `TestTranscriptRecovery` (*Redis*) | Free's transcript cases (last text block only; `tool_result`-only, `isMeta`, interruption marker, slash-command, `thinking`, `tool_use`, `isSidechain` lines skipped; the trailing current prompt skipped; an interrupted reply found) save the previous reply under the previous `turn_id`; when Stop already saved it the exact-duplicate rule stores nothing new; a missing or broken transcript logs `transcript_unreadable` and the hook still searches and saves |
+| `TestSystemPrefixes` | `<task-notification>`, `<agent-message from=`, `<system-reminder>` prompts are neither saved nor searched, keep the `turn_id`, write `stage: skipped` and print `# Recalled Memory Context\n\n_No memories found._`; a prompt starting with `<div>` is not skipped |
+| `TestRolePrefix` (*Redis*) | A short message is stored as `[user] <text>` with `agent_name` `claude-code` and the hook's `session_id`; a body of 1,000 characters gives a parent `[claude] <body>` and chunks `[claude 1/N] …`; a body up to 19 characters over `chunk_threshold` (one chunk) gives a parent and a chunk `[claude] …`; the length decision ignores the prefix; `[code omitted]` replaces fences before the prefix; `mem:sha:<turn_id>:` / `docsha:<turn_id>:` hash the prefixed text within the exchange, so `ok` saved by MCP and `[user] ok` by the hook are both stored, the same `[user] ok` in a later exchange is stored again, and the same reply saved twice under one `turn_id` (Stop hook and transcript recovery) is `duplicate`; with `skip_code_blocks: true` a message with a fence is `skipped_code` and stays in `audit.log` |
+| `TestDirectSave` (*Redis*) | With no server (and with another folder's server on the port, and with the server still starting) the hook saves directly: same records and prefixes, no `embedding` field, TTL set; `sentence_transformers` is not imported (`sys.modules` checked); a later `/repair` adds the vectors; nothing is queued |
+| `TestRedisDown` | With Redis unreachable (server up → `/buffer` 503; server down → direct save fails) the hook exits 0, `audit.log` holds the text, the notice `redis_unreachable` contains the `docker start redis-stack` hint and appears in the next search output; it is cleared after the next successful save |
+| `TestHookSearchOutput` | The hook prints `# Recalled Memory Context`, `Search query: …` and Lite's rows (`### [<id>] turn=… score=… saved=…`); `_No memories found._` when empty; `_(memory search unavailable: <reason>)_` with no server; due notices right after the heading |
+| `TestHookExitStatus` | `n3mc-lite-hook` and `n3mc-lite-stop-hook` exit 0 on every path above |
+
+### Layer 6: `tests/test_api.py` (v2.0.0)
+
+`TestClient` of `app.py` with fake embeddings; temporary data folder; *Redis* where marked.
+
+| Test class | What it covers |
+|---|---|
+| `TestHealth` | `/health` returns `status`, `root` (the temporary data folder), a 16-hex `code_version` and `pid`; `code_version` changes when `config.json`'s content changes and not when only whitespace or key order changes |
+| `TestHostHeader` | `Host: evil.example` gets 403 on every endpoint; `127.0.0.1:<port>` and `localhost:<port>` pass |
+| `TestPlainDef` | `/buffer`, `/search`, `/repair` and `/tools/{name}` are plain `def` functions |
+| `TestBufferEndpoint` (*Redis*) | `role` user / claude store the prefixes of §3.16; the answer is the `save_memory` dict; Redis down → 503 with the hint |
+| `TestSearchEndpoint` (*Redis*) | `{"text"}` starts with `# Recalled Memory Context`; `max_chars` limits it, its absence does not; an unreadable `since` → 400 with the `Error:` text; Redis down → 503 |
+| `TestToolsEndpoint` (*Redis*) | Each of the seven tools returns the same text as the v1.12.2 handler (Layer 3 assertions) with `nudge=1` and the same text without the reminder with `nudge=0`; an unknown name → `Error: unknown tool '<name>'`; a body that is not an object is read as `{}`; `search_memory` follows `context_max_chars` |
+| `TestShutdown` | `/shutdown` with another `root` → 403; with its own `root` → `ok` (exit replaced by a fake) |
+| `TestConcurrency` (*Redis*) | Saves and searches from 8 threads at once all succeed; two saves of the same text store one record |
+
+### Layer 7: `tests/test_cli.py` (v2.0.0)
+
+| Test class | What it covers |
+|---|---|
+| `TestServerDecision` | Healthy / other `code_version` / other `root` / no `root` and unverifiable; `/shutdown` first; never stops a process by the PID-file number; does not wait on a dead PID file |
+| `TestServerStart` | Detach flags per platform, stderr to `server.log`, `-m n3mc_mcp.cli --run-server`; a child that exits early ends the wait, emits `server_start_failed` and writes the marker; no new start within 5 minutes; a later success clears both; a PID-file process still starting after 60 s is neither replaced nor duplicated (process creation faked) |
+| `TestNoProxy` | With `HTTP_PROXY` pointing at another local server, `_get` reaches the N3MC Lite server and nothing reaches the proxy |
+| `TestCommands` | `--search` → `/search` without `max_chars`, `--search --since/--until` passed through; an unreadable `--since` prints the `Error:` text to stderr and exits 2; `--buffer` → `/tools/save_memory?nudge=0`; `--list` → `list_memories`; `--recall-thread` → `recall_thread` with `--before` / `--after`; `--delete` → `delete_memory`; `--delete-session` → `delete_memories_by_session`; `--repair` → `repair_memory`; each prints the answer's text unchanged |
+| `TestForeignPort` | With another folder's server on the port: searches print the `port_conflict` placeholder, `--list` / `--delete` print the backend error, hook saves go in directly |
+| `TestStop` | `--stop` writes the rules file (§12), removes `turn_id_*.txt` older than 30 days, rotates `audit.log` over 50 MB (threshold patched), prints nothing and does not stop the server |
+
+### Layer 8: `tests/test_mcp_client.py` (v2.0.0)
+
+No model. The thin client's handlers are called as functions with the HTTP senders faked, plus one subprocess test.
+
+| Test class | What it covers |
+|---|---|
+| `TestThinNames` | `n3mc-workingmemory` and `n3mc-mcp-lite` map to `n3mc_mcp.__main__:run`; `serverInfo.name` is `n3mc-workingmemory`; `pyproject.toml` declares version `2.0.0` and `mcp>=1.0.0,<2.0.0` |
+| `TestThinTools` | `tools/list` gives the seven definitions of §5 (3) verbatim without a server; the instructions are the text of §5 (1) verbatim; the handler is registered with `validate_input=False` (or without it when refused) |
+| `TestForwarding` | Each tool is sent as `POST /tools/<name>?nudge=1` with its arguments, and the answer's text is returned unchanged (byte for byte); `session_id` is filled for `search_memory` / `save_memory` only when missing (argument → `N3MC_SESSION_ID` → the process UUID, the same for every call); `agent_name` is filled (argument → `N3MC_AGENT_NAME` → `clientInfo.name` → empty); no result has `isError` set; `importance: "nan"` reaches the server and gets Lite's JSON (no SDK validation error) |
+| `TestThinNoServer` | With no server / still starting / start failed / another folder's server: `save_memory` saves directly (no `embedding` field, `warning` and `detail` of §4.6); the other tools return the texts of §4.6; Redis down too → the backend error JSON |
+| `TestThinStart` | `ensure_server` runs once in a background thread at start (`initialize` is answered while it is blocked, patched) and before every tool call; the entry never calls `/shutdown` |
+| `TestThinNoModel` | Importing and running the thin client does not import `sentence_transformers` or `torch` (`sys.modules`); nothing is written to stdout outside MCP messages (captured) |
+| `TestThinSubprocess` (*Redis*) | `n3mc-workingmemory` started as a child with the temporary `N3MC_DATA_DIR` and talked to with `mcp.client.stdio.stdio_client`: `initialize` within 2 s, seven tools, a `save_memory` then `search_memory` round trip through a real server on the test port; the server is still running after the client is closed, and the test stops it |
+
+### Layer 9: `tests/test_context_limit.py` (v2.0.0)
+
+No model, no Redis (rendering from prepared result rows).
+
+| Test class | What it covers |
+|---|---|
+| `TestContextSize` | `context_size` counts UTF-16 code units (`😀` is 2) and each line break twice |
+| `TestRenderLimit` | Without `max_chars` the output is unchanged (20 rows, over 10,000); an output that fits is identical to the unlimited one; over the limit the kept rows are the first rows in order, one more row would not fit, and the omission line with the right N follows the last kept normal row and comes before the weak heading; at 3 rows the text is cut and ends with the cut line; a 30,000-character parent document as the first hit is cut; notices and weak rows are kept by step 1; rows of Japanese and emoji stay within the limit; the MCP output keeps `_NUDGE_AFTER_SEARCH` at the end and counts it |
+| `TestHookUsesLimit` | `--hook-submit` prints at most `context_max_chars` (default 9,500); a manual `--search` prints all rows |
+| `TestConfigContextMaxChars` | Default 9500; `1999`, `10001`, `9500.0`, `"9500"` are ignored with `config_type`; `2000` and `10000` are accepted |
+
+### Layer 10: `tests/test_coexistence.py` (v2.0.0)
+
+Temporary `HOME` only.
+
+| Test class | What it covers |
+|---|---|
+| `TestInit` | `--init` writes the two hooks with absolute forward-slash paths (quoted only with a space) and the `PERMISSION_RULES`; re-running writes nothing; a backup is made before a change; an invalid `settings.json` is left unchanged with exit status 1; our entry-point, `-m` and package-script forms are replaced, not duplicated (also written with backslashes) |
+| `TestKeepsOtherProducts` | Free's `n3mc-hook` / `n3mc-stop-hook` entries, Pro's `python ".../n3mc_hook.py"` entry and any other hook are kept and reported; Free's own `is_own_hook` (copied from Free §4 ①) does not match Lite's entries |
+| `TestPluginEnabled` | With `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` true, `--init` registers no hooks, adds the permission rules and prints the message of §12; the plugin's permission script reports `--init` hooks found in `settings.json` |
+| `TestNoMcpInClaudeCode` | `plugin.json` has no `mcpServers`; `hooks.json` has `SessionStart`, `UserPromptSubmit` and `Stop` with the commands of §8; `--init` never adds an MCP server to `~/.claude.json` or `.mcp.json`; an old `n3mc-workingmemory` entry there is reported, not edited |
+| `TestSeparateNames` | Default port 18524, data folder `~/.n3mc-workingmemory`, rules file `n3mc-lite-behavior.md`, PID file `n3mc-lite.pid`, commands `n3mc-lite*` — none equal to Free's (`18520`, `~/.n3mc`, `n3mc-behavior.md`, `n3mc*`) or Pro's (`18521`) |
+| `TestRulesFile` | The rules file is written from the template with the `python -m n3mc_mcp.cli` form, or the `uvx` form with `--uvx`; a file equal to the other form's template is replaced (with backup); a hand-edited file is not replaced and gives `rules_md_edited:<hash>`; the first line is `<!-- n3mc-lite-behavior v1 -->` |
+
 ### Example runs
 
 ```bash
@@ -1938,7 +2423,9 @@ pytest tests/ -v -k "not TestEmbedding"
 
 > Once implementation is complete, the AI runs the following checks autonomously and reports each item at ⭐⭐⭐⭐⭐. This is not a post-generation one-shot scorecard: it assumes the §9 pytest suite is green. MCP Lite is judged on *best-in-class behavior given the Redis-Stack + 7-day-TTL constraint set*.
 
-1. **Latency & process health**: Call `search_memory` from an MCP client and measure both the first call (which includes model load) and subsequent calls. Target: **≤3.0 s first call / ≤0.5 s steady state on CPU**. Also confirm that calling any tool while Redis Stack is down does **not** crash the server — it must return the "start Redis Stack" hint.
+> **(v2.0.0) How to call the tools in items 1–6**: Claude Code has no MCP tools for this server any more. Run each tool through the CLI, which calls the same handler and prints the same text without the reminder (§13): `search_memory` → `python -m n3mc_mcp.cli --search` (it runs the same search of §3.14 and prints the rows inside the hook's heading); `save_memory` → `--buffer`; `list_memories` → `--list`; `delete_memories_by_session` → `--delete-session` (Claude Code asks for permission: approve it); `repair_memory` → `--repair`. Item 10 checks the MCP path itself.
+
+1. **Latency & process health**: Call `search_memory` (through the CLI, above) and measure both the first call (which includes the resident server's start and model load) and subsequent calls. Target: **≤3.0 s first call / ≤0.5 s steady state on CPU**. Also confirm that calling any tool while Redis Stack is down does **not** crash the server — it must return the "start Redis Stack" hint. (v2.0.0: also confirm the PID file is created while the server runs, and that after `config.json` is edited the next call starts a new server.)
 
    > **⚠️ Interpreting the measurement**: "≤0.5 s steady state" is a target for **pure server-side processing** (embedding generation + Redis KNN/BM25 + ranking). Measured *through* an MCP client (e.g. Claude Code), the **JSON-RPC round-trip plus client-side LLM processing time is added on top**, and the end-to-end median can be **5–10 s** (this is not a spec violation). To measure the pure server side, use a microbenchmark that calls the `processor`/`database` functions directly. Also note, per §3.9, that the model load is backgrounded, so **if the "first tool call" arrives before the background load finishes it may wait up to ~40 s** (the first call after the model is loaded is a few seconds).
 
@@ -1969,11 +2456,47 @@ pytest tests/ -v -k "not TestEmbedding"
    5. **Idempotency check**: call `delete_memories_by_session` again with the same session_id; the server must respond `{"status": "not_found", ..., "deleted": 0}` cleanly — no errors, no crashes.
    6. **Pass criterion**: insertion count matches the server's `deleted` total, parent→chunk cascade is complete, no collateral effect on other sessions, and the second call is a safe no-op. **This is an irreversible operation. Run this test only against a dedicated test session_id; never against a production session_id.**
 
+7. **Hook integration (v2.0.0, adapted from Free §6 test 7)**: verify within Claude Code:
+   1. **Global hook registration is in place** (mandatory gate). Run:
+      ```bash
+      python -c "import json,os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'),encoding='utf-8')); h=s.get('hooks',{}); p=s.get('enabledPlugins',{}).get('n3mc-workingmemory@neuralnexusnote'); ok=lambda ev,names: any(any(n in c.get('command','').lower() for n in names) for e in h.get(ev,[]) for c in e.get('hooks',[])); assert p or ok('UserPromptSubmit',('n3mc-lite-hook','n3mc_mcp.lite_hook')), 'UserPromptSubmit hook missing'; assert p or ok('Stop',('n3mc-lite-stop-hook','n3mc_mcp.lite_stop_hook')), 'Stop hook missing'; assert p or 'Bash(python -m n3mc_mcp.cli --search *)' in s.get('permissions',{}).get('allow',[]), 'permission rules missing'; print('OK')"
+      ```
+      Pass: prints `OK` (with the plugin enabled, the plugin's hooks count). If it fails, the implementation is not complete: run `n3mc-lite --init` (§12).
+   2. **UserPromptSubmit**: from a Claude Code session opened **outside the install folder** (e.g. `~`), send a message and confirm that `# Recalled Memory Context` is in that turn's context, and that the previous reply and the message are saved (`python -m n3mc_mcp.cli --list` shows `[claude] …` and `[user] …` records). Outside the install folder is essential: inside it, a missing global registration could be hidden.
+   3. **Stop**: after the reply of that session, confirm that the reply is saved (`[claude] …`, same `turn_id` as the `[user]` record — check with `--recall-thread <turn_id>`), and that the project's `.claude/rules/n3mc-lite-behavior.md` starts with `<!-- n3mc-lite-behavior v1 -->`.
+   4. `claude mcp list` (when available) does not list `n3mc-workingmemory`.
+
+8. **Complete recording through the hooks (v2.0.0, adapted from Free §6 test 9)**:
+   - Pass a 2-character reply as `last_assistant_message` to `--save-claude-turn` and a 5-character prompt to `--hook-submit` (hook JSON on stdin): both are saved, as `[claude] …` and `[user] …`.
+   - A routine prompt (`ok`, `yes`, `thanks`) is saved every time it is sent, once in each exchange: hook saves reject exact duplicates only within the same `turn_id` (§3.16).
+   - Every hook call writes an `audit.log` record, also when the save fails (stop Redis for one call, then start it again).
+   - A long, uniformly formatted reply (a settings text of 12 items, about 2,000 characters) is saved as one parent document `[claude] …` with chunks `[claude i/N] …`, and `--search` returns it in full as one `[doc×N]` hit. An almost identical settings text (a few values changed) in another exchange is saved too, and both versions are shown with the newer first.
+
+9. **Fully automatic saving (v2.0.0, adapted from Free §6 test 10)**:
+   1. Note the newest records with `python -m n3mc_mcp.cli --list`.
+   2. Have **3 or more turns** of conversation in Claude Code. Claude must **not** call `--buffer` at any point.
+   3. `--list` again: every turn has its `[user]` and its `[claude]` record, also when a message repeats an earlier one, with one `turn_id` per turn.
+
+10. **MCP thin client (v2.0.0, like N3MC MCP Pro §6 test 20)**: in a temporary data folder (`N3MC_DATA_DIR`) whose `config.json` has a `server_port` of its own and the **test** Redis as `redis_url` (`redis://localhost:6390/0`, §9 — a temporary `config.json` has another `owner_id`, and its records in the real Redis would block the same texts for the real owner, §3.8), start `n3mc-workingmemory` as a child process with `N3MC_DATA_DIR` set and `N3MC_AGENT_NAME=test-client`, and talk to it over stdio with the `mcp` client (`mcp.client.stdio.stdio_client`, `ClientSession`):
+    1. `initialize` and `tools/list`: the seven tools of §4.3 are listed with their v1.12.2 definitions, and the instructions are the text of §5 (1). Everything the child wrote to stdout was MCP messages (no parse error).
+    2. With the temporary server stopped, call `search_memory`: the server is started and a result is returned. Then start a second MCP entry while the server runs: `initialize` answers within 2 seconds (the entry loads no model). Both entries share one server (one PID file, one process).
+    3. Save with `save_memory` and find it with `python -m n3mc_mcp.cli --search` (same `N3MC_DATA_DIR`); save with `--buffer` and find it with `search_memory`. The `save_memory` record has `agent_name` `test-client` (when the call passes none) and no role prefix.
+    4. `list_memories`, `recall_thread`, `delete_memory`, `delete_memories_by_session` and `repair_memory` return the v1.12.2 texts (Layer 3).
+    5. Stop the server (`/shutdown`), block its start (an occupied port), and call `save_memory`: the record is saved without a vector with the `warning` / `detail` of §4.6; `search_memory` returns `Error: memory backend unreachable. …`; the entry keeps running.
+    6. Close the MCP entry: the server (when one runs) is still running (`/health`). Stop it afterwards with `/shutdown` and delete the temporary folder.
+    Do **not** register the MCP entry in Claude Code or in the real desktop app configuration for this test.
+
+11. **Context size limit (v2.0.0, like N3MC-Pro §6 test 19)**: in a temporary data folder whose `config.json` has `context_max_chars: 4000` and its own `server_port`, against the **test** Redis, save 30 records of 300–400 characters about the same subject (the same text with a few words changed in each) with `--buffer`. Run `--hook-submit` with a `UserPromptSubmit` JSON whose `prompt` asks about that subject, a manual `--search` with the same question, and the MCP `search_memory` with it. The stdout of `--hook-submit` and the `search_memory` text are each at most 4,000 as `context_size` counts it (§3.17), have fewer rows than the manual search and contain `lower-ranked match(es) omitted to keep this block within the context limit`; the manual `--search` prints every row and no such line. Then save one parent document of 20,000 characters on the same subject and repeat the hook search: the output still fits, and ends with `_(cut here to keep this block within the context limit.)_` when that document is among the first three hits.
+
+> Items 7–9 run in the real installation with the user's Redis, like items 1–6. Items 10 and 11 use a temporary data folder and their own port.
+
 ---
 
 ## 11. Save guarantees and the limit of the MCP protocol
 
 > **Stated up front as a design premise**: this server can persuade the LLM to save and search via MCP, but **whether the LLM actually calls those tools cannot be enforced at the MCP-protocol level**. This is not an implementation defect — it is a limit of what an MCP server is allowed to do.
+
+> **(v2.0.0) Claude Code is no longer limited by this.** In Claude Code the hooks save every message and reply and search with every message (§12), whatever the model decides — the guaranteed save this section describes as out of reach for MCP. This section now applies to applications without hooks (the Claude desktop app and other MCP clients), which use the thin client of §4.6.
 
 ### The three persuasion levers an MCP server has
 
@@ -2011,6 +2534,333 @@ In short, **the convenience of "let MCP + the LLM handle it" and the guarantee o
 
 ---
 
+## 12. Claude Code Hooks (v2.0.0)
+
+Everything in this section is new in v2.0.0. The flow is N3MC-Free's (§4, §4.5, §5 of the Free specification), with Lite's names, Lite's save rules (§3.16) and Lite's search (§3.14). It is written out here in full, because the code is generated from this document only.
+
+> **🛑 Hook registration is a mandatory automated step.** The most common reason cross-session memory "does not work" after a successful-looking install is that the implementing AI tested the CLI and then left the `~/.claude/settings.json` hook block to the user. Method A ends with `n3mc-lite --init` (§8); the gate of §10 item 7.1 must print `OK` before the setup is reported as complete. (Plugin users get the hooks from the plugin.)
+
+### 12.1 What the hooks do
+
+| Hook | Entry point | Steps (each step is a synchronous `subprocess.run`, never `Popen`) |
+|---|---|---|
+| `UserPromptSubmit` | `n3mc-lite-hook` (`n3mc_mcp/lite_hook.py`) | Step 0: append the audit record. Then `python -m n3mc_mcp.cli --hook-submit` with the same stdin; its stdout is the hook's stdout (Claude Code puts it into the turn's context) |
+| `Stop` | `n3mc-lite-stop-hook` (`n3mc_mcp/lite_stop_hook.py`) | Step 0: append the audit record. Then `python -m n3mc_mcp.cli --save-claude-turn` with the same stdin, then `python -m n3mc_mcp.cli --stop` |
+
+- `python` here is the hook's own `sys.executable`. The hook entries pass `--uvx` on to both `cli` calls when they were started with `--uvx` (§8).
+- **Why synchronous**: `--repair` must finish before the search, and the search must have printed before control returns to Claude Code, or Claude does not see it (Free §5.2).
+- **Exit status**: both entries always exit 0. An error is one line on stderr. A hook that fails is shown to the user by Claude Code on every message, and a non-zero `UserPromptSubmit` can block the prompt; the text is already safe in `audit.log`. (Free exits with the status of `--hook-submit`; Lite does not, because "the hook never fails" is a decision of v2.0.0.)
+- Total processes per turn: `n3mc-lite-hook` + 1 (`--hook-submit`), `n3mc-lite-stop-hook` + 2 (`--save-claude-turn`, `--stop`).
+- The UTF-8 reconfigure block of §3.13 (1) runs at module top of both entries and of `cli.py`, before the first `sys.stdin.read()`.
+
+### 12.2 `audit.log` (Step 0)
+
+- One JSON line per hook call: `{"ts": <UTC ISO 8601>, "hook": "UserPromptSubmit" | "Stop", "raw": <the first 4,096 characters of stdin>, "payload": <the parsed JSON in full>}`; when stdin is not JSON, `payload` is `{"raw": <the whole stdin>}`. Written with `ensure_ascii=False`, UTF-8, append mode, **before anything else**, by the entry itself (not by a subprocess).
+- Other records in the same file: `{"ts", "hook": "UserPromptSubmit", "stage": "skipped", "reason": "system_prompt"}`, `{"ts", "hook": "UserPromptSubmit", "stage": "transcript_unreadable", "reason": "<short reason>"}`, and the notices of §3.15.
+- A failing write goes to stderr and never stops the hook.
+- `--stop` renames `audit.log` to `audit.log.1` (replacing an older one) when it is larger than 50 MB.
+- `audit.log` holds every prompt and reply in full, including code blocks and pasted text. It is the last-resort copy for a message that could not reach Redis; nothing reads it back into the memory (§7).
+
+### 12.3 `--hook-submit`
+
+Input: the UserPromptSubmit JSON on stdin (`session_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name`, `prompt`, and keys added by newer Claude Code versions, which are ignored). `message` is accepted as an alias of `prompt`. When stdin is not JSON, the whole stdin is the prompt.
+
+1. **Clean**: pass the whole parsed JSON through `sanitize_surrogates` (§3.13 (2)).
+2. **Text**: `_extract_text(prompt)` — a string `prompt` is a multimodal array **only when it parses as a non-empty JSON array whose elements are all objects with a string `type` key**; then the text is the `text` of its `type == "text"` parts joined with `\n`. Any other string is the user's own text, unchanged (`[1, 2, 3]` stays `[1, 2, 3]`). A list `prompt` is read the same way.
+3. **System inputs**: when the text starts with one of `_SYSTEM_PROMPT_PREFIXES = ("<task-notification>", "<agent-message from=", "<system-reminder>")`, write the `skipped` audit record, print `# Recalled Memory Context\n\n_No memories found._\n`, and stop: no repair, no save, no search, and **no new `turn_id`** (Claude's reply to that input belongs to the current exchange).
+4. **Server**: `ensure_server(cfg)` (§3.15).
+5. **Repair**: when a server is in use, `POST /repair` `{}` (one batch: `ensure_index()` and up to 200 missing vectors, §3.10). A failure is one stderr line. Without a server, skip.
+6. **Previous reply**: read Claude's previous reply from `transcript_path` (12.5). When there is one, save it with `role = "claude"` and the `turn_id` in `turn_id_<session>.txt` (the previous exchange; a new UUIDv4 when the file is missing) — §12.6. When the Stop hook already saved it, the save is answered `duplicate` and nothing is stored twice.
+7. **New exchange**: make a new `turn_id` (UUIDv4) and write it to `turn_id_<session>.txt` — also for an image-only prompt.
+8. **Search**: when the text is not empty, `POST /search` with `query` = the text, `session_id` = the hook's `session_id`, `max_chars` = `context_max_chars`, and print the answer's `text`. Empty text (image-only): print `# Recalled Memory Context\n\n_No memories found._\n`. Without a server, or on an error: print the placeholder of 12.7.
+9. **Save the message**: when the text is not empty, save it with `role = "user"` and the new `turn_id` (§12.6).
+
+- Every record of this hook has `agent_name = "claude-code"` and `session_id` = the hook's `session_id`.
+- The search runs **before** the message is saved, so the message never finds itself.
+- Image-only prompts: steps 5–7 still run; steps 8 and 9 print the empty block and save nothing.
+
+### 12.4 `--save-claude-turn` and `--stop`
+
+**`--save-claude-turn`** reads the Stop JSON (`session_id`, `stop_hook_active`, `last_assistant_message`), applies `sanitize_surrogates`, and, when `last_assistant_message` is not empty, saves it with `role = "claude"` and the `turn_id` from `turn_id_<session>.txt` (a new UUIDv4 when the file is missing) — §12.6. The file is not cleared (the next `--hook-submit` overwrites it). If Stop fires twice in one exchange, the second save is a `duplicate`. Prints nothing to stdout.
+
+**`--stop`** (session-end housekeeping; it does **not** stop the server):
+
+1. Prepare `<cwd>/.claude/rules/n3mc-lite-behavior.md` (§12.9).
+2. Delete `turn_id_*.txt` files in the data folder whose modification time is more than 30 days old.
+3. Rotate `audit.log` when it exceeds 50 MB.
+4. Exit 0 and print nothing. Errors in steps 1–3 are one stderr line each.
+
+`turn_id_<session>.txt`: `<session>` is the hook's `session_id` with every character outside `[a-zA-Z0-9_-]` replaced by `_`, cut to 64 characters; `turn_id.txt` when there is no `session_id`. The value comes from the hook's JSON and must never reach the file system unchanged.
+
+### 12.5 Previous reply from the transcript
+
+Free's decision D3, unchanged. `transcript_path` is the session's JSONL transcript. Read at most its last 5 MB (seek from the end) and walk the lines backwards:
+
+1. Skip lines that are not JSON objects, lines with `isSidechain: true`, and lines whose `type` is neither `user` nor `assistant`.
+2. Skip `user` lines that are not a real prompt: `isMeta: true`; `message.content` with no string and no `type: "text"` part (`tool_result` only); text starting with `[Request interrupted by user`, `<command-`, `<local-command-`, or one of `_SYSTEM_PROMPT_PREFIXES`.
+3. Skip the current prompt itself — **the trailing line only**: the newest `user` or `assistant` line of the walk is skipped when it is a real prompt whose text is the new prompt. An older real-prompt line ends the walk even when its text is the same.
+4. The first `assistant` line with a non-empty `type: "text"` part gives the answer: its **last** non-empty text part (`thinking` and `tool_use` parts are ignored). If another real prompt is reached first, there is no previous reply.
+
+Any failure (missing path, unreadable file, unexpected structure) means "no previous reply": write the `transcript_unreadable` audit record and go on. The transcript is a recovery source only and never makes the hook fail. **Why the last text block**: Claude Code's Stop input carries only the final text block of a reply, so the same block makes the duplicate rule skip what Stop already saved.
+
+### 12.6 Saving from a hook
+
+1. **Through the server**: `POST /buffer` with `content`, `role`, `agent_name = "claude-code"`, `session_id`, `turn_id` (§4.5). `saved`, `duplicate` and `skipped_code` are final. An `error` answer is one stderr line (for example `empty content`).
+2. **Redis unreachable** (`/buffer` answers 503): do not try a direct save. Emit `redis_unreachable`: `N3MC Lite could not reach Redis, so a message was kept only in <audit.log path>. ` + `backend_hint(redis_url)` (§3.9 item 4).
+3. **No server or another failure** (no usable server after `ensure_server`, connection error, timeout, another HTTP status): **direct save** of §3.16 (`embed=False`), same `role`, `agent_name`, `session_id`, `turn_id`. When it fails because Redis is unreachable (`redis.ConnectionError` / `redis.TimeoutError`, or the connect check of §3.9 fails), emit `redis_unreachable` as in step 2. Any other exception: emit `save_failed` (`A record could not be saved (<ErrorType>: <message>). Current memories may be lost.`).
+4. A save that ends `saved` or `duplicate` clears `redis_unreachable`.
+5. Nothing is queued for resending; `audit.log` already holds the text.
+
+### 12.7 Search output (`/search`, `--hook-submit`, `--search`)
+
+The server renders (`context.py`):
+
+```markdown
+# Recalled Memory Context
+Search query: <query>
+
+> ⚠️ N3MC notice: <message>
+
+_If several versions of the same content appear, the one with the newest `saved` time is the current one._
+
+### [doc×3] [<id>] turn=<turn_id> score=0.812 saved=2026-11-13 10:34 (UTC+0900)
+[claude] <content>
+
+---
+
+### [<id>] turn=<turn_id> score=0.640 saved=2026-11-13 10:33 (UTC+0900)
+[user] <content>
+
+#### Possibly related (weak matches — may be unrelated)
+
+### [<id>] turn=<turn_id> score=0.412 saved=2026-11-12 21:15 (UTC+0900)
+<content>
+```
+
+- The first line is `# Recalled Memory Context`, the second `Search query: <query>` (the query as searched: cut to `search_query_max_chars`, line breaks replaced by spaces), then an empty line, then **exactly the `search_memory` text of §3.14** — notices (§3.15 "Where notices are shown"), version sentence, rows, weak part, or `_No memories found._` — without the reminder. The CLI prints the block followed by one line break.
+- With `max_chars` (the hook), the limit of §3.17 applies; without it (manual `--search`), the block is complete.
+- **Degraded-state placeholders** (printed by the CLI itself, not limited): `# Recalled Memory Context` + empty line + the due `notices.json` notices (if any) + one of:
+  - no usable server: `_(memory search unavailable: <reason>)_` with the reasons of §4.6 ("the memory server is still starting (…)", "the memory server could not start; see <server.log path>");
+  - another folder's server on the port: `_(memory search unavailable: another N3MC folder's server is using port <port>)_`;
+  - `/search` answered 503 (Redis unreachable): `_(memory search unavailable: <hint>)_`, and the notice `redis_unreachable` is emitted;
+  - any other error: `_(memory search unavailable: <ErrorType>: <message>)_`.
+- The CLI prints something on **every** call, so Claude always sees the state of the memory.
+
+### 12.8 `--init`
+
+`n3mc-lite --init` (pip installations; plugin users do not need it):
+
+1. Load (create) `config.json` in the data folder (§6).
+2. Read `~/.claude/settings.json`. An unreadable file, or `hooks` / `permissions` / `permissions.allow` of the wrong type: change nothing, print the reason, exit 1.
+3. **Plugin enabled?** When `settings["enabledPlugins"]["n3mc-workingmemory@neuralnexusnote"]` is `true`, the plugin registers the hooks: remove our own entries (if any) and add none, print `The n3mc-workingmemory plugin is enabled and registers the N3MC Lite hooks, so n3mc-lite --init added no hooks.`, and continue with step 5.
+4. **Merge the hooks**: for `UserPromptSubmit` and `Stop`, keep every entry that is not ours (report each kept command that contains `n3mc` with `Another N3MC hook is registered for <event> and was left in place: <command>`), and append one entry `{"hooks": [{"type": "command", "command": resolve_cmd(<entry point>)}]}`.
+5. **Permission rules**: append the missing `PERMISSION_RULES` of §8 (the `python -m n3mc_mcp.cli` and `n3mc-lite` forms); never remove anything.
+6. **Write only when something changed**: copy the file to `settings.json.bak-n3mc-lite-<YYYYmmddHHMMSS>`, write a temporary file in the same folder, `os.replace` it.
+7. **Old MCP registration**: report an `n3mc-workingmemory` entry in `~/.claude.json` or `./.mcp.json` as §8 says (read only).
+8. Print `N3MC Lite hooks registered in <settings path>. Saving starts with the next Claude Code session.` (or the step 3 message).
+
+```python
+OURS = {  # event -> (entry-point name, module name)
+    "UserPromptSubmit": ("n3mc-lite-hook", "n3mc_mcp.lite_hook"),
+    "Stop":             ("n3mc-lite-stop-hook", "n3mc_mcp.lite_stop_hook"),
+}
+PKG_DIR = os.path.normcase(os.path.abspath(os.path.dirname(n3mc_mcp.__file__)))
+
+def _tokens(command: str) -> list:
+    command = command.replace("\\", "/")      # posix shlex reads "\" as an escape
+    try:
+        return shlex.split(command, posix=True)
+    except ValueError:
+        return command.split()
+
+def is_own_hook(command: str, event: str) -> bool:
+    exe_name, module = OURS[event]
+    toks = _tokens(command)
+    if not toks:
+        return False
+    first = os.path.basename(toks[0]).lower()          # (a) our entry point, any folder
+    if first.endswith(".exe"):
+        first = first[:-4]
+    if first == exe_name:
+        return True
+    for i, t in enumerate(toks[:-1]):                  # (b) python -m n3mc_mcp.lite_hook
+        if t == "-m" and toks[i + 1] == module:
+            return True
+    script = module.split(".")[-1] + ".py"             # (c) a script in this package's folder
+    for t in toks[1:]:
+        if os.path.basename(t).lower() == script:
+            d = os.path.normcase(os.path.abspath(os.path.dirname(os.path.expanduser(t))))
+            if d == PKG_DIR:
+                return True
+    return False
+
+def shell_path(p) -> str:
+    s = pathlib.Path(p).as_posix()                     # forward slashes: bash reads "\" as an escape
+    return f'"{s}"' if " " in s else s                 # quote only when there is a space
+
+def resolve_cmd(script_name: str) -> str:
+    folders = [sysconfig.get_path("scripts")]
+    try:
+        folders.append(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))
+    except (KeyError, ValueError):
+        pass
+    for folder in folders:
+        for name in (script_name + ".exe", script_name):
+            cand = pathlib.Path(folder) / name
+            if cand.is_file():
+                return shell_path(cand)
+    exe = shutil.which(script_name)
+    if exe:
+        return shell_path(exe)
+    module = {"n3mc-lite-hook": "n3mc_mcp.lite_hook",
+              "n3mc-lite-stop-hook": "n3mc_mcp.lite_stop_hook"}[script_name]
+    return f"{shell_path(sys.executable)} -m {module}"
+```
+
+- `lite_hook.py` and `lite_stop_hook.py` have a `main()` and also run under `python -m` (the fallback form).
+- **Why this exact matching** (Free D1, v1.5.0): matching every command that merely *contains* a hook name deleted other N3MC products' hooks; matching only one form left duplicates. Lite's names (`n3mc-lite-hook`, `n3mc_mcp.lite_hook`) differ from Free's (`n3mc-hook`, `n3memorycore.n3mc_hook`) and Pro's, so neither `--init` removes the other's entries (§14).
+- **Why the scripts folder first and no quotes** (Free v1.6.0): right after installing Python, Claude Code's `PATH` lacks the scripts folder, and a hook command that starts with a quote did not run on one Windows PC.
+
+### 12.9 The rules file `.claude/rules/n3mc-lite-behavior.md`
+
+Claude Code loads `.claude/rules/*.md` of the project at session start. `--stop` keeps `<cwd>/.claude/rules/n3mc-lite-behavior.md` up to date (`_ensure_rules_md`). Free writes `n3mc-behavior.md`; the names differ so both products can be installed (§14).
+
+**Template** (`_RULES_MD_TEMPLATE`, exactly this text with a line feed after the last line; do not rephrase it). `{cli}` is replaced by the command form of this installation: `python -m n3mc_mcp.cli` (pip), or `uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite` when `--stop` was called with `--uvx` (plugin).
+
+````markdown
+<!-- n3mc-lite-behavior v1 -->
+# N3MemoryCore Lite Behavioral Guidelines
+
+These guidelines apply to every Claude Code session in this project. They are
+loaded automatically from `.claude/rules/` at session start. N3MC Lite is a
+working memory: every record is deleted 7 days after it was saved.
+
+## Fully Automatic Saving
+All conversations are saved by hooks (UserPromptSubmit + Stop). Do NOT call
+`--buffer` for them. Every non-empty user message and Claude response is
+saved (fenced code blocks as `[code omitted]`); there is no length filter and
+no skip-pattern filter. Make NO acknowledgement when a save succeeds —
+silence is correct. Run `{cli} --buffer "<text>"` only when the user asks
+you to remember something specific.
+
+## Recalled Memory Context
+Every turn, the UserPromptSubmit hook adds a `# Recalled Memory Context` block
+to your context. Each hit starts with `### ` and shows its `saved=` time and,
+when it has one, `turn=<turn_id>`; a `[doc×N]` hit is a long text shown in
+full. When several versions of the same content appear, the one with the
+newest `saved` time is the current one. If the block contains a
+`> ⚠️ N3MC notice:` line, tell the user what it says.
+
+## Weak Matches
+Records under `#### Possibly related (weak matches — may be unrelated)` did
+not pass the relevance floors and are often unrelated. Use one only when it
+is actually relevant to the question; if it is not, ignore it and do not
+mention it.
+
+## Active RAG
+When prior context would help, run a search proactively. **Always invoke via
+`{cli} --search "<keywords>"`** (optional `--since 2026-11-13`,
+`--until 2026-11-14`). To read the conversation around a hit, run
+`{cli} --recall-thread <turn_id>`. `{cli} --list` shows the newest records.
+These commands are auto-allowed via `permissions.allow`.
+
+## Cut Context
+The block is kept within a size limit. If it says that lower-ranked matches
+were omitted, or ends with `_(cut here to keep this block within the context
+limit.)_`, and the missing part is needed, run `{cli} --search` with the same
+keywords: a manual search is not limited.
+
+## Deleting
+Delete only when the user explicitly asks: `{cli} --delete <id>` or
+`{cli} --delete-session <session_id>`. Both are irreversible and are not
+auto-allowed; confirm the id or session_id with the user first.
+
+## Seven-Day Lifetime
+When the user expects something to be kept permanently ("remember this
+forever", 「ずっと覚えておいて」), the hooks save it as usual; add ONE short
+sentence in the user's language: Lite memories are deleted 7 days after they
+were saved; for permanent storage use the Pro build or keep an external copy.
+
+## Recall Acknowledgment
+When recalled memory actually shapes your reply (you are recalling something
+saved earlier), open the reply with a short acknowledgment in the user's
+language — e.g. "Pulling this from earlier memory in this session." or
+「前回の回答がメモリに保存されています。」 If no relevant memory was found,
+or it did not influence your answer, do NOT announce anything.
+
+## Save Failures
+If a `> ⚠️ N3MC notice:` line says that Redis could not be reached or that a
+record could not be saved, tell the user prominently and relay the command it
+gives (for example `docker start redis-stack`): until then, new messages are
+kept only in `audit.log`.
+````
+
+**File handling**:
+
+| Existing file | Behaviour |
+|---|---|
+| None | Write the rendered template (create `.claude/rules/` if needed) |
+| First line equals the current marker **and** the content equals the template rendered for this installation | Nothing; clear the notice `rules_md_edited:<hash>` for this path |
+| Content equals a template rendered for the **other** command form, or a previous template (`_KNOWN_RULES_MD_HASHES`) | Back it up (`n3mc-lite-behavior.md.bak-n3mc-lite-<YYYYmmddHHMMSS>`), then write the rendered template |
+| First line equals the current marker but the content differs from both rendered forms | Treat as edited by the user (next row) |
+| Anything else (edited by the user) | **Do not replace it.** Emit `rules_md_edited:<hash>`: `The rules file <absolute path> has been edited by hand, so it was not updated. Merge the new template manually if needed.` `<hash>` = the first 12 hex characters of the SHA-256 of the file's absolute path |
+
+- Content is compared with line endings normalized to LF; "equals a previous template" compares the first 16 hex characters of the SHA-256 of the content with `_KNOWN_RULES_MD_HASHES`. v1 is the first template, so the set starts empty; the two rendered forms of the current template are computed from `_RULES_MD_TEMPLATE` at run time.
+- **Whenever the template changes, bump the marker version and add the hashes of both rendered forms of the previous template to `_KNOWN_RULES_MD_HASHES`.**
+- Write through a temporary file in the same folder and `os.replace`.
+- **Why the command form is filled in**: a plugin installation has no package that `python -m` could find (the code lives in `uvx`'s environment), and a pip installation has no reason to start `uvx`. The form that wrote the file is the one that works in that project.
+
+---
+
+## 13. CLI `n3mc-lite` (v2.0.0)
+
+`n3mc-lite` (`n3mc_mcp.cli:main`, also `python -m n3mc_mcp.cli`) is Free's CLI with Lite's functions. In Claude Code, which has no MCP tools for this server, it gives the same as the tools: each tool command calls the tool's handler in the resident server (`POST /tools/<name>?nudge=0`) and prints the answer's text unchanged, followed by one line break. Exactly one command per call (argparse, mutually exclusive group).
+
+| Command | Calls | Prints |
+|---|---|---|
+| `--search "<keywords>" [--since S] [--until U] [--limit N]` | `POST /search` with `query`, `since`, `until`, `limit`, and `session_id` = `N3MC_SESSION_ID` of this process when set; no `max_chars` | The block of §12.7 (not limited) |
+| `--buffer "<text>"` or `--buffer -` (stdin) `[--agent-name NAME] [--session-id S] [--turn-id T] [--importance X]` | `/tools/save_memory` with `content`, `agent_name` (default `claude-code`), `session_id`, `turn_id`, `importance` (each only when given) | The `save_memory` JSON of §4.3 |
+| `--list [--limit N]` | `/tools/list_memories` | The `list_memories` text |
+| `--recall-thread <turn_id> [--before N] [--after N]` | `/tools/recall_thread` | The `recall_thread` text |
+| `--delete <id>` | `/tools/delete_memory` | The `delete_memory` JSON |
+| `--delete-session <session_id>` | `/tools/delete_memories_by_session` | The JSON of §4.3 |
+| `--repair` | `/tools/repair_memory` (one call: up to 200 vectors; run again while `remaining` > 0) | The `repair_memory` JSON |
+| `--hook-submit`, `--save-claude-turn`, `--stop` | §12 | §12 |
+| `--init` | §12.8 | §12.8 |
+| `--run-server` | Runs the resident server in this process (§3.15): load `config.json`, warn about a `bind_host` other than `127.0.0.1`, steps 1–3 of §3.9 and the library import, then uvicorn on `bind_host:server_port` with the lifespan that starts the model load; removes the PID file on exit when it holds its own PID | nothing on stdout |
+| `--uvx` | Modifier for `--hook-submit`, `--save-claude-turn` and `--stop`: this installation runs through `uvx` (§8, §12.9) | — |
+
+- `--search`, `--list`, `--recall-thread`: when no server is usable, `--search` prints the placeholder of §12.7 and the tool commands print the texts of the §4.6 table without the reminder. `--buffer` without a server saves directly (§3.16, no `role`) and prints the §4.6 `save_memory` JSON without the reminder.
+- **Time bounds**: `--since` / `--until` are read with the rules of §4.3.1 before any request. An unreadable value, or `since` later than `until`, prints the `Error: …` text of §4.3.1 to stderr and exits with status 2.
+- **Exit status**: 0, except 2 for argument errors and 1 for `--init` on an unreadable `settings.json`. A tool's own error text (`Error: …`, `"status": "error"`) is printed with status 0, as the tool returns it.
+- **PID file**: the process that starts the server (`_start_server`) creates the PID file with `open(path, "x")` before `Popen` and writes the child's PID into it. When the exclusive create fails, another process is starting a server: follow "PID file handling" (§3.15).
+- **Which commands Claude may run without asking**: §8 "Auto-approve". `--delete`, `--delete-session` and `--init` always need the user's approval.
+- Do not print hints such as "run n3mc-lite --search …" in normal output; the rules file tells Claude which commands exist.
+
+---
+
+## 14. Coexistence with other N3MC products (v2.0.0)
+
+Lite can be installed on the same PC as N3MC-Free, N3MC-Pro and the MCP Pro / PostgreSQL / Ollama editions. Nothing is shared:
+
+| | N3MC-Free | N3MC-Pro | MCP-Lite (this) |
+|---|---|---|---|
+| Data folder | `~/.n3mc` (`N3MC_HOME`) | `~/.n3mc-pro` (`N3MC_PRO_HOME`) | `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`) |
+| Database | SQLite in the data folder | SQLite in the data folder | Redis Stack (`redis_url`) |
+| Server port | 18520 | 18521 | **18524** (PostgreSQL edition 18522, Ollama edition 18523) |
+| Hook commands | `n3mc-hook`, `n3mc-stop-hook` | `n3mc-pro-hook`, `n3mc-pro-stop-hook` | `n3mc-lite-hook`, `n3mc-lite-stop-hook` |
+| CLI | `n3mc` / `python -m n3memorycore.n3memory` | `n3mc-pro` / `python -m n3memorycore_pro.…` | `n3mc-lite` / `python -m n3mc_mcp.cli` |
+| Rules file | `.claude/rules/n3mc-behavior.md` | `.claude/rules/n3mc-pro-behavior.md` | `.claude/rules/n3mc-lite-behavior.md` |
+| MCP server name | — | `n3mc-pro-mcp` (MCP Pro) | `n3mc-workingmemory` |
+
+- **`--init` keeps the other products' hooks** (`is_own_hook`, §12.8) and reports them; the other products' `--init` keep Lite's (their matching does not match `n3mc-lite-hook` or `n3mc_mcp.lite_hook`).
+- **Server identity**: each server reports its own data folder as `root`; a CLI that finds another product's server on its port never uses or stops it (§3.15 "When the port belongs to another folder's server").
+- **Two products' hooks together**: Claude gets one `# Recalled Memory Context` block from each product every turn, each from its own memory, and each rules file names its own commands. This is the user's choice; neither product removes the other.
+- **Plugin and pip on one PC**: the plugin's hooks and hooks written by `n3mc-lite --init` would both run (two searches per message, and the `[user]` and `[claude]` records of an exchange could get different `turn_id`s because both write `turn_id_<session>.txt`). `--init` registers no hooks while the plugin is enabled (§12.8), and the plugin's SessionStart script reports hooks written by `--init` (§8). Not verified yet: how Claude Code behaves when the plugin's hooks and `settings.json` hooks of the same program both exist (check it in the first generation test).
+- **MCP coexistence**: rule 0 of the instructions (§5 (1)) is unchanged: when `n3mc-longtermmemory` (Pro over MCP) is connected in the same application, Lite is the working memory.
+
+---
+
 ## Appendix A: Optional Extensions (not shipped)
 
 The Lite build intentionally stops at the hybrid + time-decay ranker described in §3.6. The following extensions are **not part of the shipped spec** — they are sketched here so a future AI or contributor has a clean starting map when the user decides to try them. None of them are required for the Lite build to behave correctly; each is a precision-vs-latency trade.
@@ -2025,7 +2875,7 @@ All three extensions are additive — none of them require changes to the Redis 
 
 ## Appendix B: Recommended AI-Assisted Workflow
 
-> **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code (or your preferred MCP client). The AI does not advance to the next phase on its own. Unlike the Free build, which is driven by slash commands, the MCP Lite build is driven by **MCP tool calls** (`save_memory` / `search_memory` / `list_memories` / `delete_memory` / `repair_memory`).
+> **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code. The AI does not advance to the next phase on its own. (v2.0.0) In Claude Code the memory is driven by the **hooks** and the CLI `n3mc-lite` (§12, §13); the MCP tools are exercised through the thin client in a test folder (§10 item 10).
 
 | Phase | What you do | Model |
 |---|---|---|
@@ -2036,15 +2886,15 @@ All three extensions are additive — none of them require changes to the Redis 
 
 > **⚠️ A full Claude Code restart is required before Phase 3**
 >
-> The MCP server runs as a stdio child process spawned by Claude Code at startup, and the same process is reused for the rest of the session. Right after Phase 1 / 2 generated or modified code, the running server still holds the **old bytecode**, so the Evidence Report would not reflect the current implementation. §10-1 also measures the `initialize` response time and the very first `search_memory` latency, **which can only be observed at server startup**.
+> (v2.0.0) The hooks and the rules file are read by Claude Code at startup; a session that started before `n3mc-lite --init` ran has no hooks. The resident server replaces itself when its code changes (`code_version`, §3.15), so it needs no manual restart; §10-1 measures the first search after a server start, which is easiest to observe after a fresh start.
 >
 > Pre-restart checklist:
 > 1. Confirm the latest code is on the import path (`pip install -e .` or reinstall).
-> 2. Confirm `n3mc-workingmemory` is registered — user scope: `~/.claude.json` (recommended for Claude Code), project scope: `.mcp.json` at the project root, Claude Desktop: `claude_desktop_config.json` (see [§8](#8-mcp-client-configuration)).
-> 3. Confirm `~/.claude/settings.json` already has the `mcp__n3mc-workingmemory__*` allow block (see [§8 tool auto-allow](#tool-auto-allow-claude-code-specific)).
+> 2. Confirm the hooks are registered: the gate of §10 item 7.1 prints `OK` (see [§8](#8-client-configuration), §12).
+> 3. Confirm `~/.claude/settings.json` has the CLI permission rules (`Bash(python -m n3mc_mcp.cli --search *)` …; see [§8 Auto-approve](#auto-approve-claude-code-only)), and that `claude mcp get n3mc-workingmemory` reports no such server.
 > 4. Confirm Redis Stack is up (`docker ps`; if not, `docker start redis-stack` or `docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest`).
-> 5. **Fully exit and relaunch Claude Code.** On **Windows**: closing the window with × or running `/exit` can leave background processes alive — open **Task Manager** and end every `Claude` / `claude` process (including the child `python.exe` whose command line is `n3mc-workingmemory.exe`).
-> 6. The first tool call after relaunch takes 2–10 minutes if the multilingual-e5-base (~440 MB) HF cache is missing. With the cache warm, `initialize` finishes in ~17 s (see [§3.9 step 4](#39-startup-sequence-and-self-recovery)).
+> 5. **Fully exit and relaunch Claude Code.** On **Windows**: closing the window with × or running `/exit` can leave background processes alive — open **Task Manager** and end every `Claude` / `claude` process. To measure a fresh server start, also end the `python.exe` whose command line contains `n3mc_mcp.cli --run-server`.
+> 6. The first search after a server start takes 2–10 minutes if the multilingual-e5-base (~440 MB) HF cache is missing; meanwhile the hook prints a "still starting" placeholder or keyword-only results with a notice (§3.9).
 
 ---
 
@@ -2054,21 +2904,23 @@ Set the model to **Sonnet** and paste:
 
 ```
 Please build n3mcmcp-lite from this spec (N3MemoryCore_MCP_Spec_EN.md).
-Redis Stack is already running in Docker. Run it as an MCP stdio server
-and register the seven tools (save_memory / search_memory / list_memories
-/ delete_memory / delete_memories_by_session / repair_memory / recall_thread).
-When it is installed, register the server in Claude Code yourself and check
-that it starts (§8 "Automatic registration after code generation"), so that
-I only need to restart.
+Redis Stack is already running in Docker. Build the resident server, the
+Claude Code hooks, the CLI n3mc-lite and the MCP thin client with the seven
+tools (save_memory / search_memory / list_memories / delete_memory /
+delete_memories_by_session / repair_memory / recall_thread).
+When it is installed, register the hooks with n3mc-lite --init, register
+the MCP entry in the Claude desktop app if it is installed (not in Claude
+Code), and check that everything starts (§8 "Automatic registration after
+code generation"), so that I only need to restart.
 ```
 
-Sonnet handles package scaffolding, RediSearch index creation, MCP tool registration, and stdio launch automatically. When it finishes, move on to phase 2 ("it runs" ≠ "it matches the spec" — do not stop here).
+Sonnet handles package scaffolding, RediSearch index creation, the resident server, the hooks, the CLI and the MCP thin client. When it finishes, move on to phase 2 ("it runs" ≠ "it matches the spec" — do not stop here).
 
 > **⚠️ Fully restart Claude Code between Phase 1 and Phase 2**
 >
-> When Claude Code launched at the start of Phase 1, `n3mc-workingmemory` did not yet exist, so Claude Code is not connected to this MCP server. Before pasting the Phase 2 debugging prompts, **fully exit Claude Code and reopen it** so it picks up the freshly-registered MCP server and can actually exercise `save_memory` / `search_memory` while debugging.
+> When Claude Code launched at the start of Phase 1, the hooks did not exist yet, so this session saves nothing and gets no `# Recalled Memory Context`. Before pasting the Phase 2 debugging prompts, **fully exit Claude Code and reopen it** so the hooks registered by `n3mc-lite --init` and the rules file take effect (v2.0.0).
 >
-> **How to fully exit on Windows**: closing the window with × or running `/exit` can leave background processes alive. Open **Task Manager**, end every `Claude` / `claude` process (including child `python.exe` processes whose command line is `n3mc-workingmemory.exe`), and then relaunch Claude Code. After relaunch, verify in the settings panel that `n3mc-workingmemory` is listed as **connected** before proceeding (the first `initialize` response takes ~17 s — see §3.9 step 4).
+> **How to fully exit on Windows**: closing the window with × or running `/exit` can leave background processes alive. Open **Task Manager**, end every `Claude` / `claude` process, and then relaunch Claude Code. After relaunch, send one message and check that it was saved (`python -m n3mc_mcp.cli --list` shows its `[user]` record).
 
 ---
 
@@ -2080,28 +2932,35 @@ Stay on **Sonnet** and paste the following three prompts **one at a time, in ord
 ```
 For n3mcmcp-lite:
 Read the code and trace the end-to-end data flow from a save_memory tool
-call all the way to the Redis pipeline's EXECUTE, and from a search_memory
-call back to the tool response. Verify that TTL is set on every write and
-that the parent-document fallback (§3.11) is not lost mid-flight. Fix any
-issues you find.
+call (through the MCP thin client and /tools/save_memory) and from a hook
+save (--hook-submit / --save-claude-turn and /buffer, and the direct save
+without the server) all the way to the Redis pipeline's EXECUTE, and from
+a search_memory call and a hook search back to the output. Verify that
+TTL is set on every write, that the role prefixes of §3.16 are on the
+parent document and on every chunk, and that the parent-document fallback
+(§3.11) is not lost mid-flight. Fix any issues you find.
 ```
 
 **② Spec-to-code comparison** (find behaviors documented but not implemented)
 ```
 For n3mcmcp-lite:
 Walk the input schema and behavior of each MCP tool in §4.3 one by one,
-and compare it against the actual implementation. Also walk the parent-
+then the endpoints of §4.5, the thin client of §4.6, the hooks of §12 and
+the CLI of §13, and compare them against the actual implementation. Also walk the parent-
 chunk contract in §3.11 line by line (verbatim restoration, parent→chunk
 cascade delete, [doc×N] rendering). Flag anything documented but not
 implemented and fix it.
 ```
 
-**③ Cross-session test** (confirm data survives an MCP restart)
+**③ Cross-session test** (confirm data survives a server restart)
 ```
 For n3mcmcp-lite:
-From an MCP client, save an entry with save_memory in session 1, restart
-the MCP server (keep Redis running), then run search_memory in session 2
-and confirm the entry is retrievable. Fix anything that prevents this.
+Check that a message of this session was saved by the hooks
+(python -m n3mc_mcp.cli --list). Stop the resident server with /shutdown
+(keep Redis running), then run python -m n3mc_mcp.cli --search for that
+message: the server is started again and the record is found. Do the
+same with save_memory through the MCP thin client in a temporary data
+folder (§10 item 10). Fix anything that prevents this.
 ```
 
 When all three are done, proceed to phase 3.
@@ -2110,20 +2969,21 @@ When all three are done, proceed to phase 3.
 
 ### Phase 3: Evidence Report
 
-> **Fully exit and relaunch Claude Code before running this phase** (see the "⚠️ A full Claude Code restart is required before Phase 3" box above). Without the restart, (a) the MCP server still runs old bytecode and the Evidence Report won't match the current implementation, and (b) §10-1's `initialize` and first-call timings cannot be captured.
+> **Fully exit and relaunch Claude Code before running this phase** (see the "⚠️ A full Claude Code restart is required before Phase 3" box above). Without the restart, the hooks of a changed installation may not be in effect, and §10-1's first-call timing after a server start cannot be captured.
 
 The model can be **Sonnet** or **Opus** — Sonnet is sufficient to verify the items; Opus tends to grade harder. After the restart, paste:
 
 ```
 For n3mcmcp-lite:
-Run the §10 Evidence Report from the spec. Actually call the MCP tools
-(mcp__n3mc-workingmemory__*) and verify items 1 through 6 in order.
-Score each item on a 1–5 ⭐ scale and write up a short Evidence Report.
+Run the §10 Evidence Report from the spec. Use the CLI commands of §13
+(python -m n3mc_mcp.cli ...) for items 1-9 and the MCP client test of
+item 10, and verify items 1 through 11 in order. Score each item on a
+1–5 ⭐ scale and write up a short Evidence Report.
 
 Be explicit about:
-- §10-1: initialize response time, first search_memory latency, and the
-         median of 5 steady-state search_memory latencies; verify the
-         server returns a hint (no crash) when Redis is down
+- §10-1: first search latency after a server start, and the median of 5
+         steady-state search latencies; verify a hint (no crash) when
+         Redis is down
 - §10-3: byte-for-byte verbatim recall of a >400-char body (parent-doc
          contract and [doc×N] tag)
 - §10-4: bracketed save text retrieved via a bracket-free query within
@@ -2132,6 +2992,9 @@ Be explicit about:
          under one session_id → delete_memories_by_session → matches
          the inserted count, leaves other sessions untouched, second
          call returns not_found
+- §10-7..9: hook gate, [user]/[claude] records with one turn_id per turn
+- §10-10: the MCP thin client in a temporary folder (no model, same texts)
+- §10-11: the context size limit with context_max_chars 4000
 
 If anything fails, identify the root cause and fix the implementation,
 then rerun. When all items are ⭐⭐⭐⭐⭐, advance to Phase 4.
@@ -2145,7 +3008,7 @@ Once the Evidence Report is green, proceed to Phase 4 (quality review).
 
 > **⚠️ Review in a new session**: Do not review in the session that implemented and debugged the code. Exit Claude Code, start it again in the same folder, and begin a new session with the model set to **Opus**.
 > - The implementing session's context holds its own decisions and explanations, so a review there tends to confirm them instead of checking the code against this specification afresh.
-> - A restarted Claude Code also starts the MCP server again from the current code, so the review sees the server as a user will.
+> - (v2.0.0) The resident server replaces itself when the code changes (`code_version`), so the review sees the server as a user will.
 > - In the new session, memory searches may return notes saved during the implementation; that is expected. Base the review on the code, this specification and the results of commands actually run.
 
 Switch the model to **Opus** and paste:
@@ -2154,13 +3017,13 @@ Switch the model to **Opus** and paste:
 Please review n3mcmcp-lite and fix anything that needs fixing.
 
 On a scale of 1–10, what score does n3mcmcp-lite earn as (a) a memory
-device exposed over MCP and (b) a RAG system? Split the evaluation:
+device (hooks for Claude Code, MCP for other apps) and (b) a RAG system? Split the evaluation:
 memory device (save / 7-day TTL / dedup / parent-document verbatim
 contract) vs. RAG (hybrid search / CJK bigram / lightweight reranker /
 time decay / auto importance). Generate a scorecard.
 ```
 
-Opus will actually call the MCP tools and produce a two-axis scorecard: **memory device** (persistence, TTL, dedup, parent doc) vs. **RAG** (retrieval precision, ranking, noise resistance).
+Opus will actually run the CLI commands (and the MCP thin client in a test folder) and produce a two-axis scorecard: **memory device** (persistence, TTL, dedup, parent doc) vs. **RAG** (retrieval precision, ranking, noise resistance).
 
 > **Note**: the MCP Lite build ships a lightweight reranker and CJK bigram expansion by default, so the RAG ceiling sits slightly higher than in the Free build. Even so, the following are not implemented, and **the RAG score is unlikely to exceed 8:**
 > - Morphological analysis (MeCab / SudachiPy, etc.) for stricter word boundaries (see Appendix A)
