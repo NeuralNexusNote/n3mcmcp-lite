@@ -42,8 +42,25 @@ the specification.
   and `tools/list` itself, loads no model and forwards every tool call to the
   resident server. When the server is not available, `save_memory` saves
   directly to Redis without a vector.
-- The MCP instructions tell a client that already has a
-  `# Recalled Memory Context` block not to save every turn.
+- The MCP instructions tell a client that already has the Lite hooks' block
+  (the line `Source: N3MC Lite (7-day working memory)`, which the hook's
+  `# Recalled Memory Context` block carries) not to save every turn. The
+  blocks of the N3MC Free and Pro hooks do not count.
+- **Display change**: the Redis command in the hints and the README is
+  `docker run … -p 127.0.0.1:6379:6379 …` (was `-p 6379:6379`, all
+  interfaces). An existing container keeps its own setting.
+- **Display change**: rule 0 of the MCP instructions and the search
+  reminder name `n3mc-pro`, `n3mc-pg` and `n3mc-longtermmemory` as the
+  persistent N3MC memory (was `n3mc-longtermmemory` only).
+- Setup (Method A) shows the Claude desktop app entry and no longer edits
+  `claude_desktop_config.json`.
+- The hooks never wait for a server start: without a running server they
+  save directly and search later. Hook entries carry `"timeout": 60`.
+- Hook records carry Claude Code's session id; `N3MC_SESSION_ID` applies to
+  MCP only. `N3MC_REDIS_URL` set for one application only gives the notice
+  `redis_url_mismatch`; put `redis_url` into `config.json`.
+- The resident server refuses requests with an `Origin` header (from
+  N3MC Free v1.9.1); the hooks, the CLI and the MCP entry never send it.
 - The Claude desktop app is registered with the absolute path of the command
   and `env.N3MC_AGENT_NAME`; plugin users use
   `uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-workingmemory`. The plugin's
@@ -75,7 +92,8 @@ the specification.
 ### Unchanged
 - The PyPI name, the package `n3mc_mcp`, the MCP command and server name
   `n3mc-workingmemory` (alias `n3mc-mcp-lite`), the seven tools with the same
-  names, arguments and output texts, the Redis layout and settings, the
+  names, arguments and output texts (the `search_memory` text is now kept
+  within `context_max_chars`), the Redis layout and settings, the
   7-day TTL, the data folder `~/.n3mc-workingmemory`, the plugin name, and
   every search and save rule. Records saved by v1.12.2 stay readable.
 

@@ -84,12 +84,19 @@ to v1.12.2 Lite was an MCP server only, and the model decided what to save.
 | Each application started its own MCP server and loaded the model (~440 MB) | One resident server loads the model once; the MCP entry is a thin client that never loads it |
 | No process ran between sessions | The resident server keeps running in the background after it was started |
 | pip users: register the MCP server | pip users: run `n3mc-lite --init` once to register the hooks. An old `n3mc-workingmemory` registration in Claude Code is no longer used and should be removed |
+| The Redis command was `docker run … -p 6379:6379 …` | It is `docker run … -p 127.0.0.1:6379:6379 …`, so the memory is not reachable from the network. A container you already created keeps its setting; recreating it (`docker rm -f redis-stack`, then the new command) loses its memories, like any Redis restart |
+| The MCP instructions named `n3mc-longtermmemory` as the persistent memory | They name `n3mc-pro`, `n3mc-pg` and `n3mc-longtermmemory` (N3MC MCP Pro, its PostgreSQL edition and the earlier MCP Pro) |
+| An old plugin or `.mcp.json` started `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` without a version | Update the plugin. Until then such a registration starts the v2.0.0 MCP entry in Claude Code without hooks |
+| `N3MC_SESSION_ID` grouped a Claude Code session's saves | Hook records carry Claude Code's own session id; `N3MC_SESSION_ID` still applies to MCP |
+| `N3MC_REDIS_URL` in an MCP client's `env` chose the Redis | Put `redis_url` into `config.json`: the shared server uses the environment of the process that started it |
+| `skip_code_blocks: true` rejected saves with code | It also skips every hook message or reply that contains a code block |
+| — | The search result of `search_memory` is kept within `context_max_chars` (9,500 characters by default) |
 
 **What did not change**: the PyPI name `n3memorycore-mcp-lite`, the Python
 package `n3mc_mcp`, the MCP command and server name `n3mc-workingmemory`
 (alias `n3mc-mcp-lite`), the seven tools with the same names, arguments and
 output texts, the Redis layout and settings (`redis_url`, `N3MC_REDIS_URL`),
-the 7-day TTL, the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the
+the 7-day TTL (the `search_memory` text is now kept within `context_max_chars`), the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the
 plugin name `n3mc-workingmemory`, and every search and save rule. Records
 saved by v1.12.2 stay readable (same index, same fields).
 
@@ -105,7 +112,8 @@ saved by v1.12.2 stay readable (same index, same fields).
   Code shows the tools again next to the hooks.
 - **Claude desktop app users**: the entry stays `n3mc-workingmemory`. v2.0.0
   asks for the absolute path of the command and an `env` block (see
-  [Claude desktop app](#step-3--claude-desktop-app-optional)).
+  [Claude desktop app](#step-3--claude-desktop-app-optional)). Setup shows
+  the entry; you add it yourself (setup does not edit the app's file).
 - **New files in the data folder**: `audit.log` (the raw text of every hook
   call, with no TTL), `server.log`, `notices.json` and a few small process
   files. See [Data location](#data-location).
@@ -118,7 +126,7 @@ saved by v1.12.2 stay readable (same index, same fields).
 
 ```bash
 # First time only (creates the container):
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
 
 # Every subsequent session (container already exists):
 docker start redis-stack
@@ -346,7 +354,7 @@ on your own PC, or a Redis server you choose.
 - **What is on disk** — Besides Redis, the data folder holds `config.json`, and since v2.0.0 **`audit.log`: the raw text of every hook call — every prompt and reply in full, including code blocks and pasted text — with no TTL** (rotated at 50 MB, at most about 100 MB). Treat it as private data. It is the last-resort copy for a message that could not reach Redis; nothing reads it back into the memory. See [Data location](#data-location).
 - **Embeddings are made on your PC** — The embedding model runs locally on the CPU, and the search runs inside your Redis. Searching calls no external API.
 - **No telemetry** — N3MC sends no usage data anywhere. The code is open, so you can check this yourself.
-- **You can see and remove everything** — `n3mc-lite --list` / `list_memories` show the newest entries; `--delete` / `delete_memory` and `--delete-session` / `delete_memories_by_session` remove them.
+- **You can see and remove your memories** — `n3mc-lite --list` / `list_memories` show the newest entries; `--delete` / `delete_memory` and `--delete-session` / `delete_memories_by_session` remove them from Redis. The raw text of every hook call also stays in `audit.log` in the data folder (no TTL, rotated at 50 MB): delete that file yourself to remove it.
 
 What does go over the network:
 
@@ -597,13 +605,15 @@ port (18524), its own hook commands (`n3mc-lite-hook`,
 - When another N3MC server holds Lite's port, Lite never uses or stops it:
   it saves without vectors, does not search, and shows a `port_conflict`
   notice asking you to give Lite its own `server_port`.
-- When N3MC Pro over MCP (`n3mc-longtermmemory`) is connected in the same
-  application, the MCP instructions treat Lite as the working memory.
+- When a persistent N3MC memory is connected over MCP in the same
+  application — `n3mc-pro` (N3MC MCP Pro), `n3mc-pg` (its PostgreSQL edition)
+  or `n3mc-longtermmemory` (the earlier MCP Pro) — the MCP instructions treat
+  Lite as the working memory.
 
 ## Limits
 
-- **7 days.** Every entry is deleted 7 days after it was saved (one of the
-  top 5 hits of a search gets its 7 days reset). `audit.log` is the exception: it has no TTL.
+- **7 days.** Every entry is deleted 7 days after it was saved (every normal
+  hit of a search gets its 7 days reset). `audit.log` is the exception: it has no TTL.
 - **In applications without hooks, saving is up to the model** (see below).
   Full conversations are kept only in Claude Code.
 - **The resident server must be able to run.** When it cannot start,

@@ -84,12 +84,19 @@ v1.12.2 までの Lite は MCP サーバーだけで、何を保存するかは�
 | アプリごとに自分の MCP サーバーを起動し、モデル（約 440 MB）を読み込んでいた | 1 つの常駐サーバーが、モデルを 1 回だけ読み込む。MCP の入口は薄いクライアントで、モデルを読み込まない |
 | セッションの合間に動くプロセスはなかった | 常駐サーバーは、一度起動するとバックグラウンドで動き続ける |
 | pip の利用者は MCP サーバーを登録した | pip の利用者は `n3mc-lite --init` を 1 回実行して、フックを登録する。Claude Code に残った古い `n3mc-workingmemory` の登録はもう使われないので、消す |
+| Redis のコマンドは `docker run … -p 6379:6379 …` だった | `docker run … -p 127.0.0.1:6379:6379 …` になる。記憶がネットワークから届かなくなる。すでに作ったコンテナは、その設定のまま。作り直す（`docker rm -f redis-stack`、そのあと新しいコマンド）と、Redis のほかの再起動と同じく、その記憶は消える |
+| MCP の指示は、永続の記憶として `n3mc-longtermmemory` を挙げていた | `n3mc-pro`、`n3mc-pg`、`n3mc-longtermmemory`（N3MC MCP Pro、その PostgreSQL 版、以前の MCP Pro）を挙げる |
+| 古いプラグインや `.mcp.json` が、版の指定のない `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` を起動していた | プラグインを更新する。それまでは、その登録が v2.0.0 の MCP の入口を、フックなしで Claude Code に起動する |
+| `N3MC_SESSION_ID` で、Claude Code のセッションの保存をまとめられた | フックのレコードは Claude Code 自身のセッション ID を持つ。`N3MC_SESSION_ID` は今も MCP に効く |
+| MCP クライアントの `env` の `N3MC_REDIS_URL` で Redis を選べた | `redis_url` を `config.json` に書く。共用のサーバーは、それを起動したプロセスの環境を使う |
+| `skip_code_blocks: true` は、コード付きの保存を断った | フックのメッセージや応答も、コードブロックを含めば保存しない |
+| — | `search_memory` の検索結果は `context_max_chars`（既定 9,500 文字）に収まる |
 
 **変わらないもの**：
 PyPI の名前 `n3memorycore-mcp-lite`。
 Python パッケージ `n3mc_mcp`。
 MCP のコマンドとサーバー名 `n3mc-workingmemory`（別名 `n3mc-mcp-lite`）。
-7 つのツールの名前・引数・出力の文。
+7 つのツールの名前・引数・出力の文（ただし `search_memory` の文は `context_max_chars` に収まるようになった）。
 Redis のレイアウトと設定（`redis_url`、`N3MC_REDIS_URL`）。
 7 日の TTL。
 データフォルダ `~/.n3mc-workingmemory`（`N3MC_DATA_DIR`）。
@@ -120,7 +127,7 @@ v1.12.2 が保存したレコードは、そのまま読めます（同じ索引
 
 ```bash
 # 初回のみ（コンテナを作成）：
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
 
 # 2 回目以降（コンテナは既存なので start するだけ）：
 docker start redis-stack
@@ -354,7 +361,7 @@ N3MC Lite は、利用者が動かす Redis Stack に記憶を置きます。
 - **ディスクに置くもの** — Redis のほかに、データフォルダに `config.json` を置きます。v2.0.0 からは **`audit.log` も置きます。これはフックの入力の原文で、すべてのプロンプトと応答を、コードブロックや貼り付けた文章も含めて、そのまま持ちます。TTL はありません**（50 MB でローテーションし、最大約 100 MB）。他人に見せない情報として扱ってください。`audit.log` は、Redis に届かなかったメッセージの最後の控えです。記憶に読み戻すものはありません。[データ保存先](#データ保存先) を見てください。
 - **埋め込みは自分の PC で作る** — 埋め込みモデルは、ローカルの CPU で動きます。検索は自分の Redis の中で動きます。検索のために外部の API は呼びません。
 - **テレメトリーなし** — N3MC は、利用の情報をどこにも送りません。コードは公開されているので、自分で確かめられます。
-- **すべて見て、消せる** — `n3mc-lite --list` / `list_memories` で新しい記憶を見られます。`--delete` / `delete_memory` と `--delete-session` / `delete_memories_by_session` で消せます。
+- **記憶を見て、消せる** — `n3mc-lite --list` / `list_memories` で新しい記憶を見られます。`--delete` / `delete_memory` と `--delete-session` / `delete_memories_by_session` で Redis から消せます。フックの呼び出しの原文は、データフォルダの `audit.log` にも残ります（TTL なし。50 MB でローテーション）。消すときは、このファイルを自分で消してください。
 
 ネットワークを通るもの：
 
@@ -564,11 +571,11 @@ Lite には、専用のデータフォルダ（`~/.n3mc-workingmemory`）、デ�
 - `n3mc-lite --init` は、ほかの製品のフックを残し、そのことを知らせます。
 - 2 つの製品のフックが入っていると、Claude は製品ごとに 1 つずつ `# Recalled Memory Context` の塊を受け取ります。それぞれの記憶から取り出したものです。
 - ほかの N3MC のサーバーが Lite のポートを使っているとき、Lite はそのサーバーを使わず、止めもしません。ベクトルなしで保存し、検索はしません。`port_conflict` の通知を出し、Lite に専用の `server_port` を与えるよう求めます。
-- 同じアプリに MCP の N3MC Pro（`n3mc-longtermmemory`）がつながっているときは、MCP の指示が Lite を作業メモリとして扱います。
+- 同じアプリに永続の N3MC の記憶が MCP でつながっているとき — `n3mc-pro`（N3MC MCP Pro）、`n3mc-pg`（その PostgreSQL 版）、`n3mc-longtermmemory`（以前の MCP Pro）— は、MCP の指示が Lite を作業メモリとして扱います。
 
 ## 制限
 
-- **7 日。** 各エントリは、保存から 7 日で消えます（検索の上位 5 件に入ると、7 日が戻ります）。`audit.log` は例外で、TTL がありません。
+- **7 日。** 各エントリは、保存から 7 日で消えます（検索の普通のヒットになると、7 日が戻ります）。`audit.log` は例外で、TTL がありません。
 - **フックのないアプリでは、保存はモデル次第です**（下を見てください）。会話の全部が残るのは Claude Code だけです。
 - **常駐サーバーが動ける必要があります。** 起動できないときは、検索はエラーか代わりの文を返します。保存は、ベクトルなしで Redis に入ります（キーワードではすぐ見つかり、ベクトルはあとで修復が足します）。
 - **すべてのクライアントで 1 つのインストール。** フック・CLI・MCP の入口は、同じ版を動かす必要があります。違うと、呼び出しのたびに、互いのサーバーを置き換えてしまいます。デスクトップアプリは、フックと同じ scripts フォルダか、同じ版に固定した `uvx` の形で登録します。
