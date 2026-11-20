@@ -66,6 +66,11 @@ the specification.
   records the failure itself, so the hooks show the `server_start_failed`
   notice and wait 5 minutes before trying again, instead of starting it on
   every message.
+- A save writes its duplicate guard and its record(s) in one atomic step, so
+  a save cut off midway no longer leaves a guard that answers `duplicate` for
+  7 days while nothing was stored.
+- The MCP entry reads `config.json` again on every tool call, so an open
+  client follows a changed `server_port`.
 - Hook records carry Claude Code's session id; `N3MC_SESSION_ID` applies to
   MCP only. `N3MC_REDIS_URL` set for one application only gives the notice
   `redis_url_mismatch`; put `redis_url` into `config.json`.
