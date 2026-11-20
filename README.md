@@ -226,9 +226,11 @@ Plugin users (no pip installation):
 ### Step 4 — Restart
 
 Restart Claude Code (and the desktop app). Memory starts with the next
-session. The first memory search may take 30–60 seconds while the resident
-server downloads and loads the ~440 MB embedding model; later starts use the
-cache.
+session. On the first start the resident server downloads and loads the
+~440 MB embedding model (later starts use the cache). The hooks do not wait
+for it: until the model is ready, the memory search uses keywords only and
+says so in a notice, and messages are saved without vectors, which are added
+later automatically. The MCP tools wait up to 20 seconds for the model.
 
 ### Generating the code from the specification
 
@@ -771,8 +773,11 @@ rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycor
 ### The `# Recalled Memory Context` block says the search is unavailable
 
 The block always shows the state of the memory. `the memory server is still
-starting` appears while the first start downloads the model — wait and send
-the next message. Other reasons name the cause (`see <server.log path>`,
+starting` appears while the resident server starts and does not answer yet —
+send the next message a little later. While the first start downloads the
+embedding model, the server already answers: the search uses keywords only
+and a notice says the model `is still loading`; the vectors are added later
+automatically. Other reasons name the cause (`see <server.log path>`,
 another N3MC server on the port, Redis unreachable). A `> ⚠️ N3MC notice:`
 line tells you what to do, for example `docker start redis-stack`.
 
