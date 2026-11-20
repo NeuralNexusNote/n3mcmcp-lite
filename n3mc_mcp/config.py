@@ -1,217 +1,139 @@
-"""
-Configuration loading (spec §6, §3.9 step 1).
+"""config.json load/save and UUID generation (spec §6, §7)."""
 
-v1.7.0: a config.json the user mistyped is NEVER overwritten.
-  - missing file            → create it EXCLUSIVELY (v1.7.1) with fresh
-                              owner_id / local_id; if another process won,
-                              read and use that file
-  - unreadable / not object → leave the file untouched, run on defaults with
-                              per-process UUIDs, notice `config_unreadable`
-                              (save_memory also warns, v1.7.1)
-  - wrong type / out of range (v1.7.1 table) → ignore only that item (use its
-                              default), leave the file untouched, notice
-                              `config_type`
-  - readable                → fill missing fields with defaults and save
-                              (temp file + os.replace, v1.7.1)
-Notices are collected in cfg["_notices"] (list[str]) and printed to stderr;
-server.py prepends them to the first search_memory output of the process.
-"""
 import json
 import math
 import os
+import pathlib
 import sys
+import tempfile
 import time
 import uuid
-from pathlib import Path
-from typing import Any
 
-from .paths import get_config_path, get_legacy_config_path
+from n3mc_mcp import paths
 
-# Complete schema from spec §6 — all fields with their defaults.
-# (`dedup_threshold` and `context_char_limit` were removed in v1.7.0; if an
-# existing config.json still has them they are kept in the file but ignored.)
-DEFAULTS: dict[str, Any] = {
-    "redis_url":                "redis://localhost:6379/0",
-    "ttl_seconds":              604800,
-    "half_life_days":           3,
-    "bm25_min_threshold":       0.1,
-    "search_result_limit":      20,
-    "min_score":                0.2,
-    # §3.14 search result shaping (v1.7.0). vector_min_cos / version_sim_threshold
-    # were measured with multilingual-e5-base; re-measure for another model.
-    "vector_min_cos":           0.85,
+DEFAULTS = {
+    "redis_url": "redis://localhost:6379/0",
+    "ttl_seconds": 604800,
+    "half_life_days": 3,
+    "bm25_min_threshold": 0.1,
+    "search_result_limit": 20,
+    "min_score": 0.2,
+    "vector_min_cos": 0.85,
     "relative_min_score_ratio": 0.6,
-    "min_results":              3,      # §3.14 step 6 weak-match fill (v1.7.2)
-    "version_order_enabled":    True,
-    "version_sim_threshold":    0.98,
-    "version_min_chars":        100,
-    "search_query_max_chars":   2000,
-    "chunk_threshold":          400,
-    "chunk_overlap":            100,
-    "access_count_enabled":     False,  # frequency boost; off since 2026-11-17
-    "access_count_weight":      0.02,
-    "access_count_max_boost":   0.5,
-    "ttl_refresh_on_search":    True,
-    "ttl_refresh_top_k":        5,
-    "lexical_rerank_enabled":   True,
-    "rerank_weight":            0.3,
-    "rerank_phrase_weight":     0.2,
-    "b_session_match":          1.0,
-    "b_session_mismatch":       0.6,
-    "skip_code_blocks":         False,
-    # Embedding model (spec §3.2). Operator-selectable so the quality /
-    # resource / language tradeoff is the deployment's choice, not baked in.
-    # `embedding_dim` MUST match the chosen model's output dimension and is
-    # used to build the RediSearch vector index. Changing either requires a
-    # process restart and an index flush (different dim = incompatible vectors).
-    "embedding_model":          "intfloat/multilingual-e5-base",
-    "embedding_dim":            768,
+    "min_results": 3,
+    "version_order_enabled": True,
+    "version_sim_threshold": 0.98,
+    "version_min_chars": 100,
+    "search_query_max_chars": 2000,
+    "chunk_threshold": 400,
+    "chunk_overlap": 100,
+    "access_count_enabled": False,
+    "access_count_weight": 0.02,
+    "access_count_max_boost": 0.5,
+    "ttl_refresh_on_search": True,
+    "ttl_refresh_top_k": 5,
+    "lexical_rerank_enabled": True,
+    "rerank_weight": 0.3,
+    "rerank_phrase_weight": 0.2,
+    "b_session_match": 1.0,
+    "b_session_mismatch": 0.6,
+    "skip_code_blocks": False,
+    "embedding_model": "intfloat/multilingual-e5-base",
+    "embedding_dim": 768,
+    "server_port": 18524,
+    "bind_host": "127.0.0.1",
+    "context_max_chars": 9500,
 }
 
-# Keys generated per install (no default value; not type-checked, spec §6).
-_ID_KEYS = ("owner_id", "local_id")
-
-
-# Spec §6 "Allowed values" (v1.7.1, Lite review LM2): key -> (kind, range).
-#   kind "int"    = JSON integer only (604800.5 and 768.0 are rejected)
-#   kind "number" = int or float
-#   range: (lo, lo_inclusive, hi, hi_inclusive); None = unbounded.
-# chunk_overlap is special: >= 0 and < chunk_threshold (the value in effect).
-_NUMERIC_RULES: dict[str, tuple[str, tuple]] = {
-    "ttl_seconds":              ("int",    (1, True, None, False)),
-    "search_result_limit":      ("int",    (1, True, None, False)),
-    "search_query_max_chars":   ("int",    (1, True, None, False)),
-    "embedding_dim":            ("int",    (1, True, None, False)),
-    "chunk_threshold":          ("int",    (50, True, None, False)),
-    "chunk_overlap":            ("int",    (0, True, None, False)),
-    "ttl_refresh_top_k":        ("int",    (0, True, None, False)),
-    "version_min_chars":        ("int",    (0, True, None, False)),
-    "min_results":              ("int",    (0, True, None, False)),
-    "half_life_days":           ("number", (0, False, None, False)),
-    "bm25_min_threshold":       ("number", (0, True, None, False)),
-    "access_count_weight":      ("number", (0, True, None, False)),
-    "access_count_max_boost":   ("number", (0, True, None, False)),
-    "rerank_weight":            ("number", (0, True, None, False)),
-    "rerank_phrase_weight":     ("number", (0, True, None, False)),
-    "min_score":                ("number", (0, True, 1, True)),
-    "vector_min_cos":           ("number", (0, True, 1, True)),
-    "relative_min_score_ratio": ("number", (0, True, 1, True)),
-    "version_sim_threshold":    ("number", (0, True, 1, True)),
-    "b_session_match":          ("number", (0, True, 1, True)),
-    "b_session_mismatch":       ("number", (0, True, 1, True)),
+# key -> (kind, low, high, low_inclusive)   kind: "int" | "num"
+_RANGES = {
+    "ttl_seconds": ("int", 1, None, True),
+    "search_result_limit": ("int", 1, None, True),
+    "search_query_max_chars": ("int", 1, None, True),
+    "embedding_dim": ("int", 1, None, True),
+    "chunk_threshold": ("int", 50, None, True),
+    "ttl_refresh_top_k": ("int", 0, None, True),
+    "version_min_chars": ("int", 0, None, True),
+    "min_results": ("int", 0, None, True),
+    "half_life_days": ("num", 0, None, False),
+    "bm25_min_threshold": ("num", 0, None, True),
+    "access_count_weight": ("num", 0, None, True),
+    "access_count_max_boost": ("num", 0, None, True),
+    "rerank_weight": ("num", 0, None, True),
+    "rerank_phrase_weight": ("num", 0, None, True),
+    "min_score": ("num", 0, 1, True),
+    "vector_min_cos": ("num", 0, 1, True),
+    "relative_min_score_ratio": ("num", 0, 1, True),
+    "version_sim_threshold": ("num", 0, 1, True),
+    "b_session_match": ("num", 0, 1, True),
+    "b_session_mismatch": ("num", 0, 1, True),
+    "server_port": ("int", 1, 65535, True),
+    "context_max_chars": ("int", 2000, 10000, True),
 }
 
 
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _is_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
 
 
-def config_value_ok(key: str, value: Any, chunk_threshold: Any = None) -> bool:
-    """Type and range check for one config item (spec §6 `config_value_ok`).
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
-    Default is a bool   → accept only bool.
-    Default is a string → accept only str.
-    Numbers follow the per-key table `_NUMERIC_RULES` (v1.7.1): "int" keys
-    accept only JSON integers, every number key has an allowed range, and a
-    bool is never a number.
-    `chunk_overlap` must also be < *chunk_threshold* (the value in effect
-    after checking chunk_threshold; defaults to DEFAULTS["chunk_threshold"]).
-    Keys without a default (owner_id, local_id) and unknown keys → always ok.
-    """
+
+def config_value_ok(key, value, chunk_threshold=None) -> bool:
+    """Type and range check of one config value (§6). Unknown keys and IDs are not checked."""
     if key not in DEFAULTS:
         return True
+    if key == "chunk_overlap":
+        if not _is_int(value) or value < 0:
+            return False
+        ct = chunk_threshold if chunk_threshold is not None else DEFAULTS["chunk_threshold"]
+        return value < ct
     default = DEFAULTS[key]
     if isinstance(default, bool):
         return isinstance(value, bool)
     if isinstance(default, str):
         return isinstance(value, str)
-    if isinstance(default, (int, float)):
-        if not _is_number(value):
-            return False
-        if isinstance(value, float) and not math.isfinite(value):
-            return False
-        rule = _NUMERIC_RULES.get(key)
-        if rule is None:
-            return True
-        kind, (lo, lo_inc, hi, hi_inc) = rule
-        if kind == "int" and not isinstance(value, int):
-            return False
-        if lo is not None and (value < lo or (value == lo and not lo_inc)):
-            return False
-        if hi is not None and (value > hi or (value == hi and not hi_inc)):
-            return False
-        if key == "chunk_overlap":
-            limit = DEFAULTS["chunk_threshold"] if chunk_threshold is None else chunk_threshold
-            if value >= limit:
-                return False
-        return True
+    rng = _RANGES.get(key)
+    if rng is None:
+        return _is_num(value)
+    kind, lo, hi, lo_incl = rng
+    if kind == "int" and not _is_int(value):
+        return False
+    if kind == "num" and not _is_num(value):
+        return False
+    if lo is not None and (value < lo if lo_incl else value <= lo):
+        return False
+    if hi is not None and value > hi:
+        return False
     return True
 
 
-def _type_name(key: str, chunk_threshold: Any = None) -> str:
-    default = DEFAULTS[key]
-    if isinstance(default, bool):
-        return "true/false"
-    if isinstance(default, str):
-        return "string"
-    if isinstance(default, (int, float)):
-        rule = _NUMERIC_RULES.get(key)
-        if rule is None:
-            return "number"
-        kind, (lo, lo_inc, hi, hi_inc) = rule
-        name = "integer" if kind == "int" else "number"
-        parts = []
-        if lo is not None:
-            parts.append(f"{'>=' if lo_inc else '>'} {lo}")
-        if hi is not None:
-            parts.append(f"{'<=' if hi_inc else '<'} {hi}")
-        if key == "chunk_overlap":
-            limit = DEFAULTS["chunk_threshold"] if chunk_threshold is None else chunk_threshold
-            parts.append(f"< chunk_threshold ({limit})")
-        return name + (" " + " and ".join(parts) if parts else "")
-    return type(default).__name__
-
-
-def _notice(notices: list[str], message: str) -> None:
-    notices.append(message)
-    print(f"[n3mc] {message}", file=sys.stderr)
-
-
-def _defaults_with_fresh_ids() -> dict[str, Any]:
-    cfg: dict[str, Any] = {
-        "owner_id": str(uuid.uuid4()),
-        "local_id": str(uuid.uuid4()),
-    }
-    cfg.update(DEFAULTS)
-    return cfg
-
-
-def _tmp_path(path: Path) -> Path:
-    return path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-
-
-def _create_exclusive(path: Path, data: bytes) -> bool:
-    """Create *path* with *data* only if it does not exist (spec §6, v1.7.1).
-
-    Writes a temporary file in the same folder, then `os.link(tmp, path)`
-    (fails if the target exists); where hard links are not available,
-    `open(path, "x")`. Returns True when this process created the file,
-    False when another process had created it first. Other errors raise.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _tmp_path(path)
+def _stderr(msg: str) -> None:
     try:
-        with open(tmp, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
+        print(msg, file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _write_tmp(folder: pathlib.Path, data: bytes) -> str:
+    folder.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=str(folder))
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return tmp
+
+
+def _create_exclusive(path: pathlib.Path, data: bytes) -> bool:
+    """Create `path` only if it does not exist (§6). True when this call created it."""
+    tmp = _write_tmp(path.parent, data)
+    try:
         try:
-            os.link(tmp, path)
+            os.link(tmp, str(path))
             return True
         except FileExistsError:
             return False
-        except (OSError, NotImplementedError, AttributeError):
-            # No hard links on this file system → exclusive open.
+        except OSError:
             try:
                 with open(path, "xb") as f:
                     f.write(data)
@@ -220,195 +142,174 @@ def _create_exclusive(path: Path, data: bytes) -> bool:
                 return False
     finally:
         try:
-            tmp.unlink()
+            os.remove(tmp)
         except OSError:
             pass
 
 
-def _replace_atomic(path: Path, data: bytes) -> None:
-    """Write *data* to a temp file in the same folder, then os.replace it
-    onto *path* (spec §6 / §7, v1.7.1): an interrupted write never leaves a
-    truncated file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _tmp_path(path)
+def replace_atomic(path: pathlib.Path, data: bytes) -> None:
+    tmp = _write_tmp(path.parent, data)
     try:
-        with open(tmp, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    finally:
+        os.replace(tmp, str(path))
+    except Exception:
         try:
-            tmp.unlink()
+            os.remove(tmp)
         except OSError:
             pass
+        raise
 
 
-def _config_bytes(cfg: dict[str, Any]) -> bytes:
-    data = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
-    return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+def _dump(obj) -> bytes:
+    return (json.dumps(obj, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def _migrate_legacy_config(path) -> None:
-    """Spec §7 (v1.7.0): copy the v1.6.x config once, byte-for-byte.
+def _read_json(path: pathlib.Path):
+    with open(path, "r", encoding="utf-8-sig") as f:
+        return json.load(f)
 
-    Only when the new file is missing and N3MC_DATA_DIR is not set. The
-    legacy file is left in place. Failures are logged and ignored (a new
-    config is then created as usual). v1.7.1: the copy uses the
-    exclusive-create rule (temp file + os.link), so two processes migrating
-    at once end up with one file.
-    """
-    if path.exists() or os.environ.get("N3MC_DATA_DIR"):
+
+def _new_file_content() -> dict:
+    d = {"owner_id": str(uuid.uuid4()), "local_id": str(uuid.uuid4())}
+    d.update(DEFAULTS)
+    return d
+
+
+def _migrate_legacy(path: pathlib.Path) -> None:
+    if os.environ.get("N3MC_DATA_DIR"):
         return
-    legacy = get_legacy_config_path()
     try:
-        if not legacy.is_file():
-            return
-        if _create_exclusive(path, legacy.read_bytes()):
-            print(f"[n3mc] config migrated from {legacy} to {path} "
-                  "(the old file was left in place)", file=sys.stderr)
-    except Exception as e:
-        print(f"[n3mc] config migration from {legacy} failed: {e}", file=sys.stderr)
-
-
-# Spec §6 (v1.7.1): after losing the create race, re-read the winner's file
-# every 0.1 s for up to 2 s (a writer that does not use the rule may still be
-# writing it).
-_RACE_RETRY_SECONDS = 2.0
-_RACE_RETRY_STEP = 0.1
-
-
-def _read_config(path: Path) -> tuple[Any, str]:
-    """(data, error) — error is "" when the file is a JSON object."""
+        legacy = paths.legacy_config_path()
+    except Exception:
+        return
+    if not legacy.is_file():
+        return
     try:
-        # utf-8-sig: tolerate the BOM some Windows editors add.
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-    if not isinstance(data, dict):
-        return data, "the top level is not a JSON object"
-    return data, ""
+        data = legacy.read_bytes()
+    except OSError:
+        return
+    if _create_exclusive(path, data):
+        _stderr(f"N3MC Lite: copied the settings from {legacy} to {path} (the old file was left in place).")
 
 
-def load_config() -> dict[str, Any]:
-    path = get_config_path()
-    _migrate_legacy_config(path)
-    notices: list[str] = []
-    file_data: dict[str, Any] | None = None   # file content to write back
-    persist = False
-    lost_race = False
+def load_config() -> dict:
+    """Load (or create) config.json. Never overwrites a file it cannot read (§6)."""
+    path = paths.config_path()
+    notices = []
+    file_data = None
+    unreadable = False
 
     if not path.exists():
-        # Case: file missing → create it EXCLUSIVELY with fresh UUIDs
-        # (v1.7.1). If another process created it first, use that file.
-        cfg = _defaults_with_fresh_ids()
+        _migrate_legacy(path)
+    if not path.exists():
+        _create_exclusive(path, _dump(_new_file_content()))
+
+    deadline = time.time() + 2.0
+    while True:
         try:
-            if _create_exclusive(path, _config_bytes(cfg)):
-                return _finish(cfg, notices)
-            lost_race = True
-        except Exception as e:
-            print(f"[n3mc] could not write {path}: {e}", file=sys.stderr)
-            return _finish(cfg, notices)
+            file_data = _read_json(path)
+            if not isinstance(file_data, dict):
+                raise ValueError("the top level is not a JSON object")
+            break
+        except Exception as e:  # noqa: BLE001
+            reason = f"{type(e).__name__}: {e}"
+            if time.time() < deadline and isinstance(e, (json.JSONDecodeError, ValueError)) and path.exists() \
+                    and path.stat().st_size == 0:
+                time.sleep(0.1)
+                continue
+            unreadable = True
+            file_data = None
+            notices.append(
+                f"config_unreadable: {path} could not be read ({reason}), so N3MC Lite is running with "
+                f"the default settings and a temporary owner_id for now; memories saved meanwhile will not be "
+                f"visible after the server restarts. The file was left unchanged: fix it and the server "
+                f"restarts with it on the next call.")
+            break
 
-    data, error = _read_config(path)
-    if error and lost_race:
-        deadline = time.monotonic() + _RACE_RETRY_SECONDS
-        while error and time.monotonic() < deadline:
-            time.sleep(_RACE_RETRY_STEP)
-            data, error = _read_config(path)
-
-    if error:
-        # Case: unreadable → do NOT modify the file; defaults + per-process
-        # UUIDs (not saved).
-        cfg = _defaults_with_fresh_ids()
-        cfg["_config_unreadable"] = str(path)
-        _notice(
-            notices,
-            f"config_unreadable: {path} could not be read ({error}). "
-            "The file was left unchanged; this server process is running "
-            "on default settings with temporary IDs. Fix the file and "
-            "restart the MCP client.",
-        )
+    cfg = dict(DEFAULTS)
+    if unreadable:
+        cfg["owner_id"] = str(uuid.uuid4())
+        cfg["local_id"] = str(uuid.uuid4())
     else:
-        assert isinstance(data, dict)
-        cfg = dict(data)
-        bad: list[str] = []
-        # chunk_threshold first: chunk_overlap is checked against the value
-        # in effect after this check (spec §6).
-        ct = data.get("chunk_threshold", DEFAULTS["chunk_threshold"])
-        if not config_value_ok("chunk_threshold", ct):
-            ct = DEFAULTS["chunk_threshold"]
-        ordered = sorted(data.items(), key=lambda kv: kv[0] != "chunk_threshold")
-        for k, v in ordered:
-            if not config_value_ok(k, v, chunk_threshold=ct):
-                bad.append(
-                    f"{k}={json.dumps(v, ensure_ascii=False)} "
-                    f"(expected {_type_name(k, ct)}; "
-                    f"using default {json.dumps(DEFAULTS[k])})"
-                )
-                cfg[k] = DEFAULTS[k]
-        if cfg.get("chunk_overlap", DEFAULTS["chunk_overlap"]) >= ct:
-            # The DEFAULT overlap (100) is itself >= a lowered chunk_threshold
-            # (50..100): use a quarter of the threshold instead, so every
-            # window advances by a useful amount (not stated in the spec).
-            cfg["chunk_overlap"] = max(0, ct // 4)
-
-        missing = [k for k in (*_ID_KEYS, *DEFAULTS) if k not in data]
-        for k in missing:
-            if k in _ID_KEYS:
-                cfg[k] = str(uuid.uuid4())
-            elif k not in cfg:
-                cfg[k] = DEFAULTS[k]
-
+        bad = []
+        for key in DEFAULTS:
+            if key == "chunk_overlap" or key not in file_data:
+                continue
+            if config_value_ok(key, file_data[key]):
+                cfg[key] = file_data[key]
+            else:
+                bad.append(key)
+        ct = cfg["chunk_threshold"]
+        if "chunk_overlap" in file_data:
+            if config_value_ok("chunk_overlap", file_data["chunk_overlap"], ct):
+                cfg["chunk_overlap"] = file_data["chunk_overlap"]
+            else:
+                bad.append("chunk_overlap")
+                cfg["chunk_overlap"] = DEFAULTS["chunk_overlap"]
+        if cfg["chunk_overlap"] >= ct:
+            cfg["chunk_overlap"] = ct // 4
         if bad:
-            # Case: wrongly typed / out-of-range item(s) → ignore only those
-            # items and do NOT modify the file.
-            _notice(
-                notices,
-                "config_type: wrong type or value in " + str(path) + ": "
-                + "; ".join(bad)
-                + ". The file was left unchanged. Fix the value(s) "
-                "(e.g. remove the quotes around a number) and restart "
-                "the MCP client.",
-            )
-        elif missing:
-            # Case: readable → fill missing fields and save. Only the
-            # file's own values + filled defaults are written (never the
-            # env override or internal `_` keys).
-            file_data = dict(data)
-            for k in missing:
-                file_data[k] = cfg[k]
-            persist = True
+            notices.append(
+                f"config_type: these settings in {path} have the wrong type or are out of range and were "
+                f"ignored (the defaults are used): {', '.join(bad)}.")
+        changed = False
+        for k in ("owner_id", "local_id"):
+            v = file_data.get(k)
+            if isinstance(v, str) and v:
+                cfg[k] = v
+            else:
+                file_data[k] = cfg[k] = str(uuid.uuid4())
+                changed = True
+        for key, val in DEFAULTS.items():
+            if key not in file_data:
+                file_data[key] = val
+                changed = True
+        if changed:
+            try:
+                replace_atomic(path, _dump(file_data))
+            except OSError as e:
+                _stderr(f"N3MC Lite: could not update {path}: {e}")
 
-    if persist and file_data is not None:
-        _save_config(file_data)
-
-    return _finish(cfg, notices)
-
-
-def _finish(cfg: dict[str, Any], notices: list[str]) -> dict[str, Any]:
-    # N3MC_REDIS_URL env var overrides config file (spec §3.3). Applied after
-    # persisting so the override never leaks into config.json.
-    redis_env = os.environ.get("N3MC_REDIS_URL")
-    if redis_env:
-        cfg["redis_url"] = redis_env
+    env_url = os.environ.get("N3MC_REDIS_URL")
+    if env_url:
+        cfg["redis_url"] = env_url
     cfg["_notices"] = notices
+    cfg["_unreadable"] = unreadable
+    cfg["_path"] = str(path)
+    for n in notices:
+        _stderr("N3MC Lite: " + n)
     return cfg
 
 
-def config_unreadable_detail(path: str) -> str:
-    """save_memory `detail` while config.json is unreadable (spec §6, LL9)."""
-    return (
-        "config.json could not be read, so this entry was saved under a "
-        "temporary owner_id and will not be visible after the server restarts. "
-        f"Fix {path} and restart the MCP client."
-    )
+CODE_FILES = ("app.py", "tools.py", "tooldefs.py", "instructions.py", "context.py", "database.py",
+              "processor.py", "config.py", "paths.py", "cli.py")
 
 
-def _save_config(cfg: dict[str, Any]) -> None:
-    """Update config.json atomically: temp file + os.replace (v1.7.1)."""
-    path = get_config_path()
+def code_version() -> str:
+    """SHA-256 (first 16 hex) of the server's code files plus config.json (§3.15)."""
+    import hashlib
+    pkg = os.path.dirname(os.path.abspath(__file__))
+    h = hashlib.sha256()
+    for name in CODE_FILES:
+        try:
+            with open(os.path.join(pkg, name), "rb") as f:
+                h.update(f.read())
+        except OSError:
+            pass
+    h.update(config_fingerprint())
+    return h.hexdigest()[:16]
+
+
+def config_fingerprint() -> bytes:
+    """config.json as it counts for code_version (§3.15): canonical JSON, raw bytes, or nothing."""
+    path = paths.config_path()
     try:
-        _replace_atomic(path, _config_bytes(cfg))
-    except Exception as e:
-        print(f"[n3mc] could not write {path}: {e}", file=sys.stderr)
+        raw = path.read_bytes()
+    except OSError:
+        return b""
+    try:
+        obj = json.loads(raw.decode("utf-8-sig"))
+        if isinstance(obj, dict):
+            return json.dumps(obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        pass
+    return raw

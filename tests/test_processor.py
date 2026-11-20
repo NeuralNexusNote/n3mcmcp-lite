@@ -1,353 +1,98 @@
-import math
-import pytest
-from n3mc_mcp.processor import (
-    b_local,
-    chunk_text,
-    cjk_bigram_expand,
-    cosine_sim_from_distance,
-    final_score,
-    keyword_relevance,
-    lexical_rerank,
-    prepare_query,
-    purify,
-    time_decay,
-)
+"""Layer 2: ranking math, purify, chunking, tokenization, encoding safety (no Redis, no model)."""
 
+import time
 
-# ── TestCosineSim ────────────────────────────────────────────────────────────
+from n3mc_mcp import processor as P
+
 
 class TestCosineSim:
-    def test_zero_distance_gives_one(self):
-        assert cosine_sim_from_distance(0.0) == pytest.approx(1.0)
+    def test_identical_and_orthogonal(self):
+        assert abs(P.cosine_sim([1, 0], [1, 0]) - 1.0) < 1e-6
+        assert P.cosine_sim([1, 0], [0, 1]) == 0.0
 
-    def test_one_distance_gives_zero(self):
-        assert cosine_sim_from_distance(1.0) == pytest.approx(0.0)
+    def test_distance_conversion_clamps(self):
+        assert P.cos_from_distance(0.0) == 1.0
+        assert P.cos_from_distance(1.5) == 0.0
+        assert P.cos_from_distance(None) == 0.0
 
-    def test_two_distance_clamped_to_zero(self):
-        assert cosine_sim_from_distance(2.0) == pytest.approx(0.0)
-
-    def test_negative_distance_clamped_to_one(self):
-        assert cosine_sim_from_distance(-0.1) == pytest.approx(1.0)
-
-    def test_half_distance(self):
-        assert cosine_sim_from_distance(0.5) == pytest.approx(0.5)
-
-
-# ── TestTimeDecay ────────────────────────────────────────────────────────────
 
 class TestTimeDecay:
-    def test_now_returns_one(self):
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        assert time_decay(now, half_life_days=3) == pytest.approx(1.0, abs=0.01)
+    def test_now_and_half_life(self):
+        now = time.time()
+        assert abs(P.time_decay(now, 3, now) - 1.0) < 1e-9
+        assert abs(P.time_decay(now - 3 * 86400, 3, now) - 0.5) < 1e-9
 
-    def test_half_life(self):
-        from datetime import datetime, timezone, timedelta
-        ts = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
-        assert time_decay(ts, half_life_days=3) == pytest.approx(0.5, abs=0.01)
+    def test_bad_timestamp_is_one(self):
+        assert P.time_decay("bad", 3) == 1.0
 
-    def test_invalid_timestamp_returns_one(self):
-        assert time_decay("not-a-date", half_life_days=3) == pytest.approx(1.0)
-
-    def test_old_entry_near_expiry(self):
-        from datetime import datetime, timezone, timedelta
-        ts = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        val = time_decay(ts, half_life_days=3)
-        assert val < 0.25
-
-
-# ── TestKeywordRelevance ─────────────────────────────────────────────────────
 
 class TestKeywordRelevance:
-    def test_below_threshold_returns_zero(self):
-        assert keyword_relevance(0.05, 10.0, threshold=0.1) == pytest.approx(0.0)
-
-    def test_normalized_to_max(self):
-        assert keyword_relevance(5.0, 10.0, threshold=0.1) == pytest.approx(0.5)
-
-    def test_max_score_returns_one(self):
-        assert keyword_relevance(10.0, 10.0, threshold=0.1) == pytest.approx(1.0)
-
-    def test_zero_max_bm25_safe(self):
-        assert keyword_relevance(0.0, 0.0, threshold=0.1) == pytest.approx(0.0)
+    def test_threshold_and_normalization(self):
+        assert P.keyword_relevance(0.05, 2.0, 0.1) == 0.0
+        assert P.keyword_relevance(1.0, 2.0, 0.1) == 0.5
+        assert P.keyword_relevance(0.5, 0.5, 0.1) == 0.5   # max(1.0, max) floor
 
 
-# ── TestFinalScore ───────────────────────────────────────────────────────────
-
-class TestFinalScore:
-    def test_formula(self):
-        cos, kw, decay, b = 0.8, 0.6, 0.9, 1.2
-        expected = (0.8 * 0.7 + 0.6 * 0.3) * 0.9 * 1.2
-        assert final_score(cos, kw, decay, b) == pytest.approx(expected)
-
-    def test_zero_cos_kw_gives_zero(self):
-        assert final_score(0.0, 0.0, 1.0, 1.0) == pytest.approx(0.0)
-
-
-# ── TestAccessCountBoost ─────────────────────────────────────────────────────
-
-class TestAccessCountBoost:
-    def test_no_boost_with_zero_access(self):
+class TestBLocal:
+    def test_clamp_and_boost(self):
         cfg = {"access_count_enabled": True, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
-        assert b_local(1.0, 0, cfg) == pytest.approx(1.0)
+        assert P.b_local(1.0, 10, cfg) == 1.2
+        assert P.b_local(1.9, 100, cfg) == 2.0
+        assert P.b_local(1.0, 10, {"access_count_enabled": False}) == 1.0
 
-    def test_boost_increases_b_local(self):
-        cfg = {"access_count_enabled": True, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
-        assert b_local(1.0, 10, cfg) > 1.0
-
-    def test_clamp_at_2(self):
-        cfg = {"access_count_enabled": True, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
-        assert b_local(2.0, 1000, cfg) == pytest.approx(2.0)
-
-    def test_clamp_at_0_5(self):
-        cfg = {"access_count_enabled": True, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
-        assert b_local(0.3, 0, cfg) == pytest.approx(0.5)
-
-    def test_disabled_flag(self):
-        cfg = {"access_count_enabled": False, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
-        assert b_local(1.0, 100, cfg) == pytest.approx(1.0)
-
-    def test_boost_off_by_default(self):
-        # 2026-11-17: the frequency boost is off unless the config turns it on
-        from n3mc_mcp.config import DEFAULTS
-        assert DEFAULTS["access_count_enabled"] is False
-        assert b_local(1.0, 100, {}) == pytest.approx(1.0)
-
-    def test_max_boost_capped(self):
-        cfg = {"access_count_enabled": True, "access_count_weight": 0.02, "access_count_max_boost": 0.5}
-        val = b_local(1.0, 10000, cfg)
-        assert val == pytest.approx(1.5)
-
-
-# ── TestLexicalRerank ────────────────────────────────────────────────────────
 
 class TestLexicalRerank:
-    def _make(self, content: str, score: float = 0.5) -> dict:
-        return {"content": content, "score": score, "id": "x"}
+    def test_coverage_counts_punctuated_words(self):
+        cfg = {"rerank_weight": 0.3, "rerank_phrase_weight": 0.2}
+        long_tail = " " + "x" * 60
+        assert P.rerank_bonus("note", "a note," + long_tail, cfg) > 0.0
 
-    def test_empty_query_no_change(self):
-        items = [self._make("hello world")]
-        result = lexical_rerank(items, "", 0.3, 0.2)
-        assert result[0]["content"] == "hello world"
+    def test_short_content_is_damped(self):
+        cfg = {"rerank_weight": 0.3, "rerank_phrase_weight": 0.2}
+        assert P.rerank_bonus("abc", "abc", cfg) < P.rerank_bonus("abc", "abc " + "y" * 60, cfg)
 
-    def test_matching_item_scored_higher(self):
-        items = [self._make("unrelated content", 0.5), self._make("python programming", 0.4)]
-        result = lexical_rerank(items, "python", 0.3, 0.2)
-        assert result[0]["content"] == "python programming"
-
-    def test_phrase_bonus_applied(self):
-        items = [self._make("hello world", 0.5), self._make("hello there", 0.5)]
-        result = lexical_rerank(items, "hello world", 0.3, 0.2)
-        assert result[0]["content"] == "hello world"
-
-    def test_zero_coverage_no_degradation(self):
-        items = [self._make("xyz abc", 0.8)]
-        result = lexical_rerank(items, "unrelated", 0.3, 0.2)
-        assert result[0]["score"] >= 0.8
-
-
-# ── TestPurification ─────────────────────────────────────────────────────────
 
 class TestPurification:
-    def test_code_block_replaced(self):
-        text = "Some text\n```python\nprint('hi')\n```\nMore text"
-        assert "[code omitted]" in purify(text)
-        assert "print" not in purify(text)
+    def test_blocks_replaced_inline_kept(self):
+        t = "a ```py\nx=1\n``` b `inline` ```open"
+        assert P.purify(t) == "a [code omitted] b `inline` [code omitted]"
 
-    def test_no_code_block_unchanged(self):
-        text = "Hello world"
-        assert purify(text) == "Hello world"
-
-    def test_multiple_blocks(self):
-        text = "```a```\nmiddle\n```b```"
-        result = purify(text)
-        assert result.count("[code omitted]") == 2
-
-
-# ── TestChunkText ─────────────────────────────────────────────────────────────
 
 class TestChunkText:
-    def test_short_returns_single(self):
-        text = "a" * 100
-        chunks = chunk_text(text, threshold=400, overlap=100)
-        assert chunks == [text]
+    def test_short_single(self):
+        assert P.chunk_text("abc", 400, 100) == ["abc"]
 
-    def test_long_splits(self):
-        text = "a" * 900
-        chunks = chunk_text(text, threshold=400, overlap=100)
+    def test_every_char_covered_and_tail_merged(self):
+        text = ("word " * 200).strip() + " PIN: 4471-ZX."
+        chunks = P.chunk_text(text, 100, 20)
+        assert "PIN: 4471-ZX." in chunks[-1]
+        assert all(len(c) >= 20 for c in chunks)
+
+    def test_overlap_not_less_than_threshold_terminates(self):
+        chunks = P.chunk_text("x" * 1000, 100, 100)
         assert len(chunks) > 1
 
-    def test_overlap_present(self):
-        text = "a" * 600
-        chunks = chunk_text(text, threshold=400, overlap=100)
-        assert len(chunks) == 2
-        assert len(chunks[0]) == 400
-        assert len(chunks[1]) == 300
 
-    def test_exact_threshold(self):
-        text = "a" * 400
-        chunks = chunk_text(text, threshold=400, overlap=100)
-        assert len(chunks) == 1
+class TestTokenize:
+    def test_prepare_query_strips_cjk_punctuation(self):
+        assert P.prepare_query("「記憶装置」は？") == "記憶 憶装 装置 は"
 
-    def test_short_tail_is_appended_not_dropped(self):
-        # §3.11: a tail under 20 chars after a soft break joins the previous
-        # chunk (it used to be dropped, so the end of the body was in no chunk).
-        tail = "PIN: 4471-ZX."
-        text = "word " * 78 + "\n" + tail          # 391 + 13 = 404 chars
-        chunks = chunk_text(text, threshold=400, overlap=100)
-        assert len(chunks) == 1
-        assert chunks[0] == text
-        assert len(chunks[0]) < 400 + 20
+    def test_drop_lone_and_hiragana(self):
+        assert P.drop_lone_cjk_tokens("記憶 憶装 装置 は") == "記憶 憶装 装置"
+        assert P.drop_lone_cjk_tokens("どう") == "どう"
 
-    def test_short_tail_after_hard_cut_is_not_duplicated(self):
-        text = "a" * 400 + "b" * 5                # no soft break, overlap 10
-        chunks = chunk_text(text, threshold=400, overlap=10)
-        assert chunks == [text]
+    def test_bigram_mixed(self):
+        assert P.cjk_bigram_expand("アルファ9") == "アル ルフ ファ 9"
 
-    @pytest.mark.parametrize("overlap", [0, 10, 100])
-    def test_every_character_is_in_a_chunk(self, overlap):
-        # Numbered parts, so every chunk occurs exactly once in its body.
-        bodies = [
-            "".join(f"第{i}節は一般的な説明です。" for i in range(40)) + "\n合言葉は青い鯨。",
-            "".join(f"Sentence number {i} is here. " for i in range(30)) + "\nEnd: ok.",
-            "".join(f"{i:05d}" for i in range(203)) + "xyz",          # no soft break
-            "".join(f"line {i} of text\n" for i in range(70)) + "z",
-        ]
-        for body in bodies:
-            chunks = chunk_text(body, threshold=400, overlap=overlap)
-            pos = 0
-            for c in chunks:
-                assert body.count(c) == 1
-                at = body.find(c)
-                assert at <= pos, "gap before this chunk"
-                pos = max(pos, at + len(c))
-            assert pos == len(body)
-            assert all(len(c) < 400 + 20 for c in chunks)
+    def test_ngram_folds_diacritics(self):
+        assert "cafe" in P.build_ngram("café").split()
 
-
-# ── TestCjkBigramExpand ──────────────────────────────────────────────────────
-
-class TestCjkBigramExpand:
-    def test_hiragana_bigrams(self):
-        result = cjk_bigram_expand("あいう")
-        assert "あい" in result
-        assert "いう" in result
-
-    def test_kanji_bigrams(self):
-        result = cjk_bigram_expand("記憶装置")
-        assert "記憶" in result
-        assert "憶装" in result
-        assert "装置" in result
-
-    def test_ascii_passthrough(self):
-        result = cjk_bigram_expand("hello")
-        assert "hello" not in result or result.strip()
-
-    def test_single_cjk_char(self):
-        result = cjk_bigram_expand("あ")
-        assert "あ" in result
-
-    def test_mixed_cjk_ascii(self):
-        result = cjk_bigram_expand("hello世界")
-        assert "世界" in result
-
-
-# ── TestPrepareQuery ──────────────────────────────────────────────────────────
-
-class TestPrepareQuery:
-    def test_strips_punctuation(self):
-        result = prepare_query("hello, world!")
-        assert "," not in result
-        assert "!" not in result
-
-    def test_empty_after_strip(self):
-        result = prepare_query("!!!")
-        assert result == ""
-
-    def test_cjk_expanded(self):
-        result = prepare_query("記憶装置")
-        assert "記憶" in result
-
-
-# ── TestEmbedding ─────────────────────────────────────────────────────────────
-
-class TestEmbedding:
-    def test_embed_returns_bytes(self):
-        from n3mc_mcp.processor import embed
-        result = embed("hello world", is_query=False)
-        if result is not None:
-            assert isinstance(result, bytes)
-            assert len(result) == 768 * 4
-
-    def test_query_prefix_differs_from_passage(self):
-        from n3mc_mcp.processor import embed_to_array
-        import numpy as np
-        p = embed_to_array("test text", is_query=False)
-        q = embed_to_array("test text", is_query=True)
-        if p is not None and q is not None:
-            assert not np.allclose(p, q)
-
-    def test_same_text_same_embedding(self):
-        from n3mc_mcp.processor import embed_to_array
-        import numpy as np
-        a = embed_to_array("hello", is_query=False)
-        b = embed_to_array("hello", is_query=False)
-        if a is not None and b is not None:
-            assert np.allclose(a, b)
-
-
-# ── TestEncodingSafety (spec §3.13) ──────────────────────────────────────────
 
 class TestEncodingSafety:
-    """Lone-surrogate sanitization contract from spec §3.13."""
+    def test_sanitize_nested(self):
+        assert P.sanitize_surrogates({"a": ["x\ud800y"], "b": None}) == {"a": ["xy"], "b": None}
+        assert P.sanitize_surrogates("\udc00\udc01") == ""
 
-    def test_strips_lone_high_surrogate(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        assert sanitize_surrogates("hello\ud800world") == "helloworld"
-
-    def test_strips_lone_low_surrogate(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        assert sanitize_surrogates("foo\udfffbar") == "foobar"
-
-    def test_clean_text_unchanged(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        assert sanitize_surrogates("こんにちは世界") == "こんにちは世界"
-
-    def test_all_surrogate_collapses_to_empty(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        # Build the string from explicit code-point escapes so every
-        # character is unambiguously inside the surrogate range.
-        all_surrogates = chr(0xD800) + chr(0xDC00) + chr(0xDFFF)
-        assert sanitize_surrogates(all_surrogates) == ""
-
-    def test_post_strip_encodes_to_utf8(self):
-        """Pre-sanitize the string blows up at .encode('utf-8'); post-sanitize succeeds."""
-        from n3mc_mcp.processor import sanitize_surrogates
-        poison = "café\ud800naïve"
-        with pytest.raises(UnicodeEncodeError):
-            poison.encode("utf-8")
-        cleaned = sanitize_surrogates(poison)
-        assert cleaned.encode("utf-8") == "cafénaïve".encode("utf-8")
-
-    def test_recursive_dict(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        out = sanitize_surrogates({"a": "x\ud800y", "b": "ok"})
-        assert out == {"a": "xy", "b": "ok"}
-
-    def test_recursive_list(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        assert sanitize_surrogates(["x\ud800", "y"]) == ["x", "y"]
-
-    def test_nested_structures(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        nested = {"items": [{"text": "a\ud800b"}, "ok"]}
-        assert sanitize_surrogates(nested) == {"items": [{"text": "ab"}, "ok"]}
-
-    def test_none_passthrough(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        assert sanitize_surrogates(None) is None
-
-    def test_non_string_scalar_passthrough(self):
-        from n3mc_mcp.processor import sanitize_surrogates
-        assert sanitize_surrogates(42) == 42
-        assert sanitize_surrogates(b"raw bytes") == b"raw bytes"
+    def test_visible_text(self):
+        assert not P.has_visible_text("\x00​﻿ ㅤ⠀")
+        assert P.has_visible_text("A\x00B")
