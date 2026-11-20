@@ -56,6 +56,16 @@ the specification.
   `claude_desktop_config.json`.
 - The hooks never wait for a server start: without a running server they
   save directly and search later. Hook entries carry `"timeout": 60`.
+- The hooks never wait for the embedding model either: while it loads (the
+  first start downloads ~440 MB), the hook's search uses keywords only with a
+  notice and its saves go in without vectors, which repair adds later. The
+  MCP tools and the CLI still wait up to 20 seconds.
+- Changing `server_port` while the server runs now restarts it: the old
+  server is stopped on the port it still listens on.
+- A server that cannot start (for example a port held by another program)
+  records the failure itself, so the hooks show the `server_start_failed`
+  notice and wait 5 minutes before trying again, instead of starting it on
+  every message.
 - Hook records carry Claude Code's session id; `N3MC_SESSION_ID` applies to
   MCP only. `N3MC_REDIS_URL` set for one application only gives the notice
   `redis_url_mismatch`; put `redis_url` into `config.json`.
