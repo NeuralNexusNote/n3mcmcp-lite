@@ -2947,18 +2947,10 @@ All three extensions are additive — none of them require changes to the Redis 
 Set the model to **Sonnet** and paste:
 
 ```
-Please build n3mcmcp-lite from this spec (N3MemoryCore_MCP_Spec_EN.md).
-Redis Stack is already running in Docker. Build the resident server, the
-Claude Code hooks, the CLI n3mc-lite and the MCP thin client with the seven
-tools (save_memory / search_memory / list_memories / delete_memory /
-delete_memories_by_session / repair_memory / recall_thread).
-When it is installed, register the hooks with n3mc-lite --init, show the
-MCP entry to add to the Claude desktop app if it is installed (not to Claude
-Code), and check that everything starts (§8 "Automatic registration after
-code generation"), so that I only need to restart.
+Please implement n3mcmcp-lite according to this specification.
 ```
 
-Sonnet handles package scaffolding, RediSearch index creation, the resident server, the hooks, the CLI and the MCP thin client. When it finishes, move on to phase 2 ("it runs" ≠ "it matches the spec" — do not stop here).
+Sonnet will automatically handle code generation, hook setup, and server startup. Once complete, proceed to Phase 2 ("done" ≠ "spec-compliant", so do not stop here).
 
 > **⚠️ Fully restart Claude Code between Phase 1 and Phase 2**
 >

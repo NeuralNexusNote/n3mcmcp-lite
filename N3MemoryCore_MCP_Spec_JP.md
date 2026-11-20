@@ -2936,18 +2936,10 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 モデルを **Sonnet** に設定し、以下を貼り付けてください。
 
 ```
-この指示書（N3MemoryCore_MCP_Spec_JP.md）に従って n3mcmcp-lite を実装してください。
-Redis Stack は docker で起動済みです。常駐サーバー、Claude Code のフック、
-CLI n3mc-lite、7 つのツール（save_memory / search_memory / list_memories /
-delete_memory / delete_memories_by_session / repair_memory / recall_thread）を
-持つ MCP の薄いクライアントを作ってください。
-インストールが終わったら、n3mc-lite --init でフックを登録し、Claude デスクトップ
-アプリが入っていればそこに足す MCP の入口の項目を示し（Claude Code には登録しない）、
-すべてが起動することを確かめてください（§8「コード生成の後の自動登録」）。
-私は再起動するだけにしてください。
+この指示書に従って n3mcmcp-lite を実装してください。
 ```
 
-Sonnet がパッケージ構成・RediSearch インデックス作成・常駐サーバー・フック・CLI・MCP の薄いクライアントを作ります。完了したらフェーズ 2 に進んでください（「動いた」≠「仕様通り」なので、ここで終わりにしないでください）。
+Sonnet がコード生成・フック設定・サーバー起動まで自動で行います。完了したらフェーズ 2 に進んでください（「完了した」≠「仕様通り」なので、ここで終わりにしないでください）。
 
 > **⚠️ フェーズ 1 → フェーズ 2 の間に Claude Code を完全再起動してください**
 >
