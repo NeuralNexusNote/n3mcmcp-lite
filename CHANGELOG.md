@@ -13,8 +13,8 @@ Specification v2.0.0 (EN / JP, 2026-11-19). A MAJOR version: the way Lite
 connects to Claude Code changed. MCP-Lite is now "N3MC-Free + MCP, with Redis
 as the database": the search and save rules of v1.12.2, plus Free's hooks,
 resident server and CLI, plus a thin MCP entry for applications without
-hooks. The code in this repository is still v1.12.2; it is regenerated from
-the specification.
+hooks. The code in this repository was regenerated from the specification
+(2026-11-20) and passes its tests; v2.0.0 is not on PyPI yet.
 
 ### Changed
 - **Claude Code uses the hooks only.** The plugin registers the
