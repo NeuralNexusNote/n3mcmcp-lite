@@ -1,12 +1,28 @@
 """§10-1 latency harness — spawn n3mc-workingmemory as stdio child,
-measure initialize, first search_memory, and 5x steady-state median."""
+measure initialize, first search_memory, and 5x steady-state median.
+
+Usage: python tests/eval_latency.py [normal|redis-down]
+
+v2.0.0 (2026-11-20): the MCP entry forwards to the resident server, which
+uses the redis_url of config.json, so N3MC_REDIS_URL set for one client no
+longer makes Redis unreachable (it only gives the redis_url_mismatch
+notice). redis-down therefore runs in a temporary data folder whose
+config.json points at an unused port, with its own server_port, and stops
+that folder's server afterwards. normal uses the caller's environment."""
 from __future__ import annotations
 import json
+import os
+import shutil
+import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
 def jrpc(stream_in, stream_out, method, params=None, _id=1):
@@ -39,14 +55,38 @@ def notify(stream_in, method, params=None):
     stream_in.flush()
 
 
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _isolated_env(redis_url: str):
+    """A temporary data folder with its own config.json (redis_url, server_port)."""
+    data_dir = tempfile.mkdtemp(prefix="n3mc-eval-")
+    with open(os.path.join(data_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"redis_url": redis_url, "server_port": _free_port()}, f)
+    env = os.environ.copy()
+    env["N3MC_DATA_DIR"] = data_dir
+    env.pop("N3MC_REDIS_URL", None)
+    return env, data_dir
+
+
+def _stop_isolated(env, data_dir) -> None:
+    """Stop the resident server of the temporary folder, then delete the folder."""
+    subprocess.run([sys.executable, "-m", "n3mc_mcp.cli", "--stop-server"], env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def run(redis_down: bool = False) -> dict:
-    env = None
+    env, data_dir = None, None
     if redis_down:
-        # Point at unreachable Redis to simulate down state without
-        # actually stopping the running container (safer for shared instance).
-        import os as _os
-        env = _os.environ.copy()
-        env["N3MC_REDIS_URL"] = "redis://127.0.0.1:16379/0"  # bad port
+        # Unreachable Redis without stopping the running container: a temporary
+        # data folder whose config.json points at an unused port.
+        env, data_dir = _isolated_env("redis://127.0.0.1:16379/0")
 
     proc = subprocess.Popen(
         ["n3mc-workingmemory"],
@@ -82,6 +122,7 @@ def run(redis_down: bool = False) -> dict:
                 "initialize_s": init_dt,
                 "first_search_s": first_dt,
                 "redis_down_response_excerpt": text[:600],
+                "mentions_unreachable": "not reachable" in text or "unreachable" in text,
                 "crashed": False,
             }
 
@@ -112,6 +153,8 @@ def run(redis_down: bool = False) -> dict:
             proc.wait(timeout=5)
         except Exception:
             proc.kill()
+        if data_dir:
+            _stop_isolated(env, data_dir)
 
 
 if __name__ == "__main__":

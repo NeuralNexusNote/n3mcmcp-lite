@@ -1,7 +1,16 @@
-"""Verify verbatim recall by re-fetching the parent doc and byte-comparing."""
+"""Verify verbatim recall by re-fetching the parent doc and byte-comparing.
+
+2026-11-20: the script saves ORIGINAL itself first (session
+"eval-§10-3-fictional"; an earlier run's copy is answered "duplicate"), so it
+no longer depends on a record left by an earlier §10-3 run."""
 import json
 import subprocess
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+SESSION = "eval-§10-3-fictional"
 
 ORIGINAL = """浮遊都市・不知火（しらぬい）設定資料 v0.3
 
@@ -55,11 +64,20 @@ def main():
             "capabilities": {},
             "clientInfo": {"name": "verbatim-check", "version": "0.1"}}, _id=1)
         notify(proc, "notifications/initialized")
+        saved = jrpc(proc, "tools/call",
+                     params={"name": "save_memory",
+                             "arguments": {"content": ORIGINAL, "session_id": SESSION}},
+                     _id=3)
+        save_text = next(b["text"] for b in saved["result"]["content"] if b["type"] == "text")
+        save_status = json.JSONDecoder().raw_decode(save_text)[0].get("status")
+        if save_status not in ("saved", "duplicate"):
+            print(json.dumps({"save_failed": save_text[:500]}, ensure_ascii=False, indent=2))
+            sys.exit(1)
         resp = jrpc(proc, "tools/call",
                     params={"name": "search_memory",
                             "arguments": {
                                 "query": "不知火 浮遊都市 鳴神鉱",
-                                "session_id": "eval-§10-3-fictional",
+                                "session_id": SESSION,
                                 "limit": 1}},
                     _id=2)
         text_blocks = resp["result"]["content"]
@@ -84,6 +102,7 @@ def main():
             else:
                 break
         print(json.dumps({
+            "save_status": save_status,
             "original_chars": len(ORIGINAL),
             "recovered_chars": len(recovered),
             "matched_prefix_chars": match_len,

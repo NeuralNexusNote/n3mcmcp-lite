@@ -1,11 +1,33 @@
 """§A1 — Redis 停止状態で n3mc-workingmemory を spawn し、
 ユーザー向けに正しいエラーメッセージが返るか・スタックトレースが
-漏れないか・ハングしないかを検証する。"""
+漏れないか・ハングしないかを検証する。
+
+v2.0.0（2026-11-20）：動いている Redis を止めなくてよいように、一時的な
+データフォルダを作り、その config.json の redis_url を使われていないポート
+（16379）に、server_port を空いているポートにして起動する。MCP の入口が
+起動した常駐サーバーは、最後にそのフォルダの --stop-server で止め、
+フォルダを消す。"""
 from __future__ import annotations
 import json
+import os
+import shutil
+import socket
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def jrpc(p, method, params, _id, timeout=20.0):
@@ -33,10 +55,17 @@ def notify(p, method):
 
 
 def main():
-    # Default config → redis://localhost:6379/0 (which is now down)
+    # A temporary data folder whose Redis is an unused port (= Redis down)
+    data_dir = tempfile.mkdtemp(prefix="n3mc-eval-redis-down-")
+    with open(os.path.join(data_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"redis_url": "redis://127.0.0.1:16379/0", "server_port": _free_port()}, f)
+    env = os.environ.copy()
+    env["N3MC_DATA_DIR"] = data_dir
+    env.pop("N3MC_REDIS_URL", None)
     proc = subprocess.Popen(
         ["n3mc-workingmemory"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
     )
 
     out: dict = {}
@@ -112,6 +141,10 @@ def main():
     except Exception:
         proc.kill()
         stderr = proc.stderr.read() or b""
+
+    subprocess.run([sys.executable, "-m", "n3mc_mcp.cli", "--stop-server"], env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    shutil.rmtree(data_dir, ignore_errors=True)
 
     stderr_text = stderr.decode("utf-8", errors="replace")
     out["stderr_lines"] = len(stderr_text.splitlines())
