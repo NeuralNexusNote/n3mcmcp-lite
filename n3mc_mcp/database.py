@@ -41,6 +41,29 @@ if redis.call('EXISTS', KEYS[1]) == 1 then
 end
 return 0
 """
+# The guard and the record(s) in one atomic step (review of 2026-11-20, P1): with SET NX first and
+# a separate MULTI/EXEC, a process that ended in between left a guard without a record, and every
+# retry of the same text was a "duplicate" for up to 7 days.
+# KEYS[1] = guard, KEYS[2..] = record hashes. ARGV[1] = guard value, ARGV[2] = TTL, then for each
+# record: the number of field/value pairs, followed by the pairs.
+SAVE_WITH_GUARD = """
+if not redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then
+  return 0
+end
+local i = 3
+for k = 2, #KEYS do
+  local n = tonumber(ARGV[i])
+  i = i + 1
+  local args = {}
+  for j = 1, 2 * n do
+    args[j] = ARGV[i + j - 1]
+  end
+  i = i + 2 * n
+  redis.call('HSET', KEYS[k], unpack(args))
+  redis.call('EXPIRE', KEYS[k], ARGV[2])
+end
+return 1
+"""
 
 _RETURN = ["id", "content", "timestamp", "timestamp_epoch", "owner_id", "agent_name", "session_id",
            "turn_id", "importance", "access_count", "parent_id"]
@@ -241,6 +264,7 @@ class Database:
                     "incr": c.register_script(INCR_IF_EXISTS),
                     "hset": c.register_script(HSET_IF_EXISTS),
                     "guard": c.register_script(SET_GUARD_IF_EXISTS),
+                    "save": c.register_script(SAVE_WITH_GUARD),
                 }
                 self.index_ok = False
                 try:
@@ -484,8 +508,6 @@ class Database:
                 except Exception as e:  # noqa: BLE001
                     return {"status": "error", "saved": False, "reason": f"{type(e).__name__}: {e}"}
             rid = new_id()
-            if not c.set(gk, rid, nx=True, ex=ttl):
-                return {"status": "duplicate", "saved": False}
             try:
                 fields = self._fields(rid, stored, agent_name, session_id, turn_id)
                 fields["importance"] = repr(imp)
@@ -494,15 +516,13 @@ class Database:
                 fields["content_ngram"] = P.build_ngram(stored)
                 if vecs:
                     fields["embedding"] = P.to_bytes(vecs[0])
-                pipe = c.pipeline(transaction=True)
-                pipe.hset(MEM + rid, mapping=fields)
-                pipe.expire(MEM + rid, ttl)
-                pipe.execute()
+                if not self._save_atomic(gk, rid, ttl, [(MEM + rid, fields)]):
+                    return {"status": "duplicate", "saved": False}
             except BACKEND_ERRORS:
-                self._release(gk)
+                self._release_unwritten(gk, rid, MEM + rid)
                 raise
             except Exception as e:  # noqa: BLE001
-                self._release(gk)
+                self._release_unwritten(gk, rid, MEM + rid)
                 return {"status": "error", "saved": False, "reason": f"{type(e).__name__}: {e}"}
             res = {"status": "saved", "saved": True, "id": rid, "ttl_seconds": ttl}
         else:
@@ -527,16 +547,12 @@ class Database:
                 except Exception as e:  # noqa: BLE001
                     return {"status": "error", "saved": False, "reason": f"{type(e).__name__}: {e}"}
             pid = new_id()
-            if not c.set(gk, pid, nx=True, ex=ttl):
-                return {"status": "duplicate", "saved": False, "parent_id": _s(c.get(gk))}
             try:
                 cids = [new_id() for _ in chunk_contents]
                 doc = self._fields(pid, parent_content, agent_name, session_id, turn_id)
                 doc["chunk_count"] = str(n)
                 doc["chunk_ids"] = " ".join(cids)
-                pipe = c.pipeline(transaction=True)
-                pipe.hset(DOC + pid, mapping=doc)
-                pipe.expire(DOC + pid, ttl)
+                records = [(DOC + pid, doc)]
                 for i, (cid, cc) in enumerate(zip(cids, chunk_contents)):
                     f = self._fields(cid, cc, agent_name, session_id, turn_id)
                     f["importance"] = repr(imp)
@@ -545,14 +561,14 @@ class Database:
                     f["content_ngram"] = P.build_ngram(cc)
                     if vecs:
                         f["embedding"] = P.to_bytes(vecs[i])
-                    pipe.hset(MEM + cid, mapping=f)
-                    pipe.expire(MEM + cid, ttl)
-                pipe.execute()
+                    records.append((MEM + cid, f))
+                if not self._save_atomic(gk, pid, ttl, records):
+                    return {"status": "duplicate", "saved": False, "parent_id": _s(c.get(gk))}
             except BACKEND_ERRORS:
-                self._release(gk)
+                self._release_unwritten(gk, pid, DOC + pid)
                 raise
             except Exception as e:  # noqa: BLE001
-                self._release(gk)
+                self._release_unwritten(gk, pid, DOC + pid)
                 return {"status": "error", "saved": False, "reason": f"{type(e).__name__}: {e}"}
             res = {"status": "saved", "saved": True, "parent_id": pid, "chunks": n, "saved_count": n,
                    "ids": cids, "ttl_seconds": ttl}
@@ -584,6 +600,31 @@ class Database:
             "session_id": _require_str(session_id, "session_id"),
             "turn_id": _require_str(turn_id, "turn_id"),
         }
+
+    def _save_atomic(self, gk, gval, ttl, records) -> bool:
+        """SET NX the guard and write every record with its TTL in one Lua script (SAVE_WITH_GUARD).
+
+        False when the guard already exists (a duplicate); nothing is written then."""
+        keys, args = [gk], [gval, int(ttl)]
+        for key, fields in records:
+            keys.append(key)
+            args.append(len(fields))
+            for k, v in fields.items():
+                args.extend([k, v])
+        return int(self._scripts["save"](keys=keys, args=args)) == 1
+
+    def _release_unwritten(self, gk, gval, record_key):
+        """After an error, drop the guard only when it is ours and its record was not written.
+
+        The script is atomic, so normally there is nothing to undo: either it ran (guard and records
+        exist; a connection error can still come after it ran) or it did not (the guard, if any, is
+        another writer's). Only a script that failed half-way leaves our guard without its record."""
+        try:
+            if self.client.exists(record_key) or _s(self.client.get(gk)) != gval:
+                return
+        except Exception:  # noqa: BLE001
+            return
+        self._release(gk)
 
     def _release(self, gk):
         try:

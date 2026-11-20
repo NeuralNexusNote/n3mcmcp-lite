@@ -53,10 +53,34 @@ def fill_args(name, args, client_name=None) -> dict:
     return args
 
 
+_cfg_lock = threading.Lock()
+_last_cfg = None
+
+
+def current_cfg(cfg):
+    """config.json read again for this call (review of 2026-11-20, P2).
+
+    The MCP entry runs for a whole client session; with the settings read once at start, a changed
+    server_port sent every call to the old port. When the file cannot be read now, the last readable
+    settings stay in use (a fresh unreadable read would bring a new temporary owner_id each call)."""
+    global _last_cfg
+    with _cfg_lock:
+        try:
+            new = config_mod.load_config()
+        except Exception:  # noqa: BLE001
+            new = None
+        if new is not None and not new.get("_unreadable"):
+            _last_cfg = new
+        elif _last_cfg is None:
+            _last_cfg = cfg  # the settings the entry started with
+        return _last_cfg
+
+
 def call_tool_sync(cfg, name, args, client_name=None) -> str:
     """The text answer of one tools/call (runs in a worker thread)."""
     if name not in TOOL_NAMES:
         return f"Error: unknown tool '{name}'" + _NUDGE_GENERIC
+    cfg = current_cfg(cfg)
     args = fill_args(name, args, client_name)
     try:
         ok = cli.ensure_server(cfg)
