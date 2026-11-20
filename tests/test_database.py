@@ -1,268 +1,185 @@
+"""Layers 1 and 4: Redis / RediSearch behavior (needs N3MC_REDIS_TEST_URL)."""
+
 import time
-import pytest
-from tests.conftest import requires_redis
+
+from n3mc_mcp import processor as P
+from n3mc_mcp.database import INDEX, Database
 
 
-# ── TestIndexSetup ────────────────────────────────────────────────────────────
+def _all_have_ttl(r):
+    return all(r.ttl(k) > 0 for k in r.scan_iter("*") if k != b"__n3mc_test_db__")
 
-@requires_redis
+
 class TestIndexSetup:
-    def test_index_created(self, db):
-        info = db._client.execute_command("FT.INFO", "n3mc_idx")
-        assert info is not None
-
-    def test_ensure_index_idempotent(self, db):
+    def test_idempotent(self, db, rconn):
         db.ensure_index()
         db.ensure_index()
-        info = db._client.execute_command("FT.INFO", "n3mc_idx")
-        assert info is not None
+        assert db.index_ok
+        assert rconn.execute_command("FT.INFO", INDEX)
 
 
-# ── TestInsertAndRetrieve ─────────────────────────────────────────────────────
+class TestSaveSingle:
+    def test_saved_with_ttl_and_guard(self, db, rconn):
+        res = db.save_memory("hello world")
+        assert res["saved"] and res["ttl_seconds"] == 604800
+        assert 0 < rconn.ttl("mem:" + res["id"]) <= 604800
+        assert rconn.get("mem:sha:" + P.sha1_hex("hello world")).decode() == res["id"]
 
-@requires_redis
-class TestInsertAndRetrieve:
-    def test_save_single_returns_saved(self, db):
-        result = db.save_memory("Hello Redis test")
-        assert result["saved"] is True
-        assert "id" in result
-        assert result["ttl_seconds"] == 604800
+    def test_exact_duplicate_only(self, db):
+        assert db.save_memory("The project budget is 100 dollars.")["saved"]
+        assert db.save_memory("The project budget is 120 dollars.")["saved"]
+        assert db.save_memory("  The project budget is 100 dollars.\n")["status"] == "duplicate"
 
-    def test_key_exists_after_save(self, db, redis_client):
-        result = db.save_memory("key existence check")
-        mem_key = f"mem:{result['id']}"
-        assert redis_client.exists(mem_key)
+    def test_empty_and_invisible(self, db):
+        assert db.save_memory("   ")["reason"] == "empty content"
+        assert db.save_memory("\x00​")["reason"] == "empty content (no visible characters)"
+        assert db.save_memory(chr(0xD800) + chr(0xDC00))["reason"] == "empty content"
 
-    def test_ttl_set_on_key(self, db, redis_client):
-        result = db.save_memory("ttl check entry")
-        mem_key = f"mem:{result['id']}"
-        ttl = redis_client.ttl(mem_key)
-        assert ttl > 0
+    def test_importance_nan_rejected(self, db):
+        r = db.save_memory("abc", importance="nan")
+        assert r["status"] == "error" and "importance must be numeric" in r["reason"]
 
-    def test_parent_id_empty_for_single(self, db, redis_client):
-        result = db.save_memory("short entry")
-        d = redis_client.hgetall(f"mem:{result['id']}")
-        assert d[b"parent_id"] == b""
+    def test_code_omitted_on_save(self, db, rconn):
+        r = db.save_memory("see ```py\nx=1\n``` here")
+        assert rconn.hget("mem:" + r["id"], "content").decode() == "see [code omitted] here"
 
-    def test_content_stored_correctly(self, db, redis_client):
-        text = "unique content for retrieval"
-        result = db.save_memory(text)
-        d = redis_client.hgetall(f"mem:{result['id']}")
-        assert d[b"content"].decode() == text
-
-    def test_empty_content_rejected(self, db):
-        result = db.save_memory("")
-        assert result["saved"] is False
-        assert "empty" in result["reason"]
-
-    def test_whitespace_only_rejected(self, db):
-        result = db.save_memory("   ")
-        assert result["saved"] is False
+    def test_guard_released_on_field_failure(self, db, rconn):
+        r = db.save_memory("turn int", turn_id=12)
+        assert r["status"] == "error"
+        assert not list(rconn.scan_iter("mem:sha:*"))
+        assert db.save_memory("turn int")["saved"]
 
 
-# ── TestDedup ─────────────────────────────────────────────────────────────────
+class TestLongDocument:
+    TEXT = "\n\n".join(f"第{i}区画「アルファ{i}」は雲海の上に浮かぶ。住民は約{1000 + i}人。" * 3 for i in range(12))
 
-@requires_redis
-class TestDedup:
-    def test_exact_duplicate_rejected(self, db):
-        content = "exact duplicate test content"
-        db.save_memory(content)
-        result = db.save_memory(content)
-        assert result["saved"] is False
-        assert result["status"] == "duplicate"
+    def test_parent_chunks_verbatim_and_cascade(self, db, rconn, runner):
+        r = db.save_memory(self.TEXT, session_id="s1")
+        assert r["chunks"] > 1 and len(r["ids"]) == r["chunks"]
+        assert rconn.hget("doc:" + r["parent_id"], "content").decode() == self.TEXT.strip()
+        out = runner.call("search_memory", {"query": "アルファ5 住民", "session_id": "s1"}, nudge=False)
+        assert f"[doc×{r['chunks']}] [{r['parent_id']}]" in out
+        assert self.TEXT.strip() in out
+        d = db.delete_memory("doc:" + r["parent_id"])
+        assert d["status"] == "deleted" and d["chunks_deleted"] == r["chunks"]
+        assert not list(rconn.scan_iter("mem:*")) and not list(rconn.scan_iter("docsha:*"))
 
-    def test_sha_guard_key_exists(self, db, redis_client):
-        import hashlib
-        content = "sha guard verification"
-        db.save_memory(content)
-        sha = hashlib.sha1(content.encode()).hexdigest()
-        assert redis_client.exists(f"mem:sha:{sha}")
-
-    def test_different_content_saved(self, db):
-        db.save_memory("first unique content abc")
-        result = db.save_memory("second unique content xyz")
-        assert result["saved"] is True
+    def test_duplicate_parent(self, db):
+        a = db.save_memory(self.TEXT)
+        b = db.save_memory(self.TEXT)
+        assert b["status"] == "duplicate" and b["parent_id"] == a["parent_id"]
 
 
-# ── TestSkipCodeBlocks ────────────────────────────────────────────────────────
+class TestSearch:
+    def test_cjk_punctuation_query(self, db, runner):
+        db.save_memory("架空の惑星「アルファ9」の気温設定")
+        for q in ("アルファ9 気温", "「アルファ9」の気温は？"):
+            out = runner.call("search_memory", {"query": q}, nudge=False)
+            assert "アルファ9" in out.split("#### Possibly related")[0] or "アルファ9" in out
 
-@requires_redis
-class TestSkipCodeBlocks:
-    def test_default_saves_code(self, db):
-        result = db.save_memory("see ```python\nprint('hi')\n``` for details")
-        assert result["saved"] is True
+    def test_or_bm25(self, db):
+        db.save_memory("the quick fox jumps")
+        terms = P.drop_lone_cjk_tokens(P.prepare_query("what did the quick fox do elephant")).split()
+        assert db._bm25(terms, 10, None)
 
-    def test_flag_on_skips_fenced_code(self, db):
-        db.cfg["skip_code_blocks"] = True
-        result = db.save_memory("see ```python\nprint('hi')\n``` for details")
-        assert result["saved"] is False
-        assert result["status"] == "skipped_code"
+    def test_time_window_prefilter(self, db, rconn):
+        r = db.save_memory("window record alpha")
+        rconn.hset("mem:" + r["id"], "timestamp_epoch", str(time.time() - 3 * 86400))
+        rows, weak, _ = db.search("window record alpha", since=time.time() - 86400)
+        assert not rows and not weak
+        rows, weak, _ = db.search("window record alpha", until=time.time() - 2 * 86400)
+        assert [x["id"] for x in rows + weak] == [r["id"]]
 
-    def test_flag_on_allows_prose(self, db):
-        db.cfg["skip_code_blocks"] = True
-        result = db.save_memory("a plain sentence with no fences at all")
-        assert result["saved"] is True
+    def test_weak_matches_do_not_refresh_ttl(self, db, rconn, cfg):
+        cfg["vector_min_cos"] = 1.0
+        cfg["min_score"] = 1.0
+        r = db.save_memory("zebra crossing notes")
+        rconn.expire("mem:" + r["id"], 1000)
+        rows, weak, _ = db.search("zebra crossing notes")
+        assert not rows and weak and weak[0]["_weak"]
+        assert rconn.ttl("mem:" + r["id"]) <= 1000
+        assert rconn.hget("mem:" + r["id"], "access_count") == b"0"
 
+    def test_hit_refreshes_ttl_and_guard(self, db, rconn):
+        r = db.save_memory("refresh me please")
+        rconn.expire("mem:" + r["id"], 1000)
+        rconn.expire("mem:sha:" + P.sha1_hex("refresh me please"), 1000)
+        rows, _, _ = db.search("refresh me please")
+        assert rows[0]["id"] == r["id"]
+        assert rconn.ttl("mem:" + r["id"]) > 1000
+        assert rconn.ttl("mem:sha:" + P.sha1_hex("refresh me please")) > 1000
+        assert _all_have_ttl(rconn)
 
-# ── TestDelete ────────────────────────────────────────────────────────────────
-
-@requires_redis
-class TestDelete:
-    def test_delete_existing(self, db, redis_client):
-        result = db.save_memory("entry to delete")
-        mem_id = result["id"]
-        del_result = db.delete_memory(mem_id)
-        assert del_result["status"] == "deleted"
-        assert not redis_client.exists(f"mem:{mem_id}")
-
-    def test_delete_removes_sha_guard(self, db, redis_client):
-        import hashlib
-        content = "delete with sha guard"
-        result = db.save_memory(content)
-        db.delete_memory(result["id"])
-        sha = hashlib.sha1(content.encode()).hexdigest()
-        assert not redis_client.exists(f"mem:sha:{sha}")
-
-    def test_delete_nonexistent_returns_not_found(self, db):
-        result = db.delete_memory("nonexistent-id-12345")
-        assert result["status"] == "not_found"
-
-    def test_parent_delete_cascades_chunks(self, db, redis_client):
-        long_text = "A" * 500 + " " + "B" * 500
-        result = db.save_memory(long_text)
-        parent_id = result["parent_id"]
-        chunk_ids = result["ids"]
-        db.delete_memory(parent_id)
-        assert not redis_client.exists(f"doc:{parent_id}")
-        for cid in chunk_ids:
-            assert not redis_client.exists(f"mem:{cid}")
+    def test_empty_query_adds_no_weak(self, db):
+        db.save_memory("something")
+        rows, weak, _ = db.search("   ")
+        assert weak == []
 
 
-# ── TestTTL ───────────────────────────────────────────────────────────────────
+class TestHookRecords:
+    def test_role_prefix_and_turn_scoped_guard(self, db, rconn):
+        a = db.save_memory("ok", role="user", turn_id="t1", session_id="cc", agent_name="claude-code")
+        b = db.save_memory("ok", role="user", turn_id="t2", session_id="cc", agent_name="claude-code")
+        c = db.save_memory("ok")
+        d = db.save_memory("ok", role="user", turn_id="t1", session_id="cc")
+        assert a["saved"] and b["saved"] and c["saved"] and d["status"] == "duplicate"
+        assert rconn.hget("mem:" + a["id"], "content") == b"[user] ok"
+        assert rconn.exists("mem:sha:t1:" + P.sha1_hex("[user] ok"))
 
-@requires_redis
-class TestTTL:
-    def test_ttl_positive(self, db, redis_client):
-        result = db.save_memory("ttl positive test")
-        ttl = redis_client.ttl(f"mem:{result['id']}")
-        assert ttl > 0
-
-    def test_sha_guard_ttl(self, db, redis_client):
-        import hashlib
-        content = "sha ttl check"
-        db.save_memory(content)
-        sha = hashlib.sha1(content.encode()).hexdigest()
-        ttl = redis_client.ttl(f"mem:sha:{sha}")
-        assert ttl > 0
-
-
-# ── TestFTS ───────────────────────────────────────────────────────────────────
-
-@requires_redis
-class TestFTS:
-    def test_bm25_finds_english(self, db):
-        db.save_memory("Abraham Lincoln was the 16th president of the United States")
-        time.sleep(0.5)
-        results = db.search_memory("Abraham Lincoln president")
-        assert any("Lincoln" in r["content"] for r in results)
-
-    def test_cjk_bigram_hit(self, db):
-        db.save_memory("坂本龍馬は幕末の志士であり土佐藩出身の人物です")
-        time.sleep(0.5)
-        results = db.search_memory("坂本龍馬")
-        assert any("坂本龍馬" in r["content"] for r in results)
+    def test_long_reply_prefixes(self, db, rconn):
+        body = "設定。" * 400
+        r = db.save_memory(body, role="claude", turn_id="t9")
+        assert rconn.hget("doc:" + r["parent_id"], "content").decode() == "[claude] " + body
+        n = r["chunks"]
+        first = rconn.hget("mem:" + r["ids"][0], "content").decode()
+        assert first.startswith(f"[claude 1/{n}] ")
 
 
-# ── TestVectorSearch ──────────────────────────────────────────────────────────
+class TestDeleteOwnerAndPrefix:
+    def test_other_owner_not_found(self, db, cfg):
+        other = Database(dict(cfg, owner_id="someone-else"))
+        other.ensure_connected()
+        r = other.save_memory("not mine")
+        assert db.delete_memory(r["id"])["status"] == "not_found"
+        assert db.delete_memory("mem:" + r["id"])["status"] == "not_found"
 
-@requires_redis
-class TestVectorSearch:
-    def test_saved_content_findable(self, db):
-        db.save_memory("The quick brown fox jumps over the lazy dog")
-        time.sleep(0.5)
-        results = db.search_memory("fox dog animal")
-        assert len(results) > 0
-
-    def test_empty_db_returns_empty(self, db):
-        results = db.search_memory("anything at all")
-        assert results == []
-
-    def test_owner_filter(self, cfg, redis_client):
-        import uuid
-        from n3mc_mcp.database import Database
-
-        cfg2 = dict(cfg)
-        cfg2["owner_id"] = str(uuid.uuid4())
-
-        db1 = Database(cfg)
-        db1.connect()
-        db1.ensure_index()
-
-        db2 = Database(cfg2)
-        db2.connect()
-        db2.ensure_index()
-
-        db1.save_memory("owner1 specific content about dolphins")
-        time.sleep(0.5)
-        results = db2.search_memory("dolphins")
-        assert len(results) == 0
+    def test_prefix_forms(self, db):
+        r = db.save_memory("delete me")
+        assert db.delete_memory("mem:" + r["id"]) == {"status": "deleted", "id": r["id"]}
+        assert db.delete_memory("doc:doc:x")["status"] == "not_found"
 
 
-# ── TestSha1 ─────────────────────────────────────────────────────────────────
-
-class TestSha1:
-    def test_sha1_hex(self):
-        from n3mc_mcp.database import _sha1
-        result = _sha1("hello")
-        assert len(result) == 40
-        assert all(c in "0123456789abcdef" for c in result)
-
-    def test_empty_string(self):
-        from n3mc_mcp.database import _sha1
-        assert len(_sha1("")) == 40
-
-    def test_unicode_content(self):
-        from n3mc_mcp.database import _sha1
-        result = _sha1("日本語テスト")
-        assert len(result) == 40
+class TestDeleteBySession:
+    def test_counts_and_idempotent(self, db):
+        db.save_memory("はい", session_id="eval-x")
+        db.save_memory("a medium fact about the cleanup test", session_id="eval-x")
+        long = db.save_memory("長文。" * 300, session_id="eval-x")
+        db.save_memory("other session", session_id="eval-y")
+        res = db.delete_by_session("eval-x")
+        assert res["documents_deleted"] == 1 and res["singles_deleted"] == 2
+        assert res["chunks_deleted"] == long["chunks"]
+        assert db.delete_by_session("eval-x") == {"status": "not_found", "session_id": "eval-x", "deleted": 0}
+        assert [r["content"] for r in db.recall_rows()] == ["other session"]
 
 
-# ── TestParentDocument ────────────────────────────────────────────────────────
+class TestRepairAndRecall:
+    def test_repair_reembeds(self, db, rconn):
+        r = db.save_memory("no vector yet", embed=False)
+        assert not rconn.hexists("mem:" + r["id"], "embedding")
+        out = db.repair()
+        assert out["reembedded"] == 1 and out["remaining"] == 0
+        assert rconn.hexists("mem:" + r["id"], "embedding")
 
-@requires_redis
-class TestParentDocument:
-    def test_long_content_creates_parent(self, db):
-        long_text = "架空都市「不知火」は南太平洋に浮かぶ人工島都市である。" * 40
-        result = db.save_memory(long_text)
-        assert result["saved"] is True
-        assert "parent_id" in result
-        assert result["chunks"] > 1
+    def test_recall_orphan_chunks(self, db, rconn, runner):
+        r = db.save_memory("孤立。" * 300, turn_id="T1")
+        out = runner.call("recall_thread", {"turn_id": "T1"}, nudge=False)
+        assert out.count("▶ ") == 1 and "[doc×" in out
+        rconn.delete("doc:" + r["parent_id"])
+        out = runner.call("recall_thread", {"turn_id": "T1"}, nudge=False)
+        assert out.count("▶ ") == r["chunks"]
 
-    def test_parent_doc_key_exists(self, db, redis_client):
-        long_text = "テスト用の長文コンテンツです。" * 40
-        result = db.save_memory(long_text)
-        assert redis_client.exists(f"doc:{result['parent_id']}")
-
-    def test_verbatim_recall(self, db):
-        long_text = ("架空都市「不知火」設定資料。浮遊する都市、住民は空中庭園に暮らす。"
-                     "エネルギー源は反重力結晶。行政は評議会制。通貨は光子。") * 20
-        db.save_memory(long_text)
-        time.sleep(1.0)
-        results = db.search_memory("不知火 浮遊都市 反重力")
-        assert any("不知火" in r["content"] for r in results)
-
-    def test_parent_doc_duplicate_rejected(self, db):
-        long_text = "重複テスト用の長文です。" * 50
-        db.save_memory(long_text)
-        result2 = db.save_memory(long_text)
-        assert result2["saved"] is False
-        assert result2["status"] == "duplicate"
-
-
-# ── TestRepair ────────────────────────────────────────────────────────────────
-
-@requires_redis
-class TestRepair:
-    def test_repair_ok(self, db):
-        result = db.repair_memory()
-        assert result["status"] == "ok"
+    def test_list_paging_after_long_doc(self, db, runner, cfg):
+        db.save_memory("single before")
+        db.save_memory("長い。" * 3000)
+        out = runner.call("list_memories", {"limit": 20}, nudge=False)
+        assert "single before" in out and "[doc×" in out

@@ -1,146 +1,148 @@
-"""Shared fixtures (spec §9).
+"""Shared fixtures (spec §9): isolated data folder, HOME, own port, test-only Redis, fake embeddings."""
 
-SAFETY (v1.7.0 / v1.7.1): the suite FLUSHDBs DB 0 of the Redis it uses. There is no
-default test URL — Redis tests run only against the dedicated instance named
-by N3MC_REDIS_TEST_URL, and never against the live `redis_url` of the user's
-config.json / N3MC_REDIS_URL. v1.7.1: before EVERY flush the DB must be
-empty or carry the marker key `__n3mc_test_db__` (set right after each
-flush); an unmarked DB with data is never flushed. v1.6.x defaulted to redis://localhost:6379/0,
-the same Redis the MCP server uses, so a plain `pytest` wiped working memory.
-"""
+import hashlib
 import json
 import os
-from urllib.parse import urlparse
+import pathlib
+import socket
 
 import pytest
-import redis
 
-REDIS_TEST_URL = os.environ.get("N3MC_REDIS_TEST_URL", "").strip()
-
-
-def _norm_url(url: str) -> tuple:
-    u = urlparse(url)
-    host = (u.hostname or "localhost").lower()
-    if host in ("localhost", "::1", "0.0.0.0"):
-        host = "127.0.0.1"
-    db = (u.path or "/0").lstrip("/") or "0"
-    return (host, u.port or 6379, db)
+REDIS_TEST_URL = os.environ.get("N3MC_REDIS_TEST_URL")
+TEST_MARKER = "__n3mc_test_db__"
+DIM = 768
 
 
-def _live_redis_urls() -> set:
-    """redis_url values the real MCP server may be using."""
-    urls = {"redis://localhost:6379/0"}  # the built-in default
-    env = os.environ.get("N3MC_REDIS_URL")
-    if env:
-        urls.add(env)
+def _real_redis_urls():
+    urls = set()
+    if os.environ.get("N3MC_REDIS_URL"):
+        urls.add(os.environ["N3MC_REDIS_URL"])
+    home = pathlib.Path(os.path.expanduser("~"))
+    dd = os.environ.get("N3MC_DATA_DIR")
+    p = pathlib.Path(dd) / "config.json" if dd else home / ".n3mc-workingmemory" / "config.json"
     try:
-        from n3mc_mcp.paths import get_config_path
-        path = get_config_path()
-        if path.exists():
-            # utf-8-sig like the server (v1.7.1): a BOM must not hide redis_url.
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-            if isinstance(data, dict) and isinstance(data.get("redis_url"), str):
-                urls.add(data["redis_url"])
-    except Exception:
+        d = json.loads(p.read_text(encoding="utf-8-sig"))
+        if isinstance(d, dict) and isinstance(d.get("redis_url"), str):
+            urls.add(d["redis_url"])
+    except Exception:  # noqa: BLE001
         pass
-    return {_norm_url(u) for u in urls}
+    if not urls:
+        urls.add("redis://localhost:6379/0")
+    return urls
 
 
-# v1.7.1 (Lite review LL6): second guard — the DB itself. Flush only an empty
-# DB or one carrying this marker; set the marker right after every flush.
-TEST_DB_MARKER = "__n3mc_test_db__"
-UNMARKED_REASON = ("N3MC_REDIS_TEST_URL points at a Redis that holds data and "
-                   "is not marked as a test DB")
+_REAL_URLS = _real_redis_urls()
 
 
-def is_flushable(r) -> bool:
-    return r.dbsize() == 0 or bool(r.exists(TEST_DB_MARKER))
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
-def safe_flushdb(r) -> bool:
-    """FLUSHDB only if the DB is empty or marked; then set the marker.
-    Returns False (and flushes nothing) for an unmarked DB with data."""
-    if not is_flushable(r):
-        return False
-    r.flushdb()
-    r.set(TEST_DB_MARKER, b"1")
-    return True
+TEST_PORT = _free_port()
 
 
-def _skip_reason() -> str:
+def fake_vector(text: str):
+    """Deterministic unit vector: words hashed into dimensions (similar texts -> similar vectors)."""
+    import numpy as np
+    v = np.zeros(DIM, dtype="float32")
+    words = text.lower().replace("passage: ", "").replace("query: ", "").split() or [text]
+    for w in words:
+        h = int(hashlib.md5(w.encode("utf-8")).hexdigest(), 16)
+        v[h % DIM] += 1.0
+        v[(h >> 16) % DIM] += 0.5
+    n = float(np.linalg.norm(v)) or 1.0
+    return list(map(float, v / n))
+
+
+@pytest.fixture(autouse=True)
+def isolated(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("N3MC_DATA_DIR", str(data))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("N3MC_REDIS_URL", raising=False)
+    monkeypatch.delenv("N3MC_SESSION_ID", raising=False)
+    monkeypatch.delenv("N3MC_AGENT_NAME", raising=False)
+    cfg = {"redis_url": REDIS_TEST_URL or "redis://127.0.0.1:1/0", "server_port": TEST_PORT}
+    (data / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+    from n3mc_mcp import processor as P
+
+    def fake_encode(texts, model_name):
+        return [fake_vector(t) for t in texts], None
+
+    monkeypatch.setattr(P, "_encode", fake_encode)
+    monkeypatch.setattr(P, "get_model", lambda name, wait=None: (object(), None))
+    from n3mc_mcp import cli
+    monkeypatch.setattr(cli, "_start_server", lambda cfg, max_wait=60: False)
+    monkeypatch.setattr(cli, "_request_shutdown", lambda port, root: (None, None))
+    yield tmp_path
+
+
+def _redis_skip_reason():
     if not REDIS_TEST_URL:
-        return ("N3MC_REDIS_TEST_URL is not set — Redis tests need a DEDICATED "
-                "Redis Stack (they FLUSHDB it), see spec §9")
-    if _norm_url(REDIS_TEST_URL) in _live_redis_urls():
-        return ("refusing to run: N3MC_REDIS_TEST_URL points at the live "
-                "redis_url used by the MCP server (tests would FLUSHDB it)")
+        return "N3MC_REDIS_TEST_URL is not set"
+    if REDIS_TEST_URL in _REAL_URLS:
+        return "N3MC_REDIS_TEST_URL is the live redis_url; refusing to flush it"
+    return None
+
+
+@pytest.fixture
+def rconn():
+    reason = _redis_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    import redis
     try:
-        r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
+        r = redis.Redis.from_url(REDIS_TEST_URL, protocol=2)
         r.ping()
-        if not is_flushable(r):
-            return UNMARKED_REASON
-    except Exception as e:
-        return f"Redis Stack not reachable at N3MC_REDIS_TEST_URL ({e})"
-    return ""
-
-
-REDIS_SKIP_REASON = _skip_reason()
-
-requires_redis = pytest.mark.skipif(
-    bool(REDIS_SKIP_REASON), reason=REDIS_SKIP_REASON or "redis available"
-)
-
-
-@pytest.fixture
-def redis_client():
-    if REDIS_SKIP_REASON:
-        pytest.skip(REDIS_SKIP_REASON)
-    r = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False)
-    if not safe_flushdb(r):
-        pytest.skip(UNMARKED_REASON)
+    except Exception as e:  # noqa: BLE001
+        pytest.skip(f"test Redis unreachable: {e}")
+    if r.dbsize() and not r.exists(TEST_MARKER):
+        pytest.skip("N3MC_REDIS_TEST_URL points at a Redis that holds data and is not marked as a test DB")
+    r.flushdb()
+    r.set(TEST_MARKER, 1)
     yield r
-    safe_flushdb(r)
+    if r.exists(TEST_MARKER) or not r.dbsize():
+        r.flushdb()
+        r.set(TEST_MARKER, 1)
+    r.close()
 
 
 @pytest.fixture
-def cfg(tmp_path):
-    import uuid
-    return {
-        "owner_id": str(uuid.uuid4()),
-        "local_id": str(uuid.uuid4()),
-        "_session_id": str(uuid.uuid4()),
-        "redis_url": REDIS_TEST_URL,
-        "ttl_seconds": 604800,
-        "half_life_days": 3,
-        "bm25_min_threshold": 0.1,
-        "search_result_limit": 20,
-        "min_score": 0.0,
-        "search_query_max_chars": 2000,
-        "chunk_threshold": 400,
-        "chunk_overlap": 100,
-        "access_count_enabled": True,
-        "access_count_weight": 0.02,
-        "access_count_max_boost": 0.5,
-        "ttl_refresh_on_search": False,
-        "ttl_refresh_top_k": 5,
-        "lexical_rerank_enabled": False,
-        "rerank_weight": 0.3,
-        "rerank_phrase_weight": 0.2,
-        # v1.7.0 shaping off by default in unit fixtures (dummy vectors);
-        # tests/test_regressions.py turns each step on explicitly.
-        "vector_min_cos": 0.0,
-        "relative_min_score_ratio": 0.0,
-        "version_order_enabled": False,
-    }
+def cfg(isolated):
+    from n3mc_mcp import config
+    return config.load_config()
 
 
 @pytest.fixture
-def db(cfg, redis_client):
+def db(rconn, cfg):
     from n3mc_mcp.database import Database
-    d = Database(cfg)
-    d.connect()
-    d.ensure_index()
-    return d
+    d = Database(cfg, default_session="sess-test")
+    assert d.ensure_connected() == "ok"
+    yield d
+    if d.client is not None:
+        d.client.close()
 
 
-DUMMY_VEC = bytes([0] * (768 * 4))
+@pytest.fixture
+def runner(db, cfg):
+    from n3mc_mcp.tools import ToolRunner
+    return ToolRunner(cfg, db)
+
+
+@pytest.fixture
+def client(db, cfg, runner):
+    from fastapi.testclient import TestClient
+    from n3mc_mcp.app import create_app
+    app = create_app(cfg, db, runner)
+    with TestClient(app) as c:
+        c.headers.update({"Host": f"127.0.0.1:{cfg['server_port']}"})
+        yield c

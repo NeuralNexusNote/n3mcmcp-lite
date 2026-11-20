@@ -1,60 +1,67 @@
-"""
-Embedding, scoring, text-processing utilities.
+"""Embedding, ranking math, CJK tokenization, chunking, purify, lexical reranker (spec §3.2, §3.6, §3.7, §3.11, §3.13).
 
-Spec §3.2  — intfloat/multilingual-e5-base, normalize_embeddings=True, passage:/query: prefixes
-Spec §3.6  — ranking formula: (cos·0.7 + kw·0.3) × time_decay × b_local × b_session
-Spec §3.7  — query cleaning (prepare_query), CJK bigram expansion,
-             control-char + ASCII/CJK punctuation stripping
-Spec §3.14 — search result shaping (vector floor, newest version first,
-             relative cut) as pure, Redis-free functions
+`sentence_transformers` is imported only by `import_backend()` / `get_model()`,
+never at module import, so the hooks and the MCP thin client stay light.
 """
-import contextlib
+
+import hashlib
 import math
 import re
-import struct
 import sys
 import threading
 import time
 import unicodedata
-from datetime import datetime, timezone
-from typing import Optional
 
-import numpy as np
+# ---------------------------------------------------------------- text rules
 
-_model = None
-# Embedding model name (spec §3.2 default). Configurable via the
-# `embedding_model` config field so each deployment can pick its own
-# quality / resource / language tradeoff (e5-base ↔ e5-large ↔ a
-# domain-specific multilingual model) without editing code. The product
-# stays language-neutral: the choice is the operator's, not baked in.
-# Changing the model usually changes the vector dimension too — keep
-# `embedding_dim` (config) in sync and flush the index when switching.
-_DEFAULT_MODEL_NAME = "intfloat/multilingual-e5-base"
-_model_name = _DEFAULT_MODEL_NAME
-# Double-check locking: cheap pre-lock read keeps the fast path lock-free
-# once the model is loaded; re-check inside the lock prevents a race
-# where two callers both see _model is None before the first lock is acquired.
-_model_lock = threading.Lock()
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
-def set_model_name(name: str) -> None:
-    """Set the embedding model name BEFORE the first get_model() call.
+def sanitize_surrogates(text):
+    if isinstance(text, str):
+        return _LONE_SURROGATE_RE.sub("", text)
+    if isinstance(text, list):
+        return [sanitize_surrogates(x) for x in text]
+    if isinstance(text, dict):
+        return {k: sanitize_surrogates(v) for k, v in text.items()}
+    return text
 
-    Called once at startup from the resolved config (server._main). Has no
-    effect once the model is already loaded — a model swap requires a process
-    restart (and an index flush if the vector dimension changed).
-    """
-    global _model_name
-    if name and isinstance(name, str) and name.strip():
-        _model_name = name.strip()
 
-# Space-less script Unicode ranges — each character in these ranges is
-# treated as part of a contiguous run that gets bigram-expanded for the
-# `content_ngram` BM25 side channel (spec §3.7). These languages either
-# have no inter-word spaces (CJK, Thai, Lao, Khmer, Myanmar) or compose
-# words from syllabic blocks where bigram coverage materially helps
-# partial-match recall (Hangul). Extending this list is the cheapest
-# multilingual RAG lift available without adding morphological tools.
+def normalize_text(text: str) -> str:
+    return unicodedata.normalize("NFKC", text)
+
+
+_INVISIBLE_EXTRA = {0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800}
+
+
+def _invisible(ch: str) -> bool:
+    cp = ord(ch)
+    if ch.isspace():
+        return True
+    if unicodedata.category(ch) in ("Cc", "Cf", "Zs", "Zl", "Zp"):
+        return True
+    if 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF:
+        return True
+    return cp in _INVISIBLE_EXTRA
+
+
+def has_visible_text(text: str) -> bool:
+    return any(not _invisible(ch) for ch in text)
+
+
+_FENCE_RE = re.compile(r"```[\s\S]*?(?:```|\Z)")
+
+
+def purify(text: str) -> str:
+    return _FENCE_RE.sub("[code omitted]", text)
+
+
+def sha1_hex(text: str) -> str:
+    return hashlib.sha1(normalize_text(text).encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------- CJK
+
 _CJK_RANGES = [
     (0x0E00, 0x0E7F),    # Thai
     (0x0E80, 0x0EFF),    # Lao
@@ -66,440 +73,98 @@ _CJK_RANGES = [
     (0x20000, 0x2A6DF),  # CJK Unified Ideographs Ext B
 ]
 
-# Spec §3.7 regex constants.
-# Match a closed fence (``` ... ```) OR an unclosed fence that reaches the
-# end of the string (e.g. content truncated at a chunk boundary).
-_CODE_BLOCK_RE  = re.compile(r"```[\s\S]*?(?:```|\Z)")
-# v1.7.0: control characters make FT.SEARCH fail with "Syntax error", and
-# CJK / full-width punctuation turned into never-matching bigrams (「記, は？)
-# that zeroed the AND-joined BM25 leg. Both are replaced with spaces on the
-# query side AND in content_ngram at save time. Every RediSearch special
-# character is in this set, so no escaping is needed afterwards.
+
+def _is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    for lo, hi in _CJK_RANGES:
+        if lo <= cp <= hi:
+            return True
+    return False
+
+
+def cjk_bigram_expand(text: str) -> str:
+    """Split into whitespace tokens; every CJK run becomes overlapping bigrams (a 1-char run stays)."""
+    out = []
+    for word in text.split():
+        run = []
+        run_cjk = None
+        for ch in word:
+            c = _is_cjk(ch)
+            if run and c != run_cjk:
+                out.extend(_emit(run, run_cjk))
+                run = []
+            run.append(ch)
+            run_cjk = c
+        if run:
+            out.extend(_emit(run, run_cjk))
+    return " ".join(out)
+
+
+def _emit(run, is_cjk):
+    s = "".join(run)
+    if not is_cjk or len(s) == 1:
+        return [s]
+    return [s[i:i + 2] for i in range(len(s) - 1)]
+
+
 _CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
 _PUNCT_STRIP_RE = re.compile(
     r'[,.<>{}\[\]"\':;!@#$%^&*()\-+=~|\\/?`'
     r'「」『』【】（）〈〉《》〔〕［］｛｝・、。，．！？；：―─…“”‘’]'
 )
 
-# Lone UTF-16 surrogate halves — produced by Windows subprocess stdin
-# pipes when raw UTF-8 bytes get misdecoded. They round-trip through
-# json.loads but explode at .encode("utf-8") with UnicodeEncodeError,
-# which in Lite would silently drop the entire save (sha1 → encode →
-# raise). Same guard as Free's core/processor.py:_LONE_SURROGATE_RE.
-_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
-
-
-# ── unicode normalization (multilingual, CPU-only) ───────────────────────────
-
-def normalize_text(text: str) -> str:
-    """Unicode NFKC fold — collapses compatibility forms.
-
-    Real-world impact:
-      - Japanese half-width katakana (ｱﾙﾌｧ) ↔ full-width (アルファ)
-      - Full-width digits/Latin (１２３ＡＢＣ) ↔ ASCII (123ABC)
-      - Compat ligatures (ﬁ → fi), circled/parenthesized forms
-      - Korean compat jamo, Arabic presentation forms
-
-    Applied to the `content_ngram` side channel, the BM25 query, the
-    dedup SHA, and the embedded text — never to the raw `content` field
-    (verbatim recall, spec §3.11, must stay byte-for-byte).
-    """
-    return unicodedata.normalize("NFKC", text)
-
-
-def sanitize_surrogates(text):
-    """Strip lone UTF-16 surrogate halves (U+D800–U+DFFF) from text.
-
-    Why this matters in Lite: every save path eventually calls
-    `text.encode("utf-8")` (for SHA1, for the Redis HSET value, for the
-    embedding input). Lone surrogates raise `UnicodeEncodeError` at that
-    point, which in the current dispatch turns into a generic "Error: …"
-    response and the caller's content is lost.
-
-    Recursive over dicts/lists so nested JSON values stay clean (matches
-    the Free build's contract — see Free core/processor.py).
-    """
-    if text is None:
-        return text
-    if isinstance(text, str):
-        return _LONE_SURROGATE_RE.sub("", text)
-    if isinstance(text, list):
-        return [sanitize_surrogates(x) for x in text]
-    if isinstance(text, dict):
-        return {k: sanitize_surrogates(v) for k, v in text.items()}
-    return text
-
-
-_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
-# v1.7.1 (Lite review LL5): letters with category Lo / So that render as
-# nothing — Hangul fillers and the braille blank.
-_BLANK_LETTERS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀"})
-
-
-def _is_variation_selector(ch: str) -> bool:
-    cp = ord(ch)
-    return 0xFE00 <= cp <= 0xFE0F or 0xE0100 <= cp <= 0xE01EF
-
-
-def has_visible_text(text: str) -> bool:
-    """True if `text` has at least one visible character (spec §3.13).
-
-    Invisible = whitespace, control / format characters (Cc / Cf, e.g.
-    U+0000, U+001B, U+200B, U+FEFF), separators (Zs / Zl / Zp) and variation
-    selectors, plus the blank-looking letters U+115F, U+1160, U+3164, U+FFA0
-    (Hangul fillers) and U+2800 (braille blank) (v1.7.1). Only decides whether save_memory accepts the content; the
-    stored content is never changed by this check.
-    """
-    for ch in text:
-        if ch.isspace() or _is_variation_selector(ch) or ch in _BLANK_LETTERS:
-            continue
-        if unicodedata.category(ch) in _INVISIBLE_CATEGORIES:
-            continue
-        return True
-    return False
-
-
-def fold_diacritics(text: str) -> str:
-    """Strip combining marks for Latin/Greek/Cyrillic cross-match.
-
-    `café` ↔ `cafe`, `Ångström` ↔ `Angstrom`, `naïve` ↔ `naive`.
-    Decompose to NFD then drop characters in Unicode category Mn (mark,
-    non-spacing). Pure CPU, no language detection — letters that have no
-    decomposition pass through unchanged, so CJK / Hangul / Thai are
-    naturally unaffected.
-    """
-    nfd = unicodedata.normalize("NFD", text)
-    return "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn")
-
-
-# ── model loading ────────────────────────────────────────────────────────────
-
-@contextlib.contextmanager
-def _silenced_stdout():
-    """Python-level stdout redirect around the model load inside get_model().
-
-    The model loads in a background thread after the stdio loop starts
-    (spec §3.9 step 4), when fd 1 is the JSON-RPC channel; an fd-level
-    redirect is not safe then because a concurrent tool-response write could
-    land on stderr. The MCP stdio transport writes through its own wrapper
-    of sys.stdout.buffer, so swapping sys.stdout only diverts stray Python
-    prints from the library load to stderr.
-    """
-    with contextlib.redirect_stdout(sys.stderr):
-        yield
-
-
-def import_backend() -> None:
-    """Import the embedding library (spec §3.9 step 4, part 1).
-
-    Called synchronously BEFORE the stdio loop starts. Importing
-    sentence_transformers (torch, sklearn, ...) can spawn child processes on
-    Windows; once the MCP stdio reader has a synchronous read pending on the
-    stdin pipe, creating a child process blocks on that handle and the server
-    deadlocks. Only the model construction (part 2) runs in the background.
-    Non-fatal: on failure the model load is retried lazily.
-    """
-    try:
-        import sentence_transformers  # noqa: F401
-    except Exception as e:
-        print(f"[n3mc] embedding library import failed: {e}", file=sys.stderr)
-
-
-# Spec §3.9 step 4 (v1.7.0): after a failed load, retry at most once every
-# MODEL_RETRY_SECONDS. Without this, an offline first run retried the
-# Hugging Face download inside every tool call (~12-24 s per call).
-MODEL_RETRY_SECONDS = 60
-# Spec §3.9 step 4 (v1.7.1, decision LD4): a tool call waits at most this
-# long for the model lock while the background load holds it; after that it
-# continues keyword-only with the "still loading" notice.
-MODEL_WAIT_SECONDS = 20
-_model_error: Optional[str] = None
-_model_failed_at: float = 0.0
-# True while the last call gave up waiting for the background load.
-_model_still_loading: bool = False
-
-_DEFAULT_WAIT = object()
-
-
-def get_model(wait=_DEFAULT_WAIT):
-    """Return the model, or None when it is unavailable.
-
-    *wait*: seconds to wait for the model lock (default: MODEL_WAIT_SECONDS,
-    read at call time). None waits without limit (the background preload).
-    """
-    global _model, _model_error, _model_failed_at, _model_still_loading
-    if _model is not None:
-        return _model
-    if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
-        return None
-    if wait is _DEFAULT_WAIT:
-        wait = MODEL_WAIT_SECONDS
-    if wait is None:
-        acquired = _model_lock.acquire()
-    else:
-        acquired = _model_lock.acquire(timeout=max(0.0, float(wait)))
-    if not acquired:
-        # The background load still holds the lock (e.g. first-run download).
-        _model_still_loading = True
-        return None
-    try:
-        if _model is None:
-            if _model_error and time.monotonic() - _model_failed_at < MODEL_RETRY_SECONDS:
-                _model_still_loading = False
-                return None
-            try:
-                with _silenced_stdout():
-                    _model = _build_model()
-                _model_error = None
-            except Exception as e:
-                _model_error = f"{type(e).__name__}: {e}"
-                _model_failed_at = time.monotonic()
-                print(f"[n3mc] embedding model load failed ({_model_name}): {e} "
-                      f"- retrying in {MODEL_RETRY_SECONDS}s. "
-                      "Check the network / proxy (the first start downloads it "
-                      "from Hugging Face).", file=sys.stderr)
-        _model_still_loading = False
-    finally:
-        _model_lock.release()
-    return _model
-
-
-def _build_model():
-    """Spec §3.9 step 4: build the model, from the local Hugging Face cache
-    first. With the files already cached, the online path still asks the Hub
-    whether each file changed, which took 5.5 s against 2.2 s cache-only
-    (Windows 11, 2026-11-16) — the wait of the first tool call. Only when the
-    cache-only build fails (first start, partial cache) is the model built
-    online, which downloads it.
-
-    During the cache-only attempt the Hub is also marked offline: even with
-    local_files_only, transformers 5.x asks the Hub for the model's info while
-    loading the tokenizer (~0.2 s or more, and a network call at every start).
-    """
-    from sentence_transformers import SentenceTransformer
-    try:
-        import huggingface_hub.constants as hub_constants
-    except Exception:
-        hub_constants = None
-    was_offline = getattr(hub_constants, "HF_HUB_OFFLINE", None)
-    try:
-        if hub_constants is not None:
-            hub_constants.HF_HUB_OFFLINE = True
-        return SentenceTransformer(_model_name, local_files_only=True)
-    except Exception:
-        pass
-    finally:
-        if hub_constants is not None:
-            hub_constants.HF_HUB_OFFLINE = was_offline
-    return SentenceTransformer(_model_name)
-
-
-def model_status() -> tuple[bool, Optional[str]]:
-    """(loaded, last load error). Spec §3.9 degraded-mode notice."""
-    return _model is not None, (None if _model is not None else _model_error)
-
-
-def model_still_loading_message() -> str:
-    """Spec §3.9 step 4 (v1.7.1): text when a call gave up waiting for the load."""
-    return (
-        f"The embedding model ({_model_name}) is still loading (the first start "
-        "downloads ~440 MB), so this search used keywords only and new entries "
-        "are saved without vectors. Retry in a minute."
-    )
-
-
-def model_unavailable_message() -> Optional[str]:
-    """Degraded-mode text (English) or None when the model is fine / not yet tried.
-
-    v1.7.1: while the last call gave up waiting for the background load
-    (MODEL_WAIT_SECONDS), the "still loading" text is returned.
-    """
-    if _model is not None:
-        return None
-    if _model_still_loading:
-        return model_still_loading_message()
-    loaded, error = model_status()
-    if loaded or not error:
-        return None
-    return (
-        f"The embedding model ({_model_name}) could not be loaded ({error}), so "
-        "search is keyword-only (BM25) and new entries are saved without "
-        "vectors. The first start downloads the model (~440 MB) from Hugging "
-        "Face: check the network or proxy, or pre-download it. The server "
-        "retries automatically."
-    )
-
-
-# ── embeddings ───────────────────────────────────────────────────────────────
-
-def embed(text: str, is_query: bool = False) -> Optional[bytes]:
-    """Return little-endian FLOAT32 bytes for *text*.
-
-    Spec §3.2: always prefix with 'passage: ' at save time and 'query: ' at
-    search time; normalize_embeddings=True guarantees L2-norm=1 which the
-    RediSearch COSINE distance metric requires.
-    """
-    model = get_model()
-    if model is None:
-        return None
-    prefix = "query: " if is_query else "passage: "
-    vec = model.encode(prefix + text, normalize_embeddings=True).astype(np.float32)
-    return struct.pack(f"{len(vec)}f", *vec)
-
-
-def embed_to_array(text: str, is_query: bool = False) -> Optional[np.ndarray]:
-    model = get_model()
-    if model is None:
-        return None
-    prefix = "query: " if is_query else "passage: "
-    return model.encode(prefix + text, normalize_embeddings=True).astype(np.float32)
-
-
-# ── CJK tokenization ─────────────────────────────────────────────────────────
-
-def _is_cjk(ch: str) -> bool:
-    cp = ord(ch)
-    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
-
-
-def cjk_bigram_expand(text: str) -> str:
-    """Expand space-less script runs into overlapping bigrams (spec §3.7).
-
-    Example: "記憶装置" → "記憶 憶装 装置"
-    Now covers CJK Unified, Hiragana, Katakana, Hangul, Thai, Lao, Myanmar,
-    and Khmer (see `_CJK_RANGES`). Languages with inter-word spaces (Latin,
-    Cyrillic, Greek, Arabic, Devanagari, …) keep whole-word tokens.
-
-    Multilingual normalization passes (applied here so save-time and
-    query-time tokenization stay symmetric):
-      1. NFKC fold — half-width/full-width katakana, full-width digits,
-         compat ligatures all collapse to a single canonical form.
-      2. Diacritic-folded duplicate of each Latin-alphabet word — emitted
-         alongside the original so `café` and `cafe` match through the
-         `content_ngram` BM25 channel without affecting `@content`.
-
-    Implementation note: non-script-run, non-whitespace characters are
-    accumulated into a `word` buffer and flushed as a single token on
-    whitespace or script-run boundary. This preserves whole Latin words
-    (e.g. "hello" stays "hello", not "h e l l o") so BM25 queries match
-    them as normal tokens.
-    """
-    text = normalize_text(text)
-
-    tokens: list[str] = []
-    run:  list[str] = []   # accumulates a contiguous space-less script run
-    word: list[str] = []   # accumulates a non-script-run, non-whitespace word
-
-    def flush_run() -> None:
-        if run:
-            s = "".join(run)
-            bigrams = [s[i : i + 2] for i in range(len(s) - 1)]
-            tokens.extend(bigrams if bigrams else [s])
-            run.clear()
-
-    def flush_word() -> None:
-        if word:
-            w = "".join(word)
-            tokens.append(w)
-            folded = fold_diacritics(w)
-            if folded and folded != w:
-                tokens.append(folded)
-            word.clear()
-
-    for ch in text:
-        if _is_cjk(ch):
-            flush_word()
-            run.append(ch)
-        elif ch.strip():   # non-whitespace, non-script-run → accumulate into word
-            flush_run()
-            word.append(ch)
-        else:              # whitespace → boundary for both buffers
-            flush_run()
-            flush_word()
-
-    flush_run()
-    flush_word()
-    return " ".join(t for t in tokens if t.strip())
-
-
-# ── query preparation ────────────────────────────────────────────────────────
-
-def strip_control_chars(text: str) -> str:
-    """Replace C0 control characters and DEL with spaces (spec §3.7)."""
-    return _CTRL_RE.sub(" ", text)
-
 
 def strip_fts_punctuation(text: str) -> str:
-    """Replace ASCII and CJK / full-width punctuation with spaces (spec §3.7)."""
     return _PUNCT_STRIP_RE.sub(" ", text)
 
 
 def prepare_query(text: str) -> str:
-    """BM25 query cleaning (spec §3.7, v1.7.0).
-
-    NFKC → control chars to space → strip ASCII + CJK punctuation →
-    CJK bigram expansion → collapse whitespace. The result contains no
-    RediSearch special characters, so it is used without escaping.
-    An empty result means "skip BM25, vector only".
-    """
-    text = normalize_text(text)
-    text = strip_control_chars(text)
+    text = normalize_text(text)              # NFKC
+    text = _CTRL_RE.sub(' ', text)
     text = strip_fts_punctuation(text)
     tokens = cjk_bigram_expand(text).split()
-    # Tokens with no letter or digit (e.g. a lone "_") are not indexed by
-    # RediSearch and leave an empty "@content:()" -> syntax error (spec §3.7).
-    return " ".join(t for t in tokens if any(ch.isalnum() for ch in t))
+    # Tokens with no letter or digit (e.g. a lone '_') are not indexed by
+    # RediSearch and leave an empty '@content:()' → syntax error.
+    return ' '.join(t for t in tokens if any(ch.isalnum() for ch in t))
 
 
-def drop_lone_cjk_tokens(fts_query: str) -> str:
-    """Drop single-character space-less-script tokens from a cleaned query.
-
-    After punctuation stripping, a one-character CJK run such as the particle
-    `は` in `「記憶装置」は？` stays a lone token (`記憶 憶装 装置 は`). With
-    the terms ORed (v1.7.1) such a particle would match almost every Japanese
-    record (before v1.7.1, ANDed, it zeroed the whole BM25 leg). Lone
-    tokens are dropped when at least one other token remains (a query that
-    is a single character is kept as is). Hiragana-only tokens (`して`,
-    `ます`) are dropped the same way when another token remains (2026-11-17).
-    Applied by Database._bm25_search
-    on top of `prepare_query`, whose output stays exactly as in spec §3.7.
-    """
-    tokens = fts_query.split()
+def drop_lone_cjk_tokens(q: str) -> str:
+    # BM25 query only: drop single-character CJK tokens (particles such as
+    # は / の / を left over by bigram expansion) when other tokens remain.
+    tokens = q.split()
     kept = [t for t in tokens if not (len(t) == 1 and _is_cjk(t))] or tokens
-    # 2026-11-17: hiragana-only tokens (して, ます, どう) also appear in most
-    # Japanese records; drop them too when any other token remains.
-    content = [t for t in kept if not _is_hiragana_only(t)]
-    return " ".join(content or kept)
+    # 2026-11-17: hiragana-only tokens (して / ます / どう) too, when
+    # another token remains.
+    content = [t for t in kept if not all(
+        0x3040 <= ord(c) <= 0x309F or c == 'ー' for c in t)]
+    return ' '.join(content or kept)
 
 
-def _is_hiragana_only(token: str) -> bool:
-    return all(0x3040 <= ord(ch) <= 0x309F or ch == "ー" for ch in token)
+def fold_diacritics(text: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
 
 
-def content_ngram(text: str) -> str:
-    """Save-time `content_ngram` field value (spec §3.7).
+def build_ngram(content: str) -> str:
+    """The content_ngram side channel: punctuation-stripped, CJK bigrams, plus diacritic-folded words."""
+    text = normalize_text(content)
+    text = _CTRL_RE.sub(" ", text)
+    text = strip_fts_punctuation(text)
+    out = []
+    for tok in cjk_bigram_expand(text).split():
+        out.append(tok)
+        if not any(_is_cjk(c) for c in tok):
+            folded = fold_diacritics(tok)
+            if folded != tok and folded:
+                out.append(folded)
+    return " ".join(out)
 
-    Built with the same cleaning as `prepare_query` (NFKC, control chars,
-    ASCII + CJK punctuation stripping, bigram expansion) so the save side
-    and the query side tokenize symmetrically. The raw `content` field is
-    stored verbatim and is never passed through this.
-    """
-    return prepare_query(text)
+
+def tokenize_for_coverage(text: str) -> set:
+    return {t.lower() for t in prepare_query(text).split()}
 
 
-def purify(text: str) -> str:
-    """Replace triple-backtick code blocks with '[code omitted]' for display."""
-    return _CODE_BLOCK_RE.sub("[code omitted]", text)
+# ---------------------------------------------------------------- chunking
 
-
-# ── chunking ─────────────────────────────────────────────────────────────────
-
-_MIN_CHUNK_CHARS = 20  # a tail shorter than this is appended to the previous chunk (§3.11)
-
-# Ordered by priority: prefer splitting at the earliest (highest-priority)
-# natural boundary found within the lookback window. Language-agnostic:
-# paragraph / line breaks cover all scripts; CJK sentence terminators
-# (。！？…) avoid mid-sentence cuts in space-less languages.
 _SOFT_BREAKS = (
     "\n\n",                      # paragraph break  (highest priority)
     "\n",                        # line break
@@ -507,362 +172,290 @@ _SOFT_BREAKS = (
     "。", "！", "？", "…",      # CJK / universal sentence ends
     " ", "\t",                   # word boundary    (lowest priority)
 )
+_MIN_CHUNK_CHARS = 20
 
 
-def chunk_text(text: str, threshold: int, overlap: int) -> list[str]:
-    """Sliding-window chunker with soft-boundary awareness (spec §3.11).
-
-    Bodies at or below *threshold* chars are returned as a single-element list.
-    Longer bodies are split at the best natural boundary found within the last
-    *overlap* chars of each window (paragraph > line > sentence > word).
-    When no soft break exists in that lookback zone a hard cut is made and the
-    next window begins *overlap* chars before the cut (shared-context overlap).
-
-    After a soft break the next window starts immediately after the break
-    character(s) — no artificial overlap is added because the break is already
-    a clean semantic boundary.
-
-    A tail shorter than _MIN_CHUNK_CHARS is not made a chunk of its own (a
-    tiny chunk gives a low-quality embedding): it is appended to the previous
-    chunk, so every character of the body is in at least one chunk and the end
-    of a long body stays searchable (spec §3.11). That chunk may then be up to
-    _MIN_CHUNK_CHARS - 1 characters longer than *threshold*.
-    """
+def chunk_text(text: str, threshold: int = 400, overlap: int = 100) -> list:
     if len(text) <= threshold:
         return [text]
-    chunks: list[str] = []
+    if overlap >= threshold:
+        overlap = threshold // 4
+    n = len(text)
+    spans = []
     start = 0
-    prev_end = 0   # index just past the last character already in a chunk
-    while start < len(text):
-        end = min(start + threshold, len(text))
-        if end == len(text):
-            # Last (tail) chunk: its own chunk if large enough (or the only
-            # one); otherwise the part not yet in a chunk is appended to the
-            # previous chunk — never dropped (spec §3.11).
-            chunk = text[start:end]
-            if len(chunk) >= _MIN_CHUNK_CHARS or not chunks:
-                chunks.append(chunk)
-            else:
-                chunks[-1] += text[prev_end:end]
+    while start < n:
+        end = min(start + threshold, n)
+        if end >= n:
+            spans.append([start, n])
             break
-        # Search for the best natural break within the lookback window.
-        lookback_start = max(start + 1, end - overlap)
-        cut = -1
+        lo = max(start + 1, end - overlap)
+        cut = None
         for sep in _SOFT_BREAKS:
-            pos = text.rfind(sep, lookback_start, end)
-            if pos != -1:
-                cut = pos + len(sep)
+            idx = text.rfind(sep, lo, end)
+            if idx != -1:
+                cut = idx + len(sep)
                 break
-        if cut != -1:
-            # Soft cut: clean semantic boundary — start fresh after it.
-            chunks.append(text[start:cut])
-            prev_end = cut
-            start = max(start + 1, cut)
+        if cut is not None and cut > start:
+            spans.append([start, cut])
+            start = cut
         else:
-            # Hard cut: no break found — overlap next window for context.
-            chunks.append(text[start:end])
-            prev_end = end
-            # v1.7.1 (LM2): always advance, even if overlap >= threshold.
+            spans.append([start, end])
             start = max(start + 1, end - overlap)
-    return chunks
+    if len(spans) > 1 and spans[-1][1] - spans[-1][0] < _MIN_CHUNK_CHARS:
+        last = spans.pop()
+        spans[-1][1] = max(spans[-1][1], last[1])
+    return [text[s:e] for s, e in spans]
 
 
-# ── scoring functions (spec §3.6) ────────────────────────────────────────────
+# ---------------------------------------------------------------- ranking math
 
-def cosine_sim_from_distance(distance: float) -> float:
-    """Convert RediSearch cosine distance [0,2] to similarity [0,1] (spec §3.6)."""
-    return max(0.0, min(1.0, 1.0 - distance))
-
-
-def time_decay(timestamp_iso: str, half_life_days: float) -> float:
-    """Exponential decay: 2^(-days_elapsed / half_life_days) (spec §3.6).
-
-    Malformed timestamps return 1.0 (no decay applied).
-    """
+def cos_from_distance(dist) -> float:
     try:
-        ts = datetime.fromisoformat(timestamp_iso.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        days = (now - ts).total_seconds() / 86400.0
-        return math.pow(2.0, -days / half_life_days)
-    except Exception:
-        return 1.0
-
-
-def keyword_relevance(bm25_score: float, max_bm25: float, threshold: float) -> float:
-    """Normalize BM25 score to [0,1] (spec §3.6).
-
-    |bm25_score| / max(1.0, max_|bm25_score|)
-    Scores below *threshold* are treated as zero; abs() mirrors Pro's FTS5
-    which can return negative values.
-    """
-    score = abs(bm25_score)
-    if score < threshold:
-        return 0.0
-    return score / max(1.0, max_bm25)
-
-
-def b_local(stored_importance: float, access_count: int, cfg: dict) -> float:
-    """Compute the b_local importance coefficient (spec §3.6).
-
-    b_local = clamp(0.5, 2.0, stored_importance + access_boost)
-    access_boost = min(access_count_max_boost, access_count × access_count_weight)
-    """
-    if cfg.get("access_count_enabled", False):   # off by default (2026-11-17)
-        boost = min(
-            cfg.get("access_count_max_boost", 0.5),
-            access_count * cfg.get("access_count_weight", 0.02),
-        )
-    else:
-        boost = 0.0
-    return max(0.5, min(2.0, stored_importance + boost))
-
-
-def final_score(
-    cos_sim: float,
-    kw_rel: float,
-    decay: float,
-    b_local: float,
-    b_session: float = 1.0,
-) -> float:
-    """Full ranking formula (spec §3.6).
-
-    Final Score = (cos_sim × 0.7 + kw_rel × 0.3) × time_decay × b_local × b_session
-    """
-    return (cos_sim * 0.7 + kw_rel * 0.3) * decay * b_local * b_session
-
-
-def filter_score(cos_sim: float, kw_rel: float, b_local: float) -> float:
-    """What the floors judge (spec §3.6 `filter_score`, v1.7.1 decision LD1).
-
-    filter_score = (cos_sim × 0.7 + kw_rel × 0.3) × b_local  (+ rerank boost)
-    No time_decay and no b_session: they decide the order, not whether a
-    record is shown. Used by min_score and the relative cut (§3.14 step 5).
-    """
-    return (cos_sim * 0.7 + kw_rel * 0.3) * b_local
-
-
-# ── lexical reranker (spec §3.6) ─────────────────────────────────────────────
-
-def rerank_tokens(text: str) -> set:
-    """Token set for the lexical rerank (spec §3.6, v1.7.1): `prepare_query`
-    tokens, lower-cased. Same function for the query and the content."""
-    return set(prepare_query(text).lower().split())
-
-
-def lexical_rerank(
-    results: list[dict],
-    query: str,
-    weight: float,
-    phrase_weight: float,
-) -> list[dict]:
-    """Lightweight post-fusion lexical rerank (spec §3.6).
-
-    Boosts each candidate's score by:
-      coverage × weight         (fraction of query tokens present in content)
-      phrase_weight             (added when the full query string is a substring)
-
-    v1.7.1 (LM8): the query and the content are both tokenized with
-    `prepare_query` (§3.7) — NFKC, control characters and punctuation to
-    spaces, CJK bigrams, lower-cased — so `note,` counts as `note`.
-    v1.7.1 (LD1): the boost is added to `score` and, when present, to
-    `filter_score`.
-    """
-    if not query.strip() or not results:
-        return results
-
-    query_lower = normalize_text(query).lower()
-    query_tokens = rerank_tokens(query_lower)
-
-    for r in results:
-        content_lower = normalize_text(r.get("content", "")).lower()
-        content_tokens = rerank_tokens(content_lower)
-        coverage = len(query_tokens & content_tokens) / max(1, len(query_tokens))
-        phrase_bonus = phrase_weight if query_lower in content_lower else 0.0
-        # Short-document dampening: docs shorter than 50 chars receive a
-        # proportional fraction of the lexical boost to reduce false-positive
-        # promotion of tiny snippets that happen to contain all query tokens.
-        length_factor = min(1.0, len(content_lower) / 50) if len(content_lower) < 50 else 1.0
-        boost = (coverage * weight + phrase_bonus) * length_factor
-        r["score"] = r.get("score", 0.0) + boost
-        if r.get("filter_score") is not None:
-            r["filter_score"] = r["filter_score"] + boost
-
-    return sorted(results, key=lambda x: x["score"], reverse=True)
-
-
-# ── search result shaping (spec §3.14, v1.7.0) ───────────────────────────────
-#
-# Pure functions so they can be tested without Redis or the embedding model.
-# database.Database.search_memory runs them in this order:
-#   apply_vector_floor (before fusion) → fusion → parent resolution →
-#   lexical rerank → min_score → order_versions_newest_first →
-#   relative_cut → TTL refresh / access_count (top-K) → truncate to limit.
-
-def apply_vector_floor(vec_results: dict, min_cos: float) -> dict:
-    """Drop vector candidates whose `cos_sim < min_cos` (spec §3.14 step 2).
-
-    *vec_results* maps a key to a row dict carrying `cos_sim`. A dropped row
-    can still enter the fusion through BM25, where it gets cos_sim = 0.0.
-    `min_cos <= 0` disables the floor.
-    """
-    if not min_cos or min_cos <= 0:
-        return dict(vec_results)
-    return {
-        k: v for k, v in vec_results.items()
-        if float(v.get("cos_sim", 0.0)) >= min_cos
-    }
-
-
-def vector_from_bytes(raw) -> Optional[np.ndarray]:
-    """Decode a FLOAT32 little-endian embedding blob; None when unusable."""
-    if not raw:
-        return None
-    try:
-        vec = np.frombuffer(raw, dtype="<f4").astype(np.float32)
-    except Exception:
-        return None
-    if vec.size == 0:
-        return None
-    return vec
-
-
-def _row_sort_key(row: dict) -> tuple:
-    try:
-        ts = float(row.get("timestamp_epoch") or 0.0)
+        d = float(dist)
     except (TypeError, ValueError):
-        ts = 0.0
-    return (ts, str(row.get("id", "")))
+        return 0.0
+    if math.isnan(d):
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - d))
 
 
-def order_versions_newest_first(
-    rows: list[dict],
-    rep_vectors: list,
-    cfg: dict,
-    rep_texts: Optional[list] = None,
-) -> list[dict]:
-    """Put the newest version of the same content first (spec §3.14 step 4).
-
-    rows         -- ranked result rows (score-descending), already through
-                    fusion, parent resolution, rerank and min_score.
-    rep_vectors  -- one entry per row: the row's representative embedding
-                    (standalone row → its own embedding; parent document →
-                    the embedding of its first chunk `chunk_ids[0]`), as a
-                    numpy array, raw FLOAT32 bytes, or None (row is skipped).
-    rep_texts    -- one entry per row: the representative text (standalone
-                    `content`, or the first chunk's `content`). Defaults to
-                    each row's `content`. Rows whose representative text is
-                    shorter than `version_min_chars` are skipped.
-    cfg          -- uses version_order_enabled / version_sim_threshold /
-                    version_min_chars.
-
-    Rows whose representative cosine is >= version_sim_threshold are grouped
-    transitively. Inside each group the rows are re-ordered newest first by
-    (timestamp_epoch, id) over the SAME positions; every position keeps its
-    score, so the newest version inherits the group's best score. Every
-    member of a group of two or more rows is marked with `_version_group`
-    (the group number, 1-based). Nothing is deleted. Returns a new list.
-    """
-    rows = list(rows)
-    if not cfg.get("version_order_enabled", True) or len(rows) < 2:
-        return rows
-    threshold = float(cfg.get("version_sim_threshold", 0.98))
-    min_chars = int(cfg.get("version_min_chars", 100))
-    if rep_texts is None:
-        rep_texts = [r.get("content", "") for r in rows]
-
-    # Eligible rows: usable vector + long-enough representative text.
-    idx: list[int] = []
-    vecs: list[np.ndarray] = []
-    for i, row in enumerate(rows):
-        v = rep_vectors[i] if i < len(rep_vectors) else None
-        if v is not None and not isinstance(v, np.ndarray):
-            v = vector_from_bytes(v)
-        text = rep_texts[i] if i < len(rep_texts) else ""
-        if v is None or len(text or "") < min_chars:
-            continue
-        norm = float(np.linalg.norm(v))
-        if norm == 0.0:
-            continue
-        idx.append(i)
-        vecs.append(v / norm)
-    if len(idx) < 2:
-        return rows
-    dims = {v.shape for v in vecs}
-    if len(dims) != 1:
-        return rows
-
-    mat = np.vstack(vecs)
-    sims = mat @ mat.T
-
-    # Transitive grouping (union-find over eligible rows).
-    parent = list(range(len(idx)))
-
-    def find(a: int) -> int:
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-
-    n = len(idx)
-    for a in range(n):
-        for b in range(a + 1, n):
-            if sims[a, b] >= threshold:
-                ra, rb = find(a), find(b)
-                if ra != rb:
-                    parent[rb] = ra
-
-    groups: dict[int, list[int]] = {}
-    for a in range(n):
-        groups.setdefault(find(a), []).append(idx[a])
-
-    out = list(rows)
-    group_no = 0
-    # Iterate groups in order of their best (first) position for stable numbering.
-    for members in sorted(groups.values(), key=lambda m: min(m)):
-        if len(members) < 2:
-            continue
-        group_no += 1
-        positions = sorted(members)
-        slot_scores = [rows[p].get("score", 0.0) for p in positions]
-        # v1.7.1: filter_score moves with the position, like score.
-        slot_filters = [rows[p].get("filter_score") for p in positions]
-        newest_first = sorted(
-            (rows[p] for p in positions), key=_row_sort_key, reverse=True
-        )
-        for pos, score, fscore, row in zip(positions, slot_scores, slot_filters,
-                                           newest_first):
-            moved = dict(row)
-            moved["score"] = score
-            if fscore is not None:
-                moved["filter_score"] = fscore
-            else:
-                moved.pop("filter_score", None)
-            moved["_version_group"] = group_no
-            out[pos] = moved
-    return out
+def cosine_sim(a, b) -> float:
+    import numpy as np
+    va = np.asarray(a, dtype="float32")
+    vb = np.asarray(b, dtype="float32")
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
+    if na == 0 or nb == 0:
+        return 0.0
+    return max(0.0, min(1.0, float(np.dot(va, vb)) / (na * nb)))
 
 
-def judged_score(row: dict) -> float:
-    """The value the floors judge: `filter_score`, or `score` when absent."""
-    v = row.get("filter_score")
-    if v is None:
-        v = row.get("score", 0.0)
-    return float(v)
+def keyword_relevance(bm25, max_bm25, threshold=0.1) -> float:
+    try:
+        b = abs(float(bm25))
+    except (TypeError, ValueError):
+        return 0.0
+    if b < threshold:
+        return 0.0
+    return min(1.0, b / max(1.0, abs(float(max_bm25 or 0.0))))
 
 
-def relative_cut(rows: list[dict], ratio: float) -> list[dict]:
-    """Drop rows whose `filter_score` is below `ratio × the highest
-    filter_score` (spec §3.14 step 5, v1.7.1). Rows without `filter_score`
-    are judged on `score`.
+def time_decay(ts_epoch, half_life_days, now=None) -> float:
+    try:
+        ts = float(ts_epoch)
+        hl = float(half_life_days)
+        if not math.isfinite(ts) or hl <= 0:
+            return 1.0
+    except (TypeError, ValueError):
+        return 1.0
+    now = time.time() if now is None else now
+    days = max(0.0, (now - ts) / 86400.0)
+    return 2.0 ** (-days / hl)
 
-    Rows marked `_version_group` are always kept (old versions stay visible
-    next to the new one). `ratio <= 0` disables the cut. Order is preserved.
-    """
-    if not rows or not ratio or ratio <= 0:
-        return list(rows)
-    top = max(judged_score(r) for r in rows)
-    floor = ratio * top
-    return [
-        r for r in rows
-        if r.get("_version_group") or judged_score(r) >= floor
-    ]
+
+def b_local(importance, access_count, cfg) -> float:
+    try:
+        imp = float(importance)
+        if not math.isfinite(imp):
+            imp = 1.0
+    except (TypeError, ValueError):
+        imp = 1.0
+    boost = 0.0
+    if cfg.get("access_count_enabled"):
+        try:
+            cnt = float(access_count or 0)
+        except (TypeError, ValueError):
+            cnt = 0.0
+        boost = min(float(cfg.get("access_count_max_boost", 0.5)), cnt * float(cfg.get("access_count_weight", 0.02)))
+    return max(0.5, min(2.0, imp + boost))
+
+
+def b_session(row_session, effective_session, cfg) -> float:
+    if effective_session and row_session == effective_session:
+        return float(cfg.get("b_session_match", 1.0))
+    return float(cfg.get("b_session_mismatch", 0.6))
+
+
+def base_score(cos, kw) -> float:
+    return cos * 0.7 + kw * 0.3
+
+
+def rerank_bonus(query: str, content: str, cfg) -> float:
+    qtok = tokenize_for_coverage(query)
+    norm = normalize_text(content).lower()
+    coverage = 0.0
+    if qtok:
+        ctok = tokenize_for_coverage(content)
+        coverage = len(qtok & ctok) / len(qtok)
+    phrase = 0.0
+    q = normalize_text(query).strip().lower()
+    if q and q in norm:
+        phrase = float(cfg.get("rerank_phrase_weight", 0.2))
+    length_factor = len(norm) / 50.0 if len(norm) < 50 else 1.0
+    return (coverage * float(cfg.get("rerank_weight", 0.3)) + phrase) * length_factor
+
+
+# ---------------------------------------------------------------- embedding model
+
+MODEL_RETRY_SECONDS = 60
+MODEL_WAIT_SECONDS = 20
+
+_model = None
+_model_name = None
+_model_lock = threading.Lock()
+_last_error = None
+_last_attempt = 0.0
+_backend_imported = False
+_no_wait = threading.local()  # set per request thread by the server for calls from the hooks (L8, M3)
+
+
+class no_model_wait:
+    """Within this block, this thread never waits for the model and never loads it itself.
+
+    The server uses it for the saves and searches the hooks send (``"no_model_wait": true``): while
+    the model loads, they go on without vectors at once (search uses keywords only, /repair adds the
+    vectors later). When the model is not loaded and nothing is loading it, a background thread
+    starts the load. MCP tools and CLI commands keep the normal wait (MODEL_WAIT_SECONDS)."""
+
+    def __init__(self, on=True):
+        self.on = bool(on)
+
+    def __enter__(self):
+        self.prev = getattr(_no_wait, "on", False)
+        _no_wait.on = self.on
+        return self
+
+    def __exit__(self, *exc):
+        _no_wait.on = self.prev
+        return False
+
+
+def import_backend() -> None:
+    """Import the heavy libraries synchronously (before the server starts listening)."""
+    global _backend_imported
+    if _backend_imported:
+        return
+    import os
+    saved = None
+    try:
+        saved = os.dup(1)
+        os.dup2(2, 1)
+    except OSError:
+        saved = None
+    try:
+        import sentence_transformers  # noqa: F401
+        _backend_imported = True
+    except Exception as e:  # noqa: BLE001
+        print(f"N3MC Lite: could not import sentence_transformers: {e}", file=sys.stderr, flush=True)
+    finally:
+        if saved is not None:
+            try:
+                os.dup2(saved, 1)
+                os.close(saved)
+            except OSError:
+                pass
+
+
+def _build(name):
+    from sentence_transformers import SentenceTransformer
+    try:
+        import huggingface_hub.constants as hc
+        old = getattr(hc, "HF_HUB_OFFLINE", False)
+        hc.HF_HUB_OFFLINE = True
+    except Exception:  # noqa: BLE001
+        hc, old = None, None
+    model = None
+    try:
+        model = SentenceTransformer(name, local_files_only=True)
+    except Exception:  # noqa: BLE001
+        model = None
+    finally:
+        if hc is not None:
+            hc.HF_HUB_OFFLINE = old
+    if model is None:
+        model = SentenceTransformer(name)
+    return model
+
+
+def loading_message(model_name: str) -> str:
+    return (f"The embedding model ({model_name}) is still loading (the first start downloads ~440 MB), "
+            f"so this search used keywords only and new entries are saved without vectors. Retry in a minute.")
+
+
+def unavailable_message(model_name: str, error: str) -> str:
+    return (f"The embedding model ({model_name}) could not be loaded ({error}), so search is keyword-only "
+            f"(BM25) and new entries are saved without vectors. The first start downloads the model "
+            f"(~440 MB) from Hugging Face: check the network or proxy, or pre-download it. "
+            f"The server retries automatically.")
+
+
+def get_model(model_name: str, wait: float = None):
+    """Return (model, None) or (None, message). Double-checked locking; waits at most MODEL_WAIT_SECONDS."""
+    global _model, _model_name, _last_error, _last_attempt
+    if _model is not None and _model_name == model_name:
+        return _model, None
+    if getattr(_no_wait, "on", False):
+        if not _model_lock.locked() and (_last_error is None
+                                         or time.time() - _last_attempt >= MODEL_RETRY_SECONDS):
+            threading.Thread(target=lambda: get_model(model_name, wait=1), daemon=True).start()
+        return None, model_status(model_name) or loading_message(model_name)
+    wait = MODEL_WAIT_SECONDS if wait is None else wait
+    if not _model_lock.acquire(timeout=wait):
+        return None, loading_message(model_name)
+    try:
+        if _model is not None and _model_name == model_name:
+            return _model, None
+        if _last_error is not None and time.time() - _last_attempt < MODEL_RETRY_SECONDS:
+            return None, unavailable_message(model_name, _last_error)
+        _last_attempt = time.time()
+        try:
+            m = _build(model_name)
+        except Exception as e:  # noqa: BLE001
+            _last_error = f"{type(e).__name__}: {e}"
+            print(f"N3MC Lite: embedding model load failed: {_last_error}", file=sys.stderr, flush=True)
+            return None, unavailable_message(model_name, _last_error)
+        _model, _model_name, _last_error = m, model_name, None
+        return _model, None
+    finally:
+        _model_lock.release()
+
+
+def model_status(model_name: str):
+    """None when the model is ready, else the notice text."""
+    if _model is not None and _model_name == model_name:
+        return None
+    if _model_lock.locked():
+        return loading_message(model_name)
+    if _last_error is not None:
+        return unavailable_message(model_name, _last_error)
+    return loading_message(model_name)
+
+
+def _encode(texts, model_name):
+    """Encode already-prefixed texts. Returns (list of vectors, None) or (None, message)."""
+    model, msg = get_model(model_name)
+    if model is None:
+        return None, msg
+    vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    return [list(map(float, v)) for v in vecs], None
+
+
+def embed_passages(texts, cfg):
+    return _encode(["passage: " + normalize_text(t) for t in texts], cfg["embedding_model"])
+
+
+def embed_query(text, cfg):
+    vecs, msg = _encode(["query: " + normalize_text(text)], cfg["embedding_model"])
+    return (vecs[0] if vecs else None), msg
+
+
+def to_bytes(vec) -> bytes:
+    import numpy as np
+    return np.asarray(vec, dtype="<f4").tobytes()
+
+
+def from_bytes(b):
+    import numpy as np
+    if not b:
+        return None
+    return np.frombuffer(b, dtype="<f4").astype("float32")

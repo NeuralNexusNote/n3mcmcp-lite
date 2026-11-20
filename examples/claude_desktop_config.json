@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "n3mc-workingmemory": {
+      "command": "C:\Users\<you>\AppData\Local\Programs\Python\Python312\Scripts\n3mc-workingmemory.exe",
+      "args": [],
+      "env": {
+        "N3MC_AGENT_NAME": "claude-desktop"
+      }
+    }
+  }
+}
