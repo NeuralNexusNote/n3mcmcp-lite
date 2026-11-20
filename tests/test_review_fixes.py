@@ -41,6 +41,22 @@ class TestMovedServer:
         assert sent == [] and not started and paths.pid_path().exists()
 
 
+    @pytest.mark.parametrize("method", ["net_connections", "connections"])
+    def test_listen_ports_works_with_old_and_new_psutil(self, monkeypatch, method):
+        """psutil 6.0 renamed Process.connections() to net_connections(); psutil>=5.9 is allowed."""
+        import sys
+        import types
+        conn = types.SimpleNamespace(status="LISTEN", laddr=types.SimpleNamespace(port=18524))
+
+        class Proc:
+            def __init__(self, pid):
+                pass
+
+        setattr(Proc, method, lambda self, kind="tcp": [conn])
+        monkeypatch.setitem(sys.modules, "psutil", types.SimpleNamespace(Process=Proc, CONN_LISTEN="LISTEN"))
+        assert cli._listen_ports("4242") == [18524]
+
+
 class TestServerRecordsItsOwnStartFailure:
     """M2: the hooks never see the child exit, so the server writes the marker and the notice."""
 

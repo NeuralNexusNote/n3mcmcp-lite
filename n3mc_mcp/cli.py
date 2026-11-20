@@ -290,7 +290,10 @@ def _listen_ports(pid):
     """TCP ports the process ``pid`` is listening on (empty when psutil cannot tell)."""
     try:
         import psutil
-        conns = psutil.Process(int(pid)).net_connections(kind="tcp")
+        proc = psutil.Process(int(pid))
+        # psutil 6.0 renamed Process.connections() to net_connections(); psutil>=5.9 is allowed.
+        getter = getattr(proc, "net_connections", None) or proc.connections
+        conns = getter(kind="tcp")
     except Exception:  # noqa: BLE001
         return []
     return sorted({c.laddr.port for c in conns if c.laddr and c.status == psutil.CONN_LISTEN})
