@@ -628,8 +628,11 @@ port (18524), its own hook commands (`n3mc-lite-hook`,
 - **Plugin and pip together**: do not use both. `--init` registers no hooks
   while the plugin is enabled, and the plugin reports hooks written by
   `--init`.
-- **Not tested yet.** v2.0.0 is a specification; its code has not been
-  generated or tested.
+- **Not on PyPI yet.** The v2.0.0 code in this repository was generated from
+  the specification and passes its tests, but the newest version on PyPI is
+  still 1.12.2. Until v2.0.0 is published, install it from this repository
+  (`pip install -e .`); `pip install n3memorycore-mcp-lite` and `uvx` give
+  1.12.2.
 
 ## Why N3MemoryCore? (vs. built-in memory)
 
