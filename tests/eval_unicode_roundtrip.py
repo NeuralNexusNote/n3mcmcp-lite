@@ -12,6 +12,11 @@ import sys
 import time
 import unicodedata
 
+# The report holds characters that the Windows console code page (cp932)
+# cannot encode; print it as UTF-8 so a redirected run does not stop at the end.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 
 CASES = [
     {
