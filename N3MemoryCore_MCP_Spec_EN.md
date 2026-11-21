@@ -1073,12 +1073,64 @@ Everything in this section is new in v2.0.0 and is taken from N3MC-Free §3 "Res
 
 #### Starting the server (`_start_server`)
 
-1. `subprocess.Popen([sys.executable, "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`; truncate `server.log` first when it is larger than 1 MB. Detached: on Windows `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, elsewhere `start_new_session=True`, so the server outlives the hook or MCP entry that started it. Except with an MCP client that puts its child in a Job Object that ends the whole process tree when closed (the Python `mcp` stdio client on Windows: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` without breakaway; checked 2026-11-20): there the server ends together with the entry. No memory is lost: the next call starts the server again, and saves in between are direct saves without vectors (§4.6). The `-m` form is required (package-relative imports); never start it by file path. Its stdout never reaches a hook's or the MCP entry's stdout.
+1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`; truncate `server.log` first when it is larger than 1 MB. Detached: on Windows `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`, elsewhere `start_new_session=True`, so the server outlives the hook or MCP entry that started it. Except with an MCP client that puts its child in a Job Object that ends the whole process tree when closed (the Python `mcp` stdio client on Windows: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` without breakaway; checked 2026-11-20): there the server ends together with the entry. No memory is lost: the next call starts the server again, and saves in between are direct saves without vectors (§4.6). The `-m` form is required (package-relative imports); never start it by file path. Its stdout never reaches a hook's or the MCP entry's stdout.
 2. Poll `/health` every 0.5 s for up to 60 s. If the child exits meanwhile (`proc.poll() is not None`), stop waiting at once.
 3. On that early exit: emit `server_start_failed` ("The N3MC Lite memory server could not start (exit code <n>). See <server.log path> for the reason."), write the time to the marker file `server_start_failed` in the data folder, delete the PID file if it holds the child's PID, and go on without the server. If `Popen` itself raises, go on without the server (one stderr line).
    - **The server process records its own start failure too (M2, 2026-11-20)**: when `run_server` ends with an exception, or with `SystemExit` whose code is not 0 / `None` (uvicorn exits this way when it cannot bind the port), it emits `server_start_failed` ("The N3MC Lite memory server could not start (<exit code n \| ErrorType: message>). See <server.log path> for the reason.") and writes the marker itself before exiting; the exception is not swallowed. **Why**: the hooks call `ensure_server(cfg, max_wait=0)` and never see the child exit, so without this a server that cannot start was started again on every hook, with no notice and no 5-minute pause, and the hook's answer stayed "still starting".
 4. While the marker is younger than 5 minutes, do not try to start the server again; go straight to the no-server path. Delete the marker and clear the notice once a server answers.
 5. A child still alive after 60 s is still starting: leave it running ("still starting" rule above).
+
+#### Safe import path (2026-11-21)
+
+`python -m <module>` puts the current folder first on `sys.path`. The hooks and the commands the rules file gives to Claude run in the folder the user has open in Claude Code. Without the two rules below, a file in that folder with the name of any module N3MC imports (for example `shlex.py` or `fastapi.py` in a repository the user has just cloned) is imported, and runs, inside N3MC.
+
+**Rule 1 — entry modules drop the current folder.** Every module of the package that can be the program's entry — the ones that end with `if __name__ == "__main__":`; here `cli.py`, `lite_hook.py`, `lite_stop_hook.py`, `server.py` and `__main__.py` — has the following block as its **first statements**, right after the docstring and before any other import (in the hook modules, the UTF-8 block comes after it):
+
+```python
+import os as _os
+import sys as _sys
+
+if __name__ == "__main__":
+    # Safe import path. Started as `python -m <package>.<module>`, Python has put the current folder
+    # first on sys.path, so a file there named like a module imported below would run inside this
+    # program. Drop that entry, unless this package itself lives in the current folder (a source
+    # checkout run in place). Nothing else may be imported before this block.
+    try:
+        _cwd = _os.path.normcase(_os.path.abspath(_os.getcwd()))
+        _pkg_parent = _os.path.normcase(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        if _sys.path and _os.path.normcase(_os.path.abspath(_sys.path[0])) == _cwd and _pkg_parent != _cwd:
+            del _sys.path[0]
+    except Exception:  # noqa: BLE001
+        pass
+```
+
+- It acts only when the module is the program (`python -m …`). Imported by a console script or by a test, it does nothing: a library must not change the `sys.path` of the program that imports it.
+- `os` and `sys` are already loaded when the block runs, so importing them reads no file.
+- The entry is kept when the package itself lives in the current folder (a source checkout run in place, not installed): without it the package could not be found.
+
+**Rule 2 — children are started with `python_cmd()`.** `paths.py` has:
+
+```python
+def python_cmd():
+    """The command that starts a child Python: [sys.executable], plus -P on Python 3.11 and later so
+    that the child does not put the current folder on sys.path (see the safe-path block at the top of
+    the entry modules). -P is left out when this package itself lives in the current folder (a source
+    checkout run in place), because the child could then not find the package."""
+    import sys
+    cmd = [sys.executable]
+    try:
+        cwd = os.path.normcase(os.path.abspath(os.getcwd()))
+        pkg_parent = os.path.normcase(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if sys.version_info >= (3, 11) and pkg_parent != cwd:
+            cmd.append("-P")
+    except Exception:  # noqa: BLE001
+        pass
+    return cmd
+```
+
+Every child Python process — the server of "Starting the server" above and the calls of the hook modules — is started as `[*python_cmd(), "-m", …]`, never as `[sys.executable, "-m", …]`. `-P` (Python 3.11) keeps Python from adding the current folder at all, which also covers a folder there that has the name of this package.
+
+**What the rules do not cover**: a folder or file in the current folder with the name of this package itself (`n3mc_mcp`), when the program is entered by `python -m …` typed in that folder (the commands the rules file gives to Claude, and a hook registered in the `python -m` form). The block is never reached, because the other package is the one that is imported. On Python 3.10 the same holds for the children (there is no `-P`), and a `runpy.py` in that folder runs as well. Entering through the console scripts, or with `python -P -m …` on Python 3.11 and later, avoids it. (Checked 2026-11-21: with `shlex.py` in the current folder, `python -m n3mc_mcp.cli` ran that file before these rules and does not run it with them; a folder `n3mc_mcp/` there still runs.)
 
 #### `/shutdown`
 
@@ -2245,6 +2297,7 @@ Use `monkeypatch.setattr` / `monkeypatch.setenv` and let pytest restore them at 
 n3mcmcp-lite/
 └── tests/
     ├── conftest.py          # Shared fixtures: isolated data dir, Redis URL override, dummy vectors
+    ├── test_safe_path.py    # Safe import path: files in the current folder do not run inside N3MC (no model needed)
     ├── test_database.py     # Layer 1: Redis / RediSearch unit tests (CRUD, schema, TTL, dedup, BM25, KNN)
     ├── test_processor.py    # Layer 2: ranking math, embeddings, purify, chunking, reranker
     ├── test_server.py       # Layer 3: MCP tool dispatch E2E (isolated `config.json` + flushed DB 0)
@@ -2427,6 +2480,20 @@ Temporary `HOME` only.
 | `TestNoMcpInClaudeCode` | `plugin.json` has no `mcpServers`; `hooks.json` has `SessionStart`, `UserPromptSubmit` and `Stop` with the commands of §8; `--init` never adds an MCP server to `~/.claude.json` or `.mcp.json`; an old `n3mc-workingmemory` entry there is reported, not edited |
 | `TestSeparateNames` | Default port 18524, data folder `~/.n3mc-workingmemory`, rules file `n3mc-lite-behavior.md`, PID file `n3mc-lite.pid`, commands `n3mc-lite*` — none equal to Free's (`18520`, `~/.n3mc`, `n3mc-behavior.md`, `n3mc*`) or Pro's (`18521`) |
 | `TestRulesFile` | The rules file is written from the template with the `python -m n3mc_mcp.cli` form, or the `uvx` form with `--uvx`; a file equal to the other form's template is replaced (with backup); a hand-edited file is not replaced and gives `rules_md_edited:<hash>`; the first line is `<!-- n3mc-lite-behavior v1 -->` |
+
+### Safe import path: `test_safe_path.py` (2026-11-21; no model needed)
+
+Every test that starts a process gives it a temporary data folder and a temporary home folder.
+
+| Test | What it checks |
+|---|---|
+| `test_there_are_entry_modules` | The main module is one of the modules that end with `if __name__ == "__main__":`, and there are at least 3 of them |
+| `test_entry_module_starts_with_the_safe_path_block` (once per entry module) | After the docstring, the first statements are `import os as _os`, `import sys as _sys` and the `if __name__ == "__main__":` block that deletes `sys.path[0]` |
+| `test_files_in_the_current_folder_do_not_run` | In a folder that holds `argparse.py`, `shlex.py`, `queue.py`, `fastapi.py`, `pydantic.py`, `redis.py`, `numpy.py` and `uvicorn.py` (each writes a marker file and raises `ImportError`), `python -m n3mc_mcp.cli --help` prints the usage, exits 0 and leaves no marker |
+| `test_without_the_block_they_would_run` | In the same folder, `python -c "import shlex"` writes the marker (so the test above is real) |
+| `test_a_source_checkout_run_in_place_still_works` | From the repository root, without `PYTHONPATH`, `python -m n3mc_mcp.cli --help` exits 0 |
+| `test_children_are_started_with_dash_P_outside_a_checkout` | `python_cmd()` is `[sys.executable, "-P"]` in another folder on Python 3.11 and later (`[sys.executable]` on 3.10), and `[sys.executable]` in the repository root |
+| `test_no_child_is_started_without_python_cmd` | No module of the package contains `[sys.executable,` |
 
 ### Example runs
 

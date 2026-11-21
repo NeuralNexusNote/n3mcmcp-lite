@@ -1059,12 +1059,64 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 #### サーバーの起動（`_start_server`）
 
-1. `subprocess.Popen([sys.executable, "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（Windows の Python の `mcp` の stdio クライアント。`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さない。2026-11-20 に確かめた）では、サーバーは入口と一緒に終わる。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。
+1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（Windows の Python の `mcp` の stdio クライアント。`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さない。2026-11-20 に確かめた）では、サーバーは入口と一緒に終わる。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。
 2. 0.5 秒ごとに最大 60 秒、`/health` を確かめる。その間に子プロセスが終わったら（`proc.poll() is not None`）、すぐに待つのをやめる。
 3. その早い終了のとき：`server_start_failed`（"The N3MC Lite memory server could not start (exit code <n>). See <server.log path> for the reason."）を出し、データフォルダの目印のファイル `server_start_failed` に時刻を書き、PID ファイルが子プロセスの PID を持っていれば消し、サーバーなしで続ける。`Popen` 自体が例外を出したときは、サーバーなしで続ける（stderr に 1 行）。
    - **サーバーのプロセス自身も起動の失敗を記録する（M2、2026-11-20）**：`run_server` が例外で終わるとき、または 0 / `None` 以外のコードの `SystemExit` で終わるとき（uvicorn はポートを bind できないとき、こう終わる）は、終わる前に自分で `server_start_failed`（"The N3MC Lite memory server could not start (<exit code n \| ErrorType: message>). See <server.log path> for the reason."）を出し、目印のファイルを書く。例外は握りつぶさない。**理由**：フックは `ensure_server(cfg, max_wait=0)` で呼ぶので子プロセスの終了を見ない。これがないと、起動できないサーバーをフックのたびに起動し直し、通知も 5 分の待ちも働かず、表示は「still starting」のままだった。
 4. 目印が 5 分より新しい間は、サーバーをもう一度起動しようとしない。すぐにサーバーなしの経路に進む。サーバーが応答したら、目印を消し、通知を消す。
 5. 60 秒たってもまだ生きている子プロセスは、まだ起動中である。そのまま動かしておく（上の「まだ起動中」の決まり）。
+
+#### 安全なインポートパス（2026-11-21）
+
+`python -m <モジュール>` は、今のフォルダを `sys.path` の先頭に置く。フックと規則ファイルが Claude に示すコマンドは、利用者が Claude Code で開いているフォルダで動く。下の 2 つの決まりがないと、そのフォルダにある、N3MC が import するモジュールと同じ名前のファイル（たとえば、利用者がクローンしたばかりのリポジトリの中の `shlex.py` や `fastapi.py`）が import され、N3MC の中で動く。
+
+**決まり 1 — 入口のモジュールは、今のフォルダを外す。** パッケージの中で、プログラムの入口になりうるモジュール（`if __name__ == "__main__":` で終わるもの。ここでは `cli.py`, `lite_hook.py`, `lite_stop_hook.py`, `server.py` and `__main__.py`）は、次のブロックを**最初の文**として持つ。docstring の直後、ほかのどの import よりも前に置く（フックのモジュールでは、UTF-8 のブロックをこのあとに置く）。
+
+```python
+import os as _os
+import sys as _sys
+
+if __name__ == "__main__":
+    # Safe import path. Started as `python -m <package>.<module>`, Python has put the current folder
+    # first on sys.path, so a file there named like a module imported below would run inside this
+    # program. Drop that entry, unless this package itself lives in the current folder (a source
+    # checkout run in place). Nothing else may be imported before this block.
+    try:
+        _cwd = _os.path.normcase(_os.path.abspath(_os.getcwd()))
+        _pkg_parent = _os.path.normcase(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        if _sys.path and _os.path.normcase(_os.path.abspath(_sys.path[0])) == _cwd and _pkg_parent != _cwd:
+            del _sys.path[0]
+    except Exception:  # noqa: BLE001
+        pass
+```
+
+- モジュールがプログラムとして動いたとき（`python -m …`）だけ働く。コンソールスクリプトやテストから import されたときは、何もしない。ライブラリは、自分を import したプログラムの `sys.path` を変えてはならない。
+- ブロックが動く時点で、`os` と `sys` は読み込み済みである。import しても、ファイルを読まない。
+- パッケージ自身が今のフォルダにあるとき（インストールせずに、ソースのフォルダでそのまま動かすとき）は、外さない。外すと、パッケージが見つからなくなる。
+
+**決まり 2 — 子プロセスは `python_cmd()` で起動する。** `paths.py` に次の関数を置く。
+
+```python
+def python_cmd():
+    """The command that starts a child Python: [sys.executable], plus -P on Python 3.11 and later so
+    that the child does not put the current folder on sys.path (see the safe-path block at the top of
+    the entry modules). -P is left out when this package itself lives in the current folder (a source
+    checkout run in place), because the child could then not find the package."""
+    import sys
+    cmd = [sys.executable]
+    try:
+        cwd = os.path.normcase(os.path.abspath(os.getcwd()))
+        pkg_parent = os.path.normcase(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if sys.version_info >= (3, 11) and pkg_parent != cwd:
+            cmd.append("-P")
+    except Exception:  # noqa: BLE001
+        pass
+    return cmd
+```
+
+子の Python のプロセス（上の「サーバーの起動」のサーバーと、フックのモジュールからの呼び出し）は、すべて `[*python_cmd(), "-m", …]` で起動する。`[sys.executable, "-m", …]` で起動してはならない。`-P`（Python 3.11 から）は、今のフォルダを `sys.path` に足すこと自体をやめさせる。今のフォルダに、このパッケージと同じ名前のフォルダがある場合にも効く。
+
+**この決まりで防げないもの**: 今のフォルダにある、このパッケージ自身と同じ名前（`n3mc_mcp`）のフォルダやファイル。そのフォルダで `python -m …` と打ってプログラムに入るとき（規則ファイルが Claude に示すコマンドと、`python -m` の形で登録されたフック）は、もう一方のパッケージが import されるので、ブロックに届かない。Python 3.10 では、子プロセスも同じである（`-P` がない）。そのフォルダに置かれた `runpy.py` も動く。コンソールスクリプトから入るか、Python 3.11 以降で `python -P -m …` を使えば、起きない。（2026-11-21 に確認: 今のフォルダに `shlex.py` を置くと、この決まりの前は `python -m n3mc_mcp.cli` がそのファイルを動かし、決まりを入れたあとは動かさない。そこに `n3mc_mcp/` というフォルダがあれば、今も動く。）
 
 #### `/shutdown`
 
@@ -2234,6 +2286,7 @@ $env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
 n3mcmcp-lite/
 └── tests/
     ├── conftest.py          # Shared fixtures: isolated data dir, Redis URL override, dummy vectors
+    ├── test_safe_path.py    # 安全なインポートパス: 今のフォルダのファイルが N3MC の中で動かない（モデル不要）
     ├── test_database.py     # Layer 1: Redis / RediSearch unit tests (CRUD, schema, TTL, dedup, BM25, KNN)
     ├── test_processor.py    # Layer 2: ranking math, embeddings, purify, chunking, reranker
     ├── test_server.py       # Layer 3: MCP tool dispatch E2E (isolated `config.json` + flushed DB 0)
@@ -2416,6 +2469,20 @@ n3mcmcp-lite/
 | `TestNoMcpInClaudeCode` | `plugin.json` に `mcpServers` がない。`hooks.json` には、§8 のコマンドの `SessionStart`、`UserPromptSubmit`、`Stop` がある。`--init` は `~/.claude.json` にも `.mcp.json` にも MCP サーバーを足さない。そこにある古い `n3mc-workingmemory` の項目は知らせるが、直さない |
 | `TestSeparateNames` | 既定のポート 18524、データフォルダ `~/.n3mc-workingmemory`、ルールファイル `n3mc-lite-behavior.md`、PID ファイル `n3mc-lite.pid`、コマンド `n3mc-lite*` — どれも Free のもの（`18520`、`~/.n3mc`、`n3mc-behavior.md`、`n3mc*`）や Pro のもの（`18521`）と同じでない |
 | `TestRulesFile` | ルールファイルは、`python -m n3mc_mcp.cli` の形か、`--uvx` 付きなら `uvx` の形で、テンプレートから書く。もう一方の形のテンプレートと同じファイルは置き換える（バックアップ付き）。手で直したファイルは置き換えず、`rules_md_edited:<hash>` を出す。1 行目は `<!-- n3mc-lite-behavior v1 -->` |
+
+### 安全なインポートパス: `test_safe_path.py`（2026-11-21。モデル不要）
+
+プロセスを起動するテストは、どれも一時的なデータフォルダと一時的なホームフォルダを渡す。
+
+| Test | 確かめること |
+|---|---|
+| `test_there_are_entry_modules` | メインのモジュールが、`if __name__ == "__main__":` で終わるモジュールの 1 つである。そうしたモジュールが 3 つ以上ある |
+| `test_entry_module_starts_with_the_safe_path_block`（入口のモジュールごとに 1 回） | docstring のあとの最初の文が、`import os as _os`、`import sys as _sys`、`sys.path[0]` を消す `if __name__ == "__main__":` のブロックである |
+| `test_files_in_the_current_folder_do_not_run` | `argparse.py`・`shlex.py`・`queue.py`・`fastapi.py`・`pydantic.py`・`redis.py`・`numpy.py`・`uvicorn.py`（どれも、目印のファイルを書いて `ImportError` を出す）を置いたフォルダで、`python -m n3mc_mcp.cli --help` が使い方を出し、0 で終わり、目印を残さない |
+| `test_without_the_block_they_would_run` | 同じフォルダで `python -c "import shlex"` を実行すると、目印が書かれる（上のテストが空振りでないことの確認） |
+| `test_a_source_checkout_run_in_place_still_works` | リポジトリのルートから、`PYTHONPATH` なしで、`python -m n3mc_mcp.cli --help` が 0 で終わる |
+| `test_children_are_started_with_dash_P_outside_a_checkout` | `python_cmd()` は、ほかのフォルダでは Python 3.11 以降で `[sys.executable, "-P"]`（3.10 では `[sys.executable]`）、リポジトリのルートでは `[sys.executable]` になる |
+| `test_no_child_is_started_without_python_cmd` | パッケージのどのモジュールにも `[sys.executable,` がない |
 
 ### 実行例
 
