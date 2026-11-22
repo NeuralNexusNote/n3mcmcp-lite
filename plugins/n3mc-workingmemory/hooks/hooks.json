@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py\" || py \"${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py\" || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py\" || echo '{\"systemMessage\": \"[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory commands may not be pre-approved and Claude Code may ask for permission when Claude searches the memory. Install Python 3, or add \\\"Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search *)\\\" to permissions.allow in ~/.claude/settings.json.\", \"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory commands may not be pre-approved and Claude Code may ask for permission when Claude searches the memory. Install Python 3, or add \\\"Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search *)\\\" to permissions.allow in ~/.claude/settings.json.\"}}'"
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py\" || py \"${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py\" || python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py\" || echo '{\"systemMessage\": \"[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory commands may not be pre-approved and Claude Code may ask for permission when Claude searches the memory. Install Python 3, or add \\\"Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --search *)\\\" to permissions.allow in ~/.claude/settings.json.\", \"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory commands may not be pre-approved and Claude Code may ask for permission when Claude searches the memory. Install Python 3, or add \\\"Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --search *)\\\" to permissions.allow in ~/.claude/settings.json.\"}}'"
           }
         ]
       }
@@ -14,14 +14,14 @@
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite-hook --uvx", "timeout": 60 }
+          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite-hook --uvx", "timeout": 60 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite-stop-hook --uvx", "timeout": 60 }
+          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite-stop-hook --uvx", "timeout": 60 }
         ]
       }
     ]

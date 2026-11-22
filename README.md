@@ -170,7 +170,7 @@ Choose one. **Do not register the MCP server in Claude Code**
 
 The plugin registers three hooks: `SessionStart` (pre-approves the CLI
 commands), and `UserPromptSubmit` and `Stop`, which run through
-`uvx --from n3memorycore-mcp-lite==2.0.0 …` (the version is pinned to the
+`uvx --from n3memorycore-mcp-lite==2.0.1 …` (the version is pinned to the
 package version).
 
 **(b) pip.**
@@ -219,7 +219,7 @@ Plugin users (no pip installation):
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.0", "n3mc-workingmemory"],
+      "args": ["--from", "n3memorycore-mcp-lite==2.0.1", "n3mc-workingmemory"],
       "env": {
         "N3MC_AGENT_NAME": "claude-desktop"
       }
@@ -458,7 +458,7 @@ without the auto-save reminder, because in Claude Code the hooks save;
 - In Claude Code, `--search`, `--buffer`, `--list`, `--recall-thread`,
   `--repair` and `--stop` are pre-approved (`permissions.allow`), in the
   `python -m n3mc_mcp.cli` and `n3mc-lite` forms (pip) or the
-  `uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite` form (plugin).
+  `uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite` form (plugin).
 - **`--delete` and `--delete-session` are never pre-approved**: they are
   irreversible, so Claude Code asks you each time.
 - A manual `--search` is not limited in size; the hook's block and the MCP

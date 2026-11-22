@@ -7,7 +7,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
-## [Unreleased]
+## [2.0.1] — 2026-11-22
 
 ### Fixed
 - **The model size in the notices is ~1.1 GB** (was ~440 MB): the "still
@@ -15,6 +15,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   loaded" notices name the size of `intfloat/multilingual-e5-base` that the
   first start downloads (`model.safetensors` is 1,112 MB). Display change only;
   the specification (EN / JP) says the same.
+- **Tests**: `TestEnforceEphemeral` leaves no key in another DB of the test
+  Redis (the key is set with `EX 60` and removed in a `finally` block; the
+  empty-DB test removes it first). A local test Redis that had written a
+  snapshot while the key existed failed the first run after a restart.
+
+### Changed
+- The plugin and the marketplace entry are version 2.0.1, and the plugin's
+  `uvx` commands and pre-approved rules are pinned to
+  `n3memorycore-mcp-lite==2.0.1`.
+- `MODIFICATIONS.md` no longer says that 2.0.0 is not released yet.
 
 ## [2.0.0] — 2026-11-22
 
