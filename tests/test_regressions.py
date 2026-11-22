@@ -719,6 +719,31 @@ class TestPluginHook:
         assert "n3mc-lite --search *" in text and "n3mc-lite --stop*" in text
         assert "--delete" not in text
 
+    def test_rules_are_the_pinned_uvx_commands(self):
+        import n3mc_mcp
+        mod = self.load()
+        assert mod.VERSION == n3mc_mcp.__version__
+        assert [r.split("n3mc-lite ")[1] for r in mod.RULES] == [
+            "--search *)", "--buffer *)", "--list*)", "--recall-thread *)", "--repair*)", "--stop*)"]
+        assert all(r.startswith("Bash(uvx --from n3memorycore-mcp-lite==%s n3mc-lite " % mod.VERSION)
+                   for r in mod.RULES)
+
+    def test_double_registration_is_reported(self, tmp_path):
+        mod = self.load()
+        p = tmp_path / "settings.json"
+
+        def write(event, command):
+            p.write_text(json.dumps({"hooks": {event: [{"hooks": [{"type": "command", "command": command}]}]}}),
+                         encoding="utf-8")
+        write("Stop", "C:/Py/Scripts/n3mc-lite-stop-hook.exe")
+        assert "registered twice" in mod._double_registration(p)
+        write("UserPromptSubmit", "C:/Py/python.exe -m n3mc_mcp.lite_hook")
+        assert "registered twice" in mod._double_registration(p)
+        write("UserPromptSubmit", "python C:/x/n3mc_hook.py")          # another N3MC product
+        assert mod._double_registration(p) == ""
+        p.write_text("{ not json", encoding="utf-8")
+        assert mod._double_registration(p) == ""
+
 
 class TestWeakMatches:
     def weak_cfg(self, **kw):
@@ -816,3 +841,21 @@ class TestPublicRepoHygiene:
         if mp["metadata"]["version"] != n3mc_mcp.__version__ and mp["metadata"]["version"] == "1.12.2":
             pytest.skip("marketplace.json still holds 1.12.2 (not regenerated: kept as instructed)")
         assert mp["metadata"]["version"] == n3mc_mcp.__version__
+
+    def test_plugin_files_agree_with_the_package_version(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        import n3mc_mcp
+        plugin = os.path.join(root, "plugins", "n3mc-workingmemory")
+        meta = json.load(open(os.path.join(plugin, ".claude-plugin", "plugin.json"), encoding="utf-8"))
+        hooks = json.load(open(os.path.join(plugin, "hooks", "hooks.json"), encoding="utf-8"))["hooks"]
+        pin = "n3memorycore-mcp-lite==%s" % n3mc_mcp.__version__
+        assert meta["version"] == n3mc_mcp.__version__
+        assert pin in hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
+        assert pin in hooks["Stop"][0]["hooks"][0]["command"]
+        assert pin in hooks["SessionStart"][0]["hooks"][0]["command"]
+
+    def test_example_desktop_config_is_valid_json(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cfg = json.load(open(os.path.join(root, "examples", "claude_desktop_config.json"), encoding="utf-8"))
+        entry = cfg["mcpServers"]["n3mc-workingmemory"]
+        assert entry["command"].endswith("n3mc-workingmemory.exe") and entry["env"]["N3MC_AGENT_NAME"] == "claude-desktop"
