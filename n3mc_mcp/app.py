@@ -1,145 +1,116 @@
-"""Resident FastAPI server: /health /shutdown /buffer /search /repair /tools/{name} (spec §3.15, §4.5).
+"""Resident FastAPI server: /health /shutdown /buffer /search /repair /tools/{name} (spec sections 3.15, 4.5).
 
-Every endpoint that touches Redis or the model is a plain `def` (FastAPI runs
-it in its thread pool), so a long save or /repair never blocks /health.
-"""
+Every endpoint that touches Redis or the model is a plain `def` (FastAPI runs it in the thread pool),
+so a long save or /repair never blocks /health."""
 
-import hashlib
-import json
 import os
 import threading
+from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+import redis
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from n3mc_mcp import config as config_mod
-from n3mc_mcp import context as C
-from n3mc_mcp import paths
-from n3mc_mcp import processor as P
-from n3mc_mcp.database import BACKEND_ERRORS, Database, redis_display
-from n3mc_mcp.tools import BoundError, ToolRunner, parse_bounds
-
-code_version = config_mod.code_version
+from . import config as config_mod
+from . import paths, processor
+from .database import BackendUnreachable, redis_display
+from .tools import Service, TimeRangeError
 
 
-def _request_shutdown() -> None:
-    """Exit the server process 0.3 s after answering (tests replace this)."""
-    def _exit():
-        try:
-            p = paths.pid_path()
-            if p.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                p.unlink()
-        except OSError:
-            pass
-        os._exit(0)
-    threading.Timer(0.3, _exit).start()
+def _norm(p: str) -> str:
+    return os.path.normcase(os.path.abspath(p))
 
 
-async def _json_body(request: Request):
-    try:
-        data = await request.json()
-    except Exception:  # noqa: BLE001
-        return {}
-    return data if isinstance(data, dict) else {}
+def _default_exit():
+    paths.remove_pid_file_if_own()
+    os._exit(0)
 
 
-def create_app(cfg=None, db=None, runner=None, lifespan=None) -> FastAPI:
-    cfg = cfg if cfg is not None else config_mod.load_config()
-    db = db if db is not None else Database(cfg)
-    runner = runner if runner is not None else ToolRunner(cfg, db)
-    version = code_version()
-    port = int(cfg["server_port"])
-    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    app = FastAPI(lifespan=lifespan) if lifespan else FastAPI()
-    app.state.cfg, app.state.db, app.state.runner = cfg, db, runner
+def create_app(service=None, port=None, start_model=False):
+    svc = service or Service(config_mod.load_config())
+    serve_port = port or svc.cfg["server_port"]
+    # The version of the code and config.json THIS server started with: a later edit of config.json makes
+    # the next CLI/hook/MCP call see a different version and replace the server (spec 3.15).
+    started_version = config_mod.code_version()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        if start_model:
+            processor.start_background_load(svc.cfg["embedding_model"])
+        yield
+
+    app = FastAPI(title="N3MC Lite resident server", lifespan=lifespan)
+    app.state.service = svc
+    app.state.port = serve_port
+    app.state.exit_fn = _default_exit
 
     @app.middleware("http")
-    async def _guard(request: Request, call_next):
+    async def guard(request: Request, call_next):
+        host = request.headers.get("host", "")
+        allowed = ("127.0.0.1:%s" % app.state.port, "localhost:%s" % app.state.port)
+        if host not in allowed:
+            return JSONResponse({"detail": "forbidden host"}, status_code=403)
         if "origin" in request.headers:
-            return JSONResponse({"detail": "forbidden"}, status_code=403)
-        if request.headers.get("host", "") not in allowed_hosts:
-            return JSONResponse({"detail": "forbidden"}, status_code=403)
+            return JSONResponse({"detail": "forbidden origin"}, status_code=403)
         return await call_next(request)
 
     @app.get("/health")
-    async def health():
-        return {"status": "ok", "root": str(paths.data_dir()), "code_version": version, "pid": os.getpid(),
-                "redis": redis_display(cfg["redis_url"])}
+    def health():
+        return {"status": "ok", "root": paths.data_dir(), "code_version": started_version,
+                "pid": os.getpid(), "redis": redis_display(svc.cfg["redis_url"])}
 
     @app.post("/shutdown")
-    async def shutdown(body: dict = Depends(_json_body)):
-        root = body.get("root")
-        if not isinstance(root, str) or not paths.same_dir(root, paths.data_dir()):
-            return JSONResponse({"detail": "forbidden"}, status_code=403)
-        _request_shutdown_ref()
+    def shutdown(payload: Any = Body(default=None)):
+        root = payload.get("root") if isinstance(payload, dict) else None
+        if not isinstance(root, str) or _norm(root) != _norm(paths.data_dir()):
+            raise HTTPException(status_code=403, detail="root mismatch")
+        t = threading.Timer(0.3, lambda: app.state.exit_fn())
+        t.daemon = True
+        t.start()
         return {"status": "ok"}
 
-    def _request_shutdown_ref():
-        import n3mc_mcp.app as me
-        me._request_shutdown()
-
     @app.post("/buffer")
-    def buffer(body: dict = Depends(_json_body)):
-        status = db.ensure_connected()
-        if status != "ok":
-            return JSONResponse({"status": "error", "saved": False, "reason": db.unavailable_hint(status)},
-                                status_code=503)
-        role = body.get("role")
-        if role not in ("user", "claude"):
-            role = None
-        agent = body.get("agent_name")
-        if agent in (None, "") and role:
-            agent = "claude-code"
-        try:
-            with P.no_model_wait(body.get("no_model_wait") is True):  # the hooks never wait (M3)
-                res = db.save_memory(body.get("content"), agent_name=agent, session_id=body.get("session_id"),
-                                     turn_id=body.get("turn_id"), role=role)
-        except BACKEND_ERRORS:
-            db.mark_down()
-            return JSONResponse({"status": "error", "saved": False, "reason": db.unavailable_hint("down")},
-                                status_code=503)
-        return res
+    def buffer(payload: Any = Body(default=None)):
+        if not isinstance(payload, dict):
+            payload = {}
+        status, res = svc.buffer(payload)
+        return JSONResponse(res, status_code=status)
 
     @app.post("/search")
-    def search(body: dict = Depends(_json_body)):
-        try:
-            since, until = parse_bounds(body.get("since"), body.get("until"))
-        except BoundError as e:
-            return JSONResponse({"detail": str(e)}, status_code=400)
-        status = db.ensure_connected()
-        if status != "ok":
-            return JSONResponse({"detail": db.unavailable_hint(status)}, status_code=503)
-        query = body.get("query") if isinstance(body.get("query"), str) else ""
-        max_chars = body.get("max_chars")
-        if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars <= 0:
+    def search(payload: Any = Body(default=None)):
+        if not isinstance(payload, dict):
+            payload = {}
+        args = {k: payload.get(k) for k in ("query", "session_id", "since", "until", "limit")}
+        args["query"] = args["query"] or ""
+        max_chars = payload.get("max_chars")
+        if not isinstance(max_chars, int) or isinstance(max_chars, bool):
             max_chars = None
-        head = C.hook_head(query[: int(cfg["search_query_max_chars"])])
         try:
-            with P.no_model_wait(body.get("no_model_wait") is True):  # the hooks never wait (M3)
-                text = runner.render_search(head, query, body.get("limit"), body.get("session_id"), since,
-                                            until, "", max_chars)
-        except BACKEND_ERRORS:
-            db.mark_down()
-            return JSONResponse({"detail": db.unavailable_hint("down")}, status_code=503)
+            text = svc.search(args, max_chars=max_chars, hook=True,
+                              no_model_wait=bool(payload.get("no_model_wait")))
+        except TimeRangeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except BackendUnreachable as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        except (redis.ConnectionError, redis.TimeoutError):
+            svc.db.mark_down()
+            raise HTTPException(status_code=503, detail=svc.db.hint())
         return {"text": text}
 
     @app.post("/repair")
-    def repair(body: dict = Depends(_json_body)):
-        status = db.ensure_connected()
-        if status != "ok":
-            return JSONResponse({"status": "error", "message": db.unavailable_hint(status)}, status_code=503)
+    def repair(payload: Any = Body(default=None)):
         try:
-            return db.repair()
-        except BACKEND_ERRORS:
-            db.mark_down()
-            return JSONResponse({"status": "error", "message": db.unavailable_hint("down")}, status_code=503)
+            return svc.repair(no_model_wait=True)
+        except BackendUnreachable as exc:
+            return JSONResponse({"status": "error", "message": str(exc)}, status_code=503)
+        except (redis.ConnectionError, redis.TimeoutError):
+            svc.db.mark_down()
+            return JSONResponse({"status": "error", "message": svc.db.hint()}, status_code=503)
 
     @app.post("/tools/{name}")
-    def tools(name: str, nudge: str = "1", body: dict = Depends(_json_body)):
-        return {"text": runner.call(name, body, nudge=(nudge != "0"))}
+    def tools(name: str, nudge: int = 1, body: Any = Body(default=None)):
+        args = body if isinstance(body, dict) else {}
+        return {"text": svc.call_tool(name, args, nudge=bool(nudge))}
 
     return app
-
-
-def dumps(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False)

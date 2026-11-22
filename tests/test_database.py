@@ -1,185 +1,187 @@
-"""Layers 1 and 4: Redis / RediSearch behavior (needs N3MC_REDIS_TEST_URL)."""
+"""Layer 1: Redis / RediSearch unit tests (needs N3MC_REDIS_TEST_URL)."""
 
 import time
 
-from n3mc_mcp import processor as P
-from n3mc_mcp.database import INDEX, Database
+import pytest
+
+from n3mc_mcp import database, processor
+from n3mc_mcp.database import DOC, DOC_SHA, MEM, MEM_SHA, guard_key_for
 
 
-def _all_have_ttl(r):
-    return all(r.ttl(k) > 0 for k in r.scan_iter("*") if k != b"__n3mc_test_db__")
+def ttl_ok(r, key):
+    t = r.ttl(key)
+    return 0 < t <= 604800
+
+
+def hget(r, key, field):
+    v = r.hget(key, field)
+    return v.decode("utf-8") if isinstance(v, bytes) else v
 
 
 class TestIndexSetup:
-    def test_idempotent(self, db, rconn):
+    def test_index_created_and_idempotent(self, db):
         db.ensure_index()
         db.ensure_index()
-        assert db.index_ok
-        assert rconn.execute_command("FT.INFO", INDEX)
+        assert db.index_error is None
+        info = db.r.execute_command("FT.INFO", database.INDEX)
+        assert info
+
+    def test_dim_mismatch_notice(self, db):
+        db.cfg["embedding_dim"] = 384
+        db.cfg["_notices"].clear()
+        db.ensure_index()
+        assert any(n.startswith("index_dim_mismatch") for n in db.cfg["_notices"])
 
 
-class TestSaveSingle:
-    def test_saved_with_ttl_and_guard(self, db, rconn):
-        res = db.save_memory("hello world")
-        assert res["saved"] and res["ttl_seconds"] == 604800
-        assert 0 < rconn.ttl("mem:" + res["id"]) <= 604800
-        assert rconn.get("mem:sha:" + P.sha1_hex("hello world")).decode() == res["id"]
+class TestInsertAndRetrieve:
+    def test_single_record_fields_and_ttl(self, db):
+        res = db.save_memory("hello world note", agent_name="a", session_id="s", turn_id="t")
+        key = MEM + res["id"]
+        assert hget(db.r, key, "content") == "hello world note"
+        assert hget(db.r, key, "owner_id") == db.cfg["owner_id"]
+        assert hget(db.r, key, "parent_id") == ""
+        assert db.r.hget(key, "embedding") is not None and len(db.r.hget(key, "embedding")) == 768 * 4
+        assert ttl_ok(db.r, key)
 
-    def test_exact_duplicate_only(self, db):
-        assert db.save_memory("The project budget is 100 dollars.")["saved"]
-        assert db.save_memory("The project budget is 120 dollars.")["saved"]
-        assert db.save_memory("  The project budget is 100 dollars.\n")["status"] == "duplicate"
+    def test_without_embedding(self, db):
+        res = db.save_memory("no vector here", embed=False)
+        assert db.r.hget(MEM + res["id"], "embedding") is None
+        assert res["warning"] == "embedding_unavailable"
 
-    def test_empty_and_invisible(self, db):
-        assert db.save_memory("   ")["reason"] == "empty content"
-        assert db.save_memory("\x00​")["reason"] == "empty content (no visible characters)"
-        assert db.save_memory(chr(0xD800) + chr(0xDC00))["reason"] == "empty content"
-
-    def test_importance_nan_rejected(self, db):
-        r = db.save_memory("abc", importance="nan")
-        assert r["status"] == "error" and "importance must be numeric" in r["reason"]
-
-    def test_code_omitted_on_save(self, db, rconn):
-        r = db.save_memory("see ```py\nx=1\n``` here")
-        assert rconn.hget("mem:" + r["id"], "content").decode() == "see [code omitted] here"
-
-    def test_guard_released_on_field_failure(self, db, rconn):
-        r = db.save_memory("turn int", turn_id=12)
-        assert r["status"] == "error"
-        assert not list(rconn.scan_iter("mem:sha:*"))
-        assert db.save_memory("turn int")["saved"]
+    def test_parent_and_chunks(self, db):
+        text = "段落です。" * 200
+        res = db.save_memory(text)
+        assert res["chunks"] >= 2
+        pid = res["parent_id"]
+        assert hget(db.r, DOC + pid, "content") == text
+        assert hget(db.r, DOC + pid, "chunk_ids").split() == res["ids"]
+        for cid in res["ids"]:
+            assert hget(db.r, MEM + cid, "parent_id") == pid
+            assert ttl_ok(db.r, MEM + cid)
+        assert ttl_ok(db.r, DOC + pid)
 
 
-class TestLongDocument:
-    TEXT = "\n\n".join(f"第{i}区画「アルファ{i}」は雲海の上に浮かぶ。住民は約{1000 + i}人。" * 3 for i in range(12))
+class TestDedup:
+    def test_exact_duplicate(self, db):
+        assert db.save_memory("same text")["saved"]
+        assert db.save_memory("same text") == {"status": "duplicate", "saved": False}
 
-    def test_parent_chunks_verbatim_and_cascade(self, db, rconn, runner):
-        r = db.save_memory(self.TEXT, session_id="s1")
-        assert r["chunks"] > 1 and len(r["ids"]) == r["chunks"]
-        assert rconn.hget("doc:" + r["parent_id"], "content").decode() == self.TEXT.strip()
-        out = runner.call("search_memory", {"query": "アルファ5 住民", "session_id": "s1"}, nudge=False)
-        assert f"[doc×{r['chunks']}] [{r['parent_id']}]" in out
-        assert self.TEXT.strip() in out
-        d = db.delete_memory("doc:" + r["parent_id"])
-        assert d["status"] == "deleted" and d["chunks_deleted"] == r["chunks"]
-        assert not list(rconn.scan_iter("mem:*")) and not list(rconn.scan_iter("docsha:*"))
+    def test_nfkc_duplicate(self, db):
+        assert db.save_memory("ＡＩ memory")["saved"]
+        assert db.save_memory("AI memory")["status"] == "duplicate"
 
-    def test_duplicate_parent(self, db):
-        a = db.save_memory(self.TEXT)
-        b = db.save_memory(self.TEXT)
-        assert b["status"] == "duplicate" and b["parent_id"] == a["parent_id"]
+    def test_parent_guard(self, db):
+        text = "long long text. " * 60
+        first = db.save_memory(text)
+        second = db.save_memory(text)
+        assert second["status"] == "duplicate" and second["parent_id"] == first["parent_id"]
+        assert db.r.exists(DOC_SHA + processor.sha1_hex(text.strip()))
 
-
-class TestSearch:
-    def test_cjk_punctuation_query(self, db, runner):
-        db.save_memory("架空の惑星「アルファ9」の気温設定")
-        for q in ("アルファ9 気温", "「アルファ9」の気温は？"):
-            out = runner.call("search_memory", {"query": q}, nudge=False)
-            assert "アルファ9" in out.split("#### Possibly related")[0] or "アルファ9" in out
-
-    def test_or_bm25(self, db):
-        db.save_memory("the quick fox jumps")
-        terms = P.drop_lone_cjk_tokens(P.prepare_query("what did the quick fox do elephant")).split()
-        assert db._bm25(terms, 10, None)
-
-    def test_time_window_prefilter(self, db, rconn):
-        r = db.save_memory("window record alpha")
-        rconn.hset("mem:" + r["id"], "timestamp_epoch", str(time.time() - 3 * 86400))
-        rows, weak, _ = db.search("window record alpha", since=time.time() - 86400)
-        assert not rows and not weak
-        rows, weak, _ = db.search("window record alpha", until=time.time() - 2 * 86400)
-        assert [x["id"] for x in rows + weak] == [r["id"]]
-
-    def test_weak_matches_do_not_refresh_ttl(self, db, rconn, cfg):
-        cfg["vector_min_cos"] = 1.0
-        cfg["min_score"] = 1.0
-        r = db.save_memory("zebra crossing notes")
-        rconn.expire("mem:" + r["id"], 1000)
-        rows, weak, _ = db.search("zebra crossing notes")
-        assert not rows and weak and weak[0]["_weak"]
-        assert rconn.ttl("mem:" + r["id"]) <= 1000
-        assert rconn.hget("mem:" + r["id"], "access_count") == b"0"
-
-    def test_hit_refreshes_ttl_and_guard(self, db, rconn):
-        r = db.save_memory("refresh me please")
-        rconn.expire("mem:" + r["id"], 1000)
-        rconn.expire("mem:sha:" + P.sha1_hex("refresh me please"), 1000)
-        rows, _, _ = db.search("refresh me please")
-        assert rows[0]["id"] == r["id"]
-        assert rconn.ttl("mem:" + r["id"]) > 1000
-        assert rconn.ttl("mem:sha:" + P.sha1_hex("refresh me please")) > 1000
-        assert _all_have_ttl(rconn)
-
-    def test_empty_query_adds_no_weak(self, db):
-        db.save_memory("something")
-        rows, weak, _ = db.search("   ")
-        assert weak == []
+    def test_guard_has_ttl(self, db):
+        db.save_memory("guarded")
+        assert ttl_ok(db.r, MEM_SHA + processor.sha1_hex("guarded"))
 
 
-class TestHookRecords:
-    def test_role_prefix_and_turn_scoped_guard(self, db, rconn):
-        a = db.save_memory("ok", role="user", turn_id="t1", session_id="cc", agent_name="claude-code")
-        b = db.save_memory("ok", role="user", turn_id="t2", session_id="cc", agent_name="claude-code")
-        c = db.save_memory("ok")
-        d = db.save_memory("ok", role="user", turn_id="t1", session_id="cc")
-        assert a["saved"] and b["saved"] and c["saved"] and d["status"] == "duplicate"
-        assert rconn.hget("mem:" + a["id"], "content") == b"[user] ok"
-        assert rconn.exists("mem:sha:t1:" + P.sha1_hex("[user] ok"))
+class TestDelete:
+    def test_single(self, db):
+        res = db.save_memory("to delete")
+        out = db.delete_memory(res["id"])
+        assert out["status"] == "deleted"
+        assert not db.r.exists(MEM + res["id"])
+        assert not db.r.exists(MEM_SHA + processor.sha1_hex("to delete"))
 
-    def test_long_reply_prefixes(self, db, rconn):
-        body = "設定。" * 400
-        r = db.save_memory(body, role="claude", turn_id="t9")
-        assert rconn.hget("doc:" + r["parent_id"], "content").decode() == "[claude] " + body
-        n = r["chunks"]
-        first = rconn.hget("mem:" + r["ids"][0], "content").decode()
-        assert first.startswith(f"[claude 1/{n}] ")
+    def test_parent_cascade(self, db):
+        res = db.save_memory("cascade text. " * 80)
+        out = db.delete_memory(res["parent_id"])
+        assert out["status"] == "deleted"
+        assert not db.r.exists(DOC + res["parent_id"])
+        assert all(not db.r.exists(MEM + c) for c in res["ids"])
+        assert not db.r.exists(DOC_SHA + processor.sha1_hex(("cascade text. " * 80).strip()))
 
+    def test_not_found(self, db):
+        assert db.delete_memory("nope")["status"] == "not_found"
 
-class TestDeleteOwnerAndPrefix:
-    def test_other_owner_not_found(self, db, cfg):
-        other = Database(dict(cfg, owner_id="someone-else"))
-        other.ensure_connected()
-        r = other.save_memory("not mine")
-        assert db.delete_memory(r["id"])["status"] == "not_found"
-        assert db.delete_memory("mem:" + r["id"])["status"] == "not_found"
-
-    def test_prefix_forms(self, db):
-        r = db.save_memory("delete me")
-        assert db.delete_memory("mem:" + r["id"]) == {"status": "deleted", "id": r["id"]}
-        assert db.delete_memory("doc:doc:x")["status"] == "not_found"
+    def test_prefixed_ids(self, db):
+        res = db.save_memory("prefix delete")
+        assert db.delete_memory("mem:" + res["id"])["id"] == res["id"]
 
 
-class TestDeleteBySession:
-    def test_counts_and_idempotent(self, db):
-        db.save_memory("はい", session_id="eval-x")
-        db.save_memory("a medium fact about the cleanup test", session_id="eval-x")
-        long = db.save_memory("長文。" * 300, session_id="eval-x")
-        db.save_memory("other session", session_id="eval-y")
-        res = db.delete_by_session("eval-x")
-        assert res["documents_deleted"] == 1 and res["singles_deleted"] == 2
-        assert res["chunks_deleted"] == long["chunks"]
-        assert db.delete_by_session("eval-x") == {"status": "not_found", "session_id": "eval-x", "deleted": 0}
-        assert [r["content"] for r in db.recall_rows()] == ["other session"]
+class TestTTL:
+    def test_refresh_on_search(self, db):
+        res = db.save_memory("ttl refresh target text", session_id="s")
+        db.r.expire(MEM + res["id"], 100)
+        rows, _, _ = db.search("ttl refresh target text", "s", 5)
+        assert rows
+        assert db.r.ttl(MEM + res["id"]) > 1000
+
+    def test_every_key_has_ttl(self, db):
+        db.save_memory("alpha beta gamma")
+        db.save_memory("long text. " * 100)
+        db.search("alpha", "s", 5)
+        for key in db.r.scan_iter(count=100):
+            if key == b"__n3mc_test_db__":
+                continue
+            assert db.r.ttl(key) > 0, key
 
 
-class TestRepairAndRecall:
-    def test_repair_reembeds(self, db, rconn):
-        r = db.save_memory("no vector yet", embed=False)
-        assert not rconn.hexists("mem:" + r["id"], "embedding")
-        out = db.repair()
-        assert out["reembedded"] == 1 and out["remaining"] == 0
-        assert rconn.hexists("mem:" + r["id"], "embedding")
+class TestFTS:
+    def test_bm25_hit(self, db):
+        db.save_memory("kubernetes deployment rollout notes")
+        rows = db._bm25_search("kubernetes", 10, "")
+        assert rows and rows[0]["bm25"] > 0
 
-    def test_recall_orphan_chunks(self, db, rconn, runner):
-        r = db.save_memory("孤立。" * 300, turn_id="T1")
-        out = runner.call("recall_thread", {"turn_id": "T1"}, nudge=False)
-        assert out.count("▶ ") == 1 and "[doc×" in out
-        rconn.delete("doc:" + r["parent_id"])
-        out = runner.call("recall_thread", {"turn_id": "T1"}, nudge=False)
-        assert out.count("▶ ") == r["chunks"]
+    def test_cjk_bigram_hit(self, db):
+        db.save_memory("記憶装置の設計メモ")
+        assert db._bm25_search("記憶装置", 10, "")
 
-    def test_list_paging_after_long_doc(self, db, runner, cfg):
-        db.save_memory("single before")
-        db.save_memory("長い。" * 3000)
-        out = runner.call("list_memories", {"limit": 20}, nudge=False)
-        assert "single before" in out and "[doc×" in out
+    def test_punctuation_query_does_not_raise(self, db):
+        db.save_memory("plain text")
+        for q in ["!!!", "\x00\x01", "「」？", "()[]{}", "_"]:
+            db._bm25_search(q, 10, "")
+
+    def test_or_semantics(self, db):
+        db.save_memory("the quick fox runs")
+        assert db._bm25_search("quick fox elephant", 10, "")
+
+
+class TestVectorSearch:
+    def test_knn(self, db, fake_embed):
+        db.save_memory("vector search sample sentence")
+        rows = db._vector_search(fake_embed("vector search sample sentence", db.cfg), 10, "")
+        assert rows and rows[0]["cos"] > 0.99
+
+    def test_empty_db(self, db, fake_embed):
+        assert db._vector_search(fake_embed("x", db.cfg), 10, "") == []
+
+    def test_owner_filter_in_python(self, db, fake_embed):
+        db.save_memory("owner filter")
+        other = dict(db.cfg, owner_id="someone-else")
+        d2 = database.Database(other)
+        d2.ensure_connected()
+        assert d2._vector_search(fake_embed("owner filter", other), 10, "") == []
+
+
+class TestAccessCount:
+    def test_incremented_for_top_hits(self, db):
+        res = db.save_memory("access counted memory entry")
+        db.search("access counted memory entry", "s", 5)
+        assert int(hget(db.r, MEM + res["id"], "access_count")) == 1
+
+    def test_not_created_for_missing_key(self, db):
+        db._scripts["incr"](keys=[MEM + "ghost"], args=["access_count", 1])
+        assert not db.r.exists(MEM + "ghost")
+
+
+class TestSerialization:
+    def test_vector_round_trip(self):
+        v = [0.5, -1.25, 3.0]
+        assert processor.unpack_vector(processor.pack_vector(v)) == v
+        assert len(processor.pack_vector([0.0] * 768)) == 768 * 4
+
+
+class TestSha1:
+    def test_guard_keys(self):
+        assert guard_key_for(MEM, "abc", "") == MEM_SHA + processor.sha1_hex("abc")
+        assert guard_key_for(MEM, "[user] abc", "t1") == MEM_SHA + "t1:" + processor.sha1_hex("[user] abc")
+        assert guard_key_for(DOC, "[claude] abc", "t1") == DOC_SHA + "t1:" + processor.sha1_hex("[claude] abc")
+        assert guard_key_for(MEM, "plain", "t1") == MEM_SHA + processor.sha1_hex("plain")

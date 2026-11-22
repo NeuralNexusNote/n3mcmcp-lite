@@ -1,4 +1,5 @@
-"""UserPromptSubmit hook entry (spec §12.1): audit.log first, then `cli --hook-submit`. Always exits 0."""
+"""UserPromptSubmit hook entry (`n3mc-lite-hook`): audit.log first, then `cli --hook-submit` (spec section 12.1)."""
+
 import os as _os
 import sys as _sys
 
@@ -22,69 +23,72 @@ for _stream_name in ("stdin", "stdout", "stderr"):
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
-import json  # noqa: E402
-import os  # noqa: E402
-import subprocess  # noqa: E402
-import time  # noqa: E402
+import json
+import re
+import subprocess
+import time
+from datetime import datetime, timezone
 
-from n3mc_mcp import paths  # noqa: E402
+from n3mc_mcp import paths
 
-HOOK_NAME = "UserPromptSubmit"
-STEPS = (["--hook-submit"],)
-CHILD_TIMEOUT = 55  # for all steps together: --init registers the hook with a 60-second timeout
-
-
-from .paths import python_cmd  # noqa: E402
+CHILD_TIMEOUT = 55          # seconds one hook entry shares between its child steps
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
-def run(hook_name, steps) -> int:
+def audit(hook, raw, payload):
+    """Append the audit record before anything else. Never raises, never stops the hook."""
     try:
-        raw = sys.stdin.buffer.read()
+        paths.ensure_data_dir()
+        record = {"ts": datetime.now(timezone.utc).isoformat(), "hook": hook, "raw": raw[:4096],
+                  "payload": payload if payload is not None else {"raw": raw}}
+        line = _LONE_SURROGATE_RE.sub("", json.dumps(record, ensure_ascii=False))
+        with open(paths.audit_log_path(), "a", encoding="utf-8", newline="\n") as f:
+            f.write(line + "\n")
+    except Exception as exc:  # noqa: BLE001
+        print("N3MC Lite hook: could not write audit.log (%s)" % exc, file=sys.stderr)
+
+
+def parse(raw):
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def run_cli(args, data, started):
+    """Run `python -m n3mc_mcp.cli <args>` synchronously with the remaining time; returns stdout bytes."""
+    remaining = max(1.0, CHILD_TIMEOUT - (time.monotonic() - started))
+    try:
+        proc = subprocess.run([*paths.python_cmd(), "-m", "n3mc_mcp.cli", *args], input=data,
+                              stdout=subprocess.PIPE, timeout=remaining)
+        return proc.stdout or b""
+    except subprocess.TimeoutExpired as exc:
+        print("N3MC Lite hook: %s timed out" % " ".join(args), file=sys.stderr)
+        return exc.stdout or b""
+    except Exception as exc:  # noqa: BLE001
+        print("N3MC Lite hook: %s failed (%s: %s)" % (" ".join(args), type(exc).__name__, exc), file=sys.stderr)
+        return b""
+
+
+def main(argv=None):
+    started = time.monotonic()
+    argv = sys.argv[1:] if argv is None else argv
+    extra = ["--uvx"] if "--uvx" in argv else []
+    try:
+        data = sys.stdin.buffer.read()
     except Exception:  # noqa: BLE001
-        raw = b""
+        data = b""
+    raw = data.decode("utf-8", errors="surrogateescape")
+    audit("UserPromptSubmit", raw, parse(raw))
+    out = run_cli(["--hook-submit", *extra], data, started)
     try:
-        payload = json.loads(raw.decode("utf-8", "replace"))
-    except Exception:  # noqa: BLE001
-        payload = None
-    try:
-        rawtext = raw.decode("utf-8", "replace")
-        paths.append_audit({"ts": paths.utc_now_iso(), "hook": hook_name, "raw": rawtext[:4096],
-                            "payload": payload if payload is not None else {"raw": rawtext}})
-    except Exception as e:  # noqa: BLE001
-        print(f"N3MC Lite: audit failed: {e}", file=sys.stderr)
-    uvx = ["--uvx"] if "--uvx" in sys.argv[1:] else []
-    kw = {}
-    if os.name == "nt":
-        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-    deadline = time.monotonic() + CHILD_TIMEOUT
-    for step in steps:
-        left = max(1.0, deadline - time.monotonic())  # the steps share CHILD_TIMEOUT (L7)
-        try:
-            r = subprocess.run([*python_cmd(), "-m", "n3mc_mcp.cli"] + step + uvx, input=raw,
-                               stdout=subprocess.PIPE, timeout=left, **kw)
-            if r.stdout:
-                sys.stdout.buffer.write(r.stdout)
-                sys.stdout.buffer.flush()
-            if r.returncode != 0:
-                print(f"N3MC Lite: {' '.join(step)} exited with {r.returncode}", file=sys.stderr)
-        except subprocess.TimeoutExpired as e:
-            if e.stdout:   # keep what was already printed (e.g. the search block) for Claude
-                sys.stdout.buffer.write(e.stdout)
-                sys.stdout.buffer.flush()
-            print(f"N3MC Lite: {' '.join(step)} timed out after {left:.0f} s", file=sys.stderr)
-        except Exception as e:  # noqa: BLE001
-            print(f"N3MC Lite: {' '.join(step)} failed: {type(e).__name__}: {e}", file=sys.stderr)
-    return 0
-
-
-def main() -> int:
-    try:
-        run(HOOK_NAME, STEPS)
-    except Exception as e:  # noqa: BLE001
-        print(f"N3MC Lite: hook failed: {e}", file=sys.stderr)
+        sys.stdout.buffer.write(out)
+        sys.stdout.buffer.flush()
+    except Exception as exc:  # noqa: BLE001
+        print("N3MC Lite hook: could not write stdout (%s)" % exc, file=sys.stderr)
     return 0
 
 
