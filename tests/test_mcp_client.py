@@ -226,10 +226,35 @@ class TestThinNoModel:
             "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
         note = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         lst = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
-        msg = "\n".join(json.dumps(x) for x in (init, note, lst)) + "\n"
-        r = subprocess.run([sys.executable, "-m", "n3mc_mcp"], input=msg, capture_output=True, text=True,
-                           encoding="utf-8", env=env, cwd=str(tmp_path), timeout=60)
-        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        # Send one request, wait for its answer, then the next one. Piping everything at once and closing stdin
+        # makes the server exit at EOF before it answers the last request (the test was racy).
+        proc = subprocess.Popen([sys.executable, "-m", "n3mc_mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=env, cwd=str(tmp_path))
+        lines = []
+        try:
+            def send(obj):
+                proc.stdin.write((json.dumps(obj) + "\n").encode("utf-8"))
+                proc.stdin.flush()
+
+            def read_line():
+                line = proc.stdout.readline().decode("utf-8")
+                assert line.strip(), "the MCP entry closed its stdout"
+                lines.append(line)
+
+            send(init)
+            read_line()
+            send(note)
+            send(lst)
+            read_line()
+        finally:
+            proc.stdin.close()
+            try:
+                lines += [l for l in proc.stdout.read().decode("utf-8").splitlines() if l.strip()]
+            finally:
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         assert len(lines) == 2
         replies = [json.loads(l) for l in lines]
         assert replies[0]["result"]["serverInfo"] == {"name": "n3mc-workingmemory", "version": "2.0.0"} or \
