@@ -480,7 +480,6 @@ ID にかかわるのは `config.json`（`owner_id` / `local_id`）だけです�
   "access_count_enabled":     false,
   "access_count_weight":      0.02,
   "access_count_max_boost":   0.5,
-  "ttl_refresh_on_search":    true,
   "ttl_refresh_top_k":        5,
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
@@ -500,11 +499,11 @@ ID にかかわるのは `config.json`（`owner_id` / `local_id`）だけです�
 - `ttl_seconds` — 新しい記憶とその重複防止の印に付ける TTL（既定 7 日）。
 - `vector_min_cos` — ベクトルの候補になるための、問い合わせとの近さ（コサイン）。既定は `0.85` です。目安は 0.80–0.88 です。下げると、より多く拾い、関係の薄い行も増えます。上げると、結果が短くなります。0.85 は `multilingual-e5-base` で測った値です。`embedding_model` を変えたら、測り直してください。
 - `relative_min_score_ratio` — 最高点に対してこの比より低い結果を外します（既定 `0.6`。`0.0` で無効）。
-- `min_results` — しきいを通った結果がこれより少ないときは、外した行のうち近いものを、別の見出し `#### Possibly related (weak matches — may be unrelated)` の下に足します（既定 `3`。`0` で無効）。弱い一致の行は、TTL を戻しません。
+- `min_results` — しきいを通った結果がこれより少ないときは、外した行のうち近いものを、別の見出し `#### Possibly related (weak matches — may be unrelated)` の下に足します（既定 `3`。`0` で無効）。弱い一致の行は、`access_count` に数えません。
 - `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 中身が 0.98 以上似ている結果は、同じものの版として扱い、新しい順に並べます。各ヒットには `saved=` の時刻が付きます。
 - `chunk_threshold` / `chunk_overlap` — 区切りの大きさと重なり（文字数）。これより長い本文は、親文書とチャンクで保存します。ヒットすると全文が返ります。
 - `access_count_*` — よく使われる記憶の加点。**2026-11-17 から既定は無効**です（`access_count_enabled: false`）。ヒットの回数は数えます。
-- `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索のたびに、上位 K 件の TTL を戻します（戻すだけで、新しく保存したとき以上には延ばしません）。
+- `ttl_refresh_top_k` — 検索のたびに `access_count` を増やす、上位の件数です。名前は以前の版のままですが、検索で TTL は戻しません。（`ttl_refresh_on_search` は 2026-11-22 になくしました。`config.json` に残っていても使いません。）
 - `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — 合算の後の、軽い語彙での並べ替え（CPU だけ）。
 - `b_session_match` / `b_session_mismatch` — 保存された `session_id` が合う行（既定 `1.0`）と合わない行（`0.6`）に掛ける値。両方を `1.0` にすると、補正はなくなります。
 - `skip_code_blocks` — `true` にすると、3 つのバッククォートの囲みを含む内容を保存しません（`status: "skipped_code"`）。フックの保存にも効きます。既定の `false` では、コードブロックを `[code omitted]` に置き換えて保存します。
@@ -576,7 +575,7 @@ Lite には、専用のデータフォルダ（`~/.n3mc-workingmemory`）、デ�
 
 ## 制限
 
-- **7 日。** 各エントリは、保存から 7 日で消えます（検索の普通のヒットになると、7 日が戻ります）。`audit.log` は例外で、TTL がありません。
+- **7 日。** 各エントリは、保存から 7 日で消えます。検索しても延びません。`audit.log` は例外で、TTL がありません。
 - **フックのないアプリでは、保存はモデル次第です**（下を見てください）。会話の全部が残るのは Claude Code だけです。
 - **常駐サーバーが動ける必要があります。** 起動できないときは、検索はエラーか代わりの文を返します。保存は、ベクトルなしで Redis に入ります（キーワードではすぐ見つかり、ベクトルはあとで修復が足します）。
 - **すべてのクライアントで 1 つのインストール。** フック・CLI・MCP の入口は、同じ版を動かす必要があります。違うと、呼び出しのたびに、互いのサーバーを置き換えてしまいます。デスクトップアプリは、フックと同じ scripts フォルダか、同じ版に固定した `uvx` の形で登録します。

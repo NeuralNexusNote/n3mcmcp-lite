@@ -46,7 +46,7 @@
 
 **揮発性の契約：**
 - Redis への全書き込みで `ttl_seconds`（既定 604 800 = 7 日）の TTL を設定する。
-- 主レコード（`mem:<uuid>`）と完全一致ガードキー（`mem:sha:<sha1>`）は同じ TTL を共有し、同時に失効する — 検索ヒットでレコードの TTL が更新された後も同じ（ガードも一緒に更新する、v1.7.1）。
+- 主レコード（`mem:<uuid>`）と完全一致ガードキー（`mem:sha:<sha1>`）は同じ TTL を共有し、保存から 7 日で同時に失効する。検索は TTL を変えない（2026-11-22 決定、§3.3）。
 - TTL のないキーを作る書き込みは 1 つもない。すでにあるレコードへの書き込み（`access_count`、再埋め込みしたベクトル、ガードの設定し直し）は、レコードがまだあるときだけ行い、確かめることと書くことを 1 つのアトミックな手順で行う（v1.7.3、§3.3）。
 - 失効は Redis に委任 — バックグラウンド掃除ジョブは動かない。
 - Redis コンテナをボリュームごと削除すれば全メモリが即座に消える。
@@ -342,7 +342,7 @@ n3memorycore-mcp-lite/
 > | 24 | 起動時の `FT.CREATE` の失敗を送り出す | RediSearch のない素の Redis（または起動中の接続断）でプロセスが終わる。クライアントには落ちたサーバーしか見えない | 索引なしで動き続け、呼び出しごとに再試行し、「Redis Stack が必要」というエラーを返す | [§3.9](#39-起動シーケンスと自己回復) |
 > | 25 | どの Redis でも永続化を無効にする | `localhost:6379` で動いている他人の Redis が、黙って RDB/AOF を失い、次の再起動でデータを失う | 接続した DB が空か N3MC のキーだけで、**サーバーのほかの DB にキーがない**ときに限る（v1.8.1）。それ以外は `shared_redis` 通知 | [§3.4](#34-揮発性の厳守変更最適化禁止) |
 > | 26 | ツール呼び出しがモデルのロックを無制限に待つ | 初回のダウンロード中（数分）はツール呼び出しがすべて止まり、クライアントのツールタイムアウトに達しうる | 待つのは最大 20 秒。そのあとは通知付きでキーワードだけで続ける | [§3.9](#39-起動シーケンスと自己回復) |
-> | 27 | TTL の更新が重複ガードを飛ばす／BM25 の語を AND でつなぐ／読めない `since` を無視する | よく使う記録が 7 日後に 2 回保存されうる／文のようなクエリでキーワードがヒットしない／`since="yesterday"` で全件を検索する | ガードもレコードと一緒に更新する。語は OR でつなぐ。読めない時刻の範囲は拒否する | [§3.3](#33-redis-接続と-ttl)、[§3.7](#37-トークナイズと句読点処理)、[§4.3.1](#431-取り出し拡張ツールretrieval-extensions) |
+> | 27 | TTL の更新が重複ガードを飛ばす／BM25 の語を AND でつなぐ／読めない `since` を無視する | よく使う記録が 7 日後に 2 回保存されうる／文のようなクエリでキーワードがヒットしない／`since="yesterday"` で全件を検索する | ガードもレコードと一緒に更新する（2026-11-22 に廃止：検索は TTL を変えない、§3.3）。語は OR でつなぐ。読めない時刻の範囲は拒否する | [§3.3](#33-redis-接続と-ttl)、[§3.7](#37-トークナイズと句読点処理)、[§4.3.1](#431-取り出し拡張ツールretrieval-extensions) |
 > | 28 | 「キーがあるか」の確認と書き込みを別々のコマンドで送る | 確認と書き込みの間に削除（別のプロセスの `delete_memory`）または失効したレコードが、`access_count` か `embedding` だけを持つハッシュとして **TTL なしで**作り直される — 失効せず、どの削除でも消えない。レコードの削除後にガードを設定し直すと、同じ内容を 7 日間保存できなくなる | 確認と書き込みを **1 つの Lua スクリプト**で行う（`EXISTS` のあとに `HINCRBY` / `HSET` / `SET … EX`） | [§3.3](#33-redis-接続と-ttl) |
 > | 29 | （v2.0.0）MCP の入口がモデルを import する、または stdout に出力する | アプリごとに約 440 MB をまた読み込む。紛れ込んだ `print()` が JSON-RPC の流れを壊す | 薄いクライアントは `sentence_transformers` も `torch` も import しない。stdout には MCP のメッセージ以外を出さない | [§4.6](#46-mcp-の薄いクライアントv200) |
 > | 30 | （v2.0.0）`127.0.0.1` に `urllib.request.urlopen` を使う | `HTTP_PROXY` が設定されている（会社の PC）と、すべてのリクエストがプロキシに行く。サーバーが止まっているように見え、フックはすべて待たされる | リクエストは `build_opener(ProxyHandler({}))` で開く | [§3.15](#315-常駐サーバーv200) |
@@ -388,11 +388,11 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 
 **アトミック性とガード（2026-11-20 の 2 回目のレビュー）**：ガードとレコードは **1 つの Lua スクリプト** `SAVE_WITH_GUARD`（§3.8）で書く。スクリプトは `SET <guard> <id> NX EX <ttl>` を実行し、それが成功したときだけ、すべてのレコード（単独のレコード、または親ドキュメントと**すべての**チャンク）に `HSET` + `EXPIRE` を行う。ここまでが 1 つのアトミックな手順である。同じ内容を同時に 2 回保存したときにどちらが勝つかは今までどおり `SET NX` が決め、「レコードはあるが TTL なし」は起きず、**「ガードはあるがレコードなし」も起きない**。この決まりの前は、先にガードを単独の `SET NX` で取り、レコードはそのあと `MULTI`/`EXEC` のパイプラインで書いていた。失敗の処理はガードを削除し直していたが、その間にプロセスが終わると（サーバーが止まった、PC を切った）ガードだけが残り、同じ文をもう一度保存しても、何も保存されていないのに最大 `ttl_seconds` のあいだ `duplicate` と答えられた。（2026-11-18 の最終レビュー（L-04）の前は、この段落は誤って「ガードもレコードのパイプラインで送る」と書いていた。）
 
-**ガードはレコードの TTL に従う（v1.7.1）**：検索ヒットでレコードの TTL を設定し直すとき（§3.11／§3.14 手順 7）、そのレコードの重複ガードも一緒に設定し直す — 単独レコードなら `SET mem:sha:<sha1> <id> EX <ttl_seconds>`、親ドキュメントなら `SET docsha:<sha1> <parent_id> EX <ttl_seconds>`。ただし**レコードがまだあるときだけ**で、下の条件付きスクリプト `SET_GUARD_IF_EXISTS` を使う（v1.7.3）。`<sha1>` は保存済みの本文から、`save_memory` と同じ関数（NFKC 正規化したテキストの SHA-1）で計算し直すので、以前のバージョンで保存したレコードにもフィールドの追加は要らない。チャンクには自分のガードがなく、親のガードは親と一緒に設定し直される。
+**検索は TTL を設定し直さない（2026-11-22 決定）**：すべてのレコード、チャンク、親ドキュメント、ガードは、それを書いた保存から `ttl_seconds`（7 日）で消える。検索、想起、一覧、そのほかの読み出しは、どの TTL も変えない。この決定の前は、検索ヒットで、普通の行の上位 `ttl_refresh_top_k` 件の TTL を、その親ドキュメント、兄弟チャンク、ガードと一緒に設定し直していた（v1.7.1）。そのため、検索に出続ける記録は、INSTRUCTIONS（§5 (1)）、ツールの説明（§5 (3)）、ルールファイル（§12.9）、README が利用者に伝える「保存から 7 日で消える」より長く残った。この約束が仕様であり、設定し直しを取り除いた。`ttl_refresh_on_search` はもう設定の項目ではない（今ある `config.json` に残った値は無視する、§6）。レコードとそのガードは、1 つのスクリプト（`SAVE_WITH_GUARD`、§3.8）が同じ TTL で書き、どちらも設定し直さないので、ガードを設定し直さなくても同時に失効する。
 
-> **⚠️ 理由（v1.7.1、Lite レビュー LM7）**：v1.7.0 は `mem:<id>` / `doc:<id>` しか設定し直さなかった。検索に出続ける記録は生き続けるが、そのガードは保存から 7 日で失効し、その後は同じ内容をもう一度保存できて、記録が 2 つになった — 「レコードとガードは同時に失効する」に反する。
+> **⚠️ 経緯（v1.7.1、Lite レビュー LM7）**：v1.7.0 は、検索ヒットで `mem:<id>` / `doc:<id>` しか設定し直さなかった。検索に出続ける記録は生き続けるが、そのガードは保存から 7 日で失効し、その後は同じ内容をもう一度保存できて、記録が 2 つになった。v1.7.1 はガードもレコードと一緒に設定し直した。2026-11-22 の決定で両方の設定し直しを取り除いた（上記）。これで、設定し直しなしに「レコードとガードは同時に失効する」が成り立つ。
 
-**すでにあるレコードへの条件付きの書き込み（v1.7.3）**：`HINCRBY`・`HSET`・`SET` は、キーがなければ作ってしまう。そのため、`save_memory` 自身が行わない書き込み — `access_count` の加算（§3.14 手順 7）、上のガードの設定し直し、`repair_memory` が再埋め込みしたベクトル（§3.10）— は、すべて**レコードの確認と書き込みを同じアトミックな手順で行う Lua スクリプト 1 つ**で実行する。スクリプトは次のとおり（`KEYS` / `ARGV` は `EVAL` と同じ）：
+**すでにあるレコードへの条件付きの書き込み（v1.7.3）**：`HINCRBY`・`HSET` は、キーがなければ作ってしまう。そのため、`save_memory` 自身が行わない書き込み — `access_count` の加算（§3.14 手順 7）と、`repair_memory` が再埋め込みしたベクトル（§3.10）— は、すべて**レコードの確認と書き込みを同じアトミックな手順で行う Lua スクリプト 1 つ**で実行する。スクリプトは次のとおり（`KEYS` / `ARGV` は `EVAL` と同じ）：
 
 ```lua
 -- INCR_IF_EXISTS   KEYS[1] = mem:<id>        ARGV[1] = field, ARGV[2] = increment
@@ -404,15 +404,6 @@ return false
 -- HSET_IF_EXISTS   KEYS[1] = mem:<id>        ARGV[1] = field, ARGV[2] = value
 if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-  return 1
-end
-return 0
-
--- SET_GUARD_IF_EXISTS   KEYS[1] = record key (mem:<id> or doc:<parent_id>)
---                       KEYS[2] = guard key  (mem:sha:<sha1> or docsha:<sha1>)
---                       ARGV[1] = record id, ARGV[2] = ttl_seconds
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
   return 1
 end
 return 0
@@ -431,7 +422,7 @@ return 0
 **以下は絶対に禁止（「性能」や「永続化」目的であっても）：**
 - `EXPIRE` なしの書き込み（＝無限 TTL）。
 - Lite メモリ寿命の延長のみを目的として、コンテナ削除後も生き残る Redis RDB / AOF 永続化設定を有効にすること。（ユーザーが自分の都合で Redis 設定を選ぶのは自由だが、仕様上はそれに依存しない。）
-- 読み込み時の無条件 TTL 再延長（`search_memory` 時の `TOUCH` や `EXPIRE`）。ただし設定 `ttl_refresh_on_search`（§6、既定 `true`）による上位 K 件への TTL 再設定は**設計上の例外**であり禁止対象外。同設定は `ttl_seconds` を上限として TTL を再起動するのみで、設定値を超えた延長は行わない。**弱い候補（§3.14 手順 6、v1.7.2）は TTL を再設定しない**：関連度の下限を通っていないので、表示されたことで延命させてはならない。
+- 読み込み時の TTL の延長（`search_memory`・`recall_thread`・`list_memories`・フックの検索での `TOUCH`・`EXPIRE`、そのほかの TTL の設定し直し）。**例外はない（2026-11-22 決定）**：それまでは `ttl_refresh_on_search`（既定 `true`）が検索の上位 K 件の TTL を設定し直していたが、取り除いた（§3.3）。すべての記録は、保存から 7 日で消える。
 - 1 保存呼び出しを超える範囲でのライトバッファリング / 遅延パイプライン。
 
 **理由**：Lite の差別化は明示的な揮発性である。回避するとプロダクト区分が崩れる。
@@ -483,7 +474,7 @@ doc:<uuid>                  HASH（親ドキュメント — 長文 verbatim 保
     session_id      string
     turn_id         string      save_memory の turn_id（ないときは空文字列）
     chunk_count     number      生成されたチャンク数
-    chunk_ids       string      子チャンク id の空白区切りリスト（兄弟チャンク TTL 同時延長用）
+    chunk_ids       string      子チャンク id の空白区切りリスト（連鎖削除用、§3.5）
     TTL                         ttl_seconds
 
 docsha:<sha1>               STRING
@@ -529,9 +520,9 @@ access_boost = min(access_count_max_boost, access_count × access_count_weight)
 ```
 
 - `stored_importance`：`save_memory` 時に指定（既定 `1.0`、範囲 `0.5〜2.0`）。
-- `access_boost`：**CPU のみで自動算出される頻度ブースト**。`search_memory` がその記憶を上位 `ttl_refresh_top_k` 件に含めるたび（弱い候補は除く、§3.14 手順 6）`access_count` が +1 され、次回以降の検索で `access_count × access_count_weight`（既定 `0.02`）だけ `b_local` を押し上げる（上限 `access_count_max_boost = 0.5`）。LLM の介在なく「よく使われる記憶ほど上位に来る」自己調整ループが成立する。
+- `access_boost`：**CPU のみで自動算出される頻度ブースト**。`search_memory` がその記憶を普通の行の上位 `ttl_refresh_top_k` 件に含めるたび（弱い候補は除く、§3.14 手順 6。設定の名前は以前のままだが、TTL は設定し直さない、§3.3）`access_count` が +1 され、次回以降の検索で `access_count × access_count_weight`（既定 `0.02`）だけ `b_local` を押し上げる（上限 `access_count_max_boost = 0.5`）。LLM の介在なく「よく使われる記憶ほど上位に来る」自己調整ループが成立する。
 
-**2026-11-17 から、ブーストは既定で無効**（`access_count_enabled: false`。`stored_importance` のみで重み付け）。`true` にすれば有効になる。`access_count` は TTL の再設定と一緒にこれまでどおり増えるので、あとで有効にしても、それまで数えた回数から始まる。
+**2026-11-17 から、ブーストは既定で無効**（`access_count_enabled: false`。`stored_importance` のみで重み付け）。`true` にすれば有効になる。`access_count` は検索のたびにこれまでどおり増える（§3.14 手順 7）ので、あとで有効にしても、それまで数えた回数から始まる。
 
 > **⚠️ 既定で無効にした理由（2026-11-17）**: N3MC-Pro（2026-11-16、ラベル付きの質問 138 問。ここと同じく検索のたびに数える）で、参照回数の加点を戻すと recall@3 が 0.051 下がった（95% 区間 −0.101〜+0.000）。悪くなった質問が 20、良くなった質問が 8。よく返った記録が、関係の薄い質問でも、より関係の深い記録の上に来ていた。Lite のデータでは測っていない。今ある `config.json` は、その値のまま残る。新しい既定にそろえるには `"access_count_enabled": false` にする。
 
@@ -574,7 +565,7 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
 既定 `half_life_days = 3` — 7 日の TTL より意図的に短く設定しており、Lite でも `time_decay` が実際に効く。新鮮なエントリは 1.0、3 日経過で 0.5、7 日経過（失効直前）で ≈ 0.20 となり、直近の文脈がランキング上位に押し出される。これは Lite 固有のチューニングで、永続化を前提とする **Pro 版** は 90 日の半減期を維持する。
 
-**軽量語彙リランク**（融合後・TTL リフレッシュ前）：
+**軽量語彙リランク**（融合後・`access_count` の加算の前）：
 
 上記ハイブリッドスコア計算後、CPU のみの任意リランクパスで各候補のスコアに以下を加算する：
 
@@ -775,7 +766,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
   - 同じ `parent_id` が既出 → 重複として破棄（最高スコアのヒットのみ残す）
   - 初出 → `doc:<parent_id>` を HGET し、`content` を親の全文に置換、ID も親 ID に差し替える。
 - 後続の語彙リランク（トークン coverage + フレーズボーナス）はこの時点で**親の全文 verbatim** を対象に動作する。これにより、クエリ句がヒットチャンクではなく同一文書の別チャンクに現れる場合でも親ドキュメントのランクが正しくブーストされる。
-- `ttl_refresh_on_search` が有効なとき、TTL リフレッシュはリランク**後の**上位 K 件に適用される（弱い候補は飛ばす。TTL も `access_count` も変えない、§3.14 手順 6）：各ヒットの `mem:<chunk_id>`（または独立 `mem:<id>`）キーの `access_count` が +1 され、親ドキュメントに解決されたヒットでは `doc:<parent_id>` の TTL と、**`chunk_ids` に列挙された全兄弟チャンク `mem:<chunk_id>` の TTL を一括で同時リフレッシュする**（最高スコアの 1 チャンクだけでなく、その文書を構成する全チャンクが揃って延命する）。これにより、ある兄弟チャンク固有の語句で後続検索した場合の検索性が窓全体で保たれる（最高スコアチャンクのみを延長すると、他チャンクが窓途中で失効して検索ヒット経路が痩せる問題を解消）。`access_count` のインクリメントは実際にヒットしたチャンクにのみ適用し、サイレントに延命される兄弟チャンクには加算しない。`chunk_ids` フィールドを持たない旧 doc（アップグレード前に保存）は最高スコアチャンク 1 個＋親のみの延長に graceful にフォールバックする。
+- リランクの**後**、普通の行の上位 `ttl_refresh_top_k` 件（弱い候補は飛ばす、§3.14 手順 6）について、ヒットした `mem:<chunk_id>`（または独立 `mem:<id>`）キーの `access_count` を +1 する。加算は実際にヒットしたチャンクにだけ行い、兄弟チャンクには行わない。**TTL は設定し直さない** — チャンクのも、親ドキュメントのも、兄弟チャンクのも（2026-11-22 決定、§3.3）。親とすべてのチャンクは 1 つのスクリプトが同じ TTL で書くので、保存から 7 日で一緒に失効する。
 - 最終出力は markdown 先頭に `[doc×N]`（N=`chunk_count`）タグ付きで表示される。
 
 `list_memories` 側の整合：
@@ -793,7 +784,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 **設計上の不変条件**：
 - 親レコードは検索インデックスに含めない（`PREFIX 1 mem:` の外に置く）。これによりランキング式は常にチャンク本文に対して計算され、親の長大な本文が time_decay / BM25 を歪めない。
 - `stored_importance` / `access_count` はチャンクにのみ付く。親ドキュメントは「verbatim の箱」であり、ランキング要素を持たない。
-- 親が生存している限り、チャンクが 1 個でもヒットすれば全文が返る。`ttl_refresh_on_search` が有効（既定 `true`）な場合、チャンクがヒットして `doc:` キーを取得するたびに、親の TTL と `chunk_ids` に列挙された全兄弟チャンクの TTL が同時にリフレッシュされるため、通常の利用では親も子チャンク群も揃って延命し、文書を構成するどのチャンクも窓途中で失効しない。万一 `ttl_refresh_on_search: false` 設定または初回 7 日経過後など親の TTL が切れた場合、孤児チャンクは個別メモリとして（短文ヒットの形で）表示される（退行ではなく graceful degrade）。
+- 親が生存している限り、チャンクが 1 個でもヒットすれば全文が返る。親とすべてのチャンクは 1 つの `SAVE_WITH_GUARD` スクリプトが同じ TTL で書き、設定し直さない（§3.3）ので、一緒に失効する。万一、親がチャンクより先になくなった場合（Redis で手で消したときなど）、孤児チャンクは個別メモリとして（短文ヒットの形で）表示される（退行ではなく graceful degrade）。
 
 **用途**：ユーザーが「この設定資料 / 仕様書 / 記事をあとで verbatim に取り出したい」と要求する場面。要点抽出との使い分けは [§1 の「長文貼り付けの扱い（2 モード）」](#1-ビジョン) を参照。
 
@@ -819,7 +810,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 > **⚠️ 実装注意（`doc.id` はフル Redis キーを返す — 二重プレフィックスバグ多発）**：RESP2（`protocol=2`）では `FT.SEARCH` 結果の **`doc.id` は常にフル Redis キー（`"mem:<uuid>"`）** を返す（HASH の `id` フィールド値である裸 UUID ではない）。`RETURN_FIELDS` に `id` を含めても同様。これを知らずに `MEM_PREFIX + doc.id` とすると **`"mem:mem:<uuid>"` という二重プレフィックスのゴーストキー**が生まれ、`EXPIRE`/`HINCRBY` がそこへ作用して **TTL なしの孤立キー**を作る（§3.4 の「全書き込みに TTL」契約を破る）。
 >
 > 対処：`_doc_bare_id(doc)` ヘルパーで先頭の `mem:` を 1 回だけ剥がして**裸 UUID に統一**し、行 dict の `id` には裸 UUID を格納する。`MEM_PREFIX` を付ける操作（`EXPIRE`・`HINCRBY`・`DELETE`）は常にこの裸 UUID から組み立てる。**影響範囲は広い**ので全 FT.SEARCH 消費箇所を点検すること：
-> - `hybrid_search` の **TTL リフレッシュ**（親解決後は `row["id"]` が裸の親 UUID、元チャンク UUID は別フィールドに退避してから `mem:` を付与。`chunk_ids` による兄弟チャンク一括リフレッシュ（§3.11）も同じ裸 UUID 規則で組み立てる）
+> - `hybrid_search` の **`access_count` の加算**（親解決後は `row["id"]` が裸の親 UUID、元チャンク UUID は別フィールドに退避してから `mem:` を付与し、加算はそのチャンクに行う）
 > - `delete_by_session` の **単一メモリ削除**（`MEM_PREFIX + bare_id`）
 > - `list_memories` の **表示 ID**（ユーザー向け ID を裸 UUID で統一）
 > - `delete_memory` のカスケード（`@parent_id` SCAN フォールバックでも同様に裸 UUID 化）
@@ -982,10 +973,10 @@ v1.6.x は KNN の候補をすべて順位付けしていた。`multilingual-e5`
    - **`filter_score` の高い順**に取る（同じ値なら `(timestamp_epoch, id)` の新しいほうが先）。`score` は `score=` に表示するが、弱い候補の並び順には使わない。
    - **親ドキュメントごとに 1 行**。すでに結果にある行と合わせて数える：解決先の親ドキュメントがすでに結果にある（または弱い候補としてすでに足した）候補や、同じ独立 `id` の候補は飛ばして次を見る。
    - 合計が `min(min_results, limit)` に達するか、候補がなくなったら止める。足した行にはすべて `_weak` の印を付ける。弱い候補は常に普通の行のすべてより後に来る。
-   - **弱い候補は TTL を再設定しない**（手順 7）：`mem:` / `doc:` / ガードのキーに `EXPIRE` をかけず、`access_count` も増やさない。§3.4 は読んだだけで寿命を延ばすことを禁じている。件数を埋めるために見せた関係の薄い記録を、それで延命させてはならない。
+   - **弱い候補は数えない**（手順 7）：`access_count` を増やさない。（検索は、どの行の TTL も変えない、§3.3／§3.4。）
    - `min_results: 0` ではこの手順を行わない。**空のクエリ、または空白だけのクエリでも行わない**（弱い候補は足さない）：空のクエリでもベクトル検索は空文字列を埋め込んで行を返すので、中身のないクエリに補充しても雑音が増えるだけである。
    - 弱い候補は手順 4 と 5 に関わらない（版の並べ替えで動かさず、相対カットの 1 位の値にも数えない）。
-7. 上位 `ttl_refresh_top_k` 件の**普通の行**の **TTL 更新 / access_count**（§3.11。`_weak` の行は飛ばす）を行い、`limit` 件に切り詰める。**`access_count` はまだ存在するキーでだけ増やす（v1.7.1、Lite レビュー LL4）**：先に `EXPIRE` を実行し（パイプライン 1）、`EXPIRE` が 1 を返したキーでだけ、§3.3 の条件付きスクリプトを実行する（パイプライン 2、v1.7.3）：当たった行の `access_count` には `INCR_IF_EXISTS`、ガードには `SET_GUARD_IF_EXISTS`（レコードのキーは、単独レコードなら `mem:<id>`、親ドキュメントなら `doc:<parent_id>`）。そうしないと、検索と更新の間に失効したキーが `HINCRBY` によって、`access_count` だけを持ち TTL のないハッシュとして作り直される。`EXPIRE` の返り値を確かめるだけでは足りない：2 つのパイプラインの間に削除されたレコードは、スクリプトでしか防げない（v1.7.3、DF1）。
+7. 上位 `ttl_refresh_top_k` 件の**普通の行**の **`access_count`**（§3.11。`_weak` の行は飛ばす）を加算し、`limit` 件に切り詰める。**`access_count` はまだ存在するキーでだけ増やす（v1.7.1、Lite レビュー LL4）**：ヒットしたチャンクに §3.3 の条件付きスクリプト `INCR_IF_EXISTS` を実行する（スクリプトのパイプライン 1 つ）。そうしないと、検索のあとに失効したか削除されたキーが `HINCRBY` によって、`access_count` だけを持ち TTL のないハッシュとして作り直される。**`EXPIRE` もガードの書き込みもしない（2026-11-22 決定）**：検索は TTL を変えない（§3.3）。（それまでこの手順は、パイプライン 1 で `EXPIRE` を、パイプライン 2 で `INCR_IF_EXISTS` と `SET_GUARD_IF_EXISTS` を送っていた。）
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LH1、決定 LD1）**：v1.7.0 は最終スコアで比べていたが、それにはすでに `time_decay`（半減期 3 日）と `b_session`（別セッションは 0.6）が掛かっている。関連度が同じなら、トップのヒットより約 2.2 日古い記録（0.5^(2.2/3) ≈ 0.6）と、別セッションの記録はすべてカットを下回った — しかも既定の `session_id` はサーバープロセスごとの新しい UUID なので、MCP サーバーが最後に再起動する前に保存した記録はすべて別セッション扱いになる。再現：現セッションの新しい記録が cos 0.86（スコア 0.602、カット 0.361）のとき、同じセッションの 3 日前の記録 cos 0.95（0.332）と、別セッションの 1 日前の記録 cos 0.99（0.330）・0.95（0.317）がすべて落ちた。Lite は 7 日のワーキングメモリなのに、最近のヒット 1 件が 2 日より古いものをすべて隠していた。
 
@@ -1153,7 +1144,7 @@ def python_cmd():
 | `len(B) > chunk_threshold` | `chunks = chunk_text(B, chunk_threshold, chunk_overlap)`（前置きのない `B` に対する Lite のチャンク分割）。親ドキュメント `doc:<id>` の `content` は `[<role>] ` + `B`。*N* 個のうち *i* 番目のチャンクの `content` は `[<role> i/N] ` + チャンク *i*。`chunk_text` が 1 つのチャンクしか返さないとき（閾値より最大 19 文字長い本文、§3.11）は、`[<role>] ` + そのチャンク。 |
 
 - 長さの判定には、前置きを付けた文ではなく `B` を使う。そのため同じ文は、フックから来ても MCP から来ても同じ経路をとる。
-- ガードは、保存するものを**そのやりとりの中で**ハッシュする（2026-11-19 決定、下記）：独立したレコードなら `mem:sha:<turn_id>:<sha1(NFKC([<role>] B))>`、親なら `docsha:<turn_id>:<sha1(NFKC([<role>] B))>`。Lite のガードと同じく、`SET NX` で取り、レコードの TTL を持つ。`turn_id` のないフックの保存は起きない（§12 は常に持つ）。**このガードの更新と削除（L6、2026-11-20）**：§3.3 の TTL の更新と、§3.5 / `delete_memories_by_session` の削除は、保存したレコードからガードのキーを計算し直す。`turn_id` を持ち、**かつ** `content` が役割の前置き（`[user` か `[claude`。つまりフックのレコード）で始まるレコードは、`mem:sha:<turn_id>:<sha1(NFKC(content))>`（親なら `docsha:<turn_id>:<sha1(NFKC(content))>`）を使う。保存した `content` は、ちょうど `[<role>] B` である。ほかのレコードは v1.12.2 のキーを使う。（自分の文が `[user` で始まり、`turn_id` を渡す MCP の保存は、ここではフックのレコードとして読まれる。そのガードは更新されず、保存の TTL で消える。そのため、同じ文を 7 日後にまた保存できるようになるだけである。）チャンクの埋め込みは、ほかの保存された `content` と同じく、前置きを付けたチャンクの文から作る（`"passage: " + content`）。
+- ガードは、保存するものを**そのやりとりの中で**ハッシュする（2026-11-19 決定、下記）：独立したレコードなら `mem:sha:<turn_id>:<sha1(NFKC([<role>] B))>`、親なら `docsha:<turn_id>:<sha1(NFKC([<role>] B))>`。Lite のガードと同じく、`SET NX` で取り、レコードの TTL を持つ。`turn_id` のないフックの保存は起きない（§12 は常に持つ）。**このガードの削除（L6、2026-11-20）**：§3.5 / `delete_memories_by_session` の削除は、保存したレコードからガードのキーを計算し直す。`turn_id` を持ち、**かつ** `content` が役割の前置き（`[user` か `[claude`。つまりフックのレコード）で始まるレコードは、`mem:sha:<turn_id>:<sha1(NFKC(content))>`（親なら `docsha:<turn_id>:<sha1(NFKC(content))>`）を使う。保存した `content` は、ちょうど `[<role>] B` である。ほかのレコードは v1.12.2 のキーを使う。（自分の文が `[user` で始まり、`turn_id` を渡す MCP の保存は、ここではフックのレコードとして読まれる。削除はそのガードを外し、ガードは保存の TTL で消える。そのため、同じ文を 7 日後にまた保存できるようになるだけである。）チャンクの埋め込みは、ほかの保存された `content` と同じく、前置きを付けたチャンクの文から作る（`"passage: " + content`）。
 - 閉じ括弧の後には空白を 1 つ置く。親ドキュメントは、この前置きを除けば「verbatim」である。
 - `agent_name` = `"claude-code"`、`session_id` = フックの入力にある Claude Code の `session_id`（空ならサーバーの既定：サーバーのプロセスの `N3MC_SESSION_ID`、なければサーバーが起動のときに作る UUIDv4 — L7、2026-11-20）、`turn_id` = そのやりとりの `turn_id`（§12）。
 - **MCP の `save_memory` に `role` はない。** v1.12.2 で保存していたものを、そのまま保存する（前置きなし）。
@@ -1171,7 +1162,7 @@ Lite 自身の決まりである（決定 D4、2026-11-20：Lite に残す。N3M
 **理由**：Claude Code は、フックの普通の stdout を 10,000 文字までに制限する。それより長い出力はファイルに移され、Claude には 2,000 文字のプレビューしか見えない（N3MC Pro での実測、2026-11-18：結果が 20 件のとき、138 問の 45 % で塊が 10,000 文字を超えた）。Lite のヒットは親ドキュメント全体のこともあるので、1 つのヒットだけで上限を超えうる。
 
 - **当てはめる場所**：フックの `# Recalled Memory Context` の塊（`--hook-submit`）と、MCP の `search_memory` の結果（これもモデルのコンテキストに入り、ツールの結果の上限はクライアントごとに違う）。どちらも `max_chars = context_max_chars` を使う（§6、既定 9,500、許す範囲 2,000〜10,000）。手で行う `--search` は制限**しない**。劣化時の代わりの出力（§12）も制限しない。
-- **表示だけ**：検索そのもの、その TTL の更新、その `access_count` の加算（§3.14 手順 7）は、表示の前に、すべての結果に対して行う。上限は出力から文を取り除くだけである。
+- **表示だけ**：検索そのものと、その `access_count` の加算（§3.14 手順 7）は、表示の前に、すべての結果に対して行う。上限は出力から文を取り除くだけである。
 - **大きさ**（`context_size(text)`）：文の UTF-16 のコード単位の数（BMP の外の文字は 2 と数える）に、改行の数を足したもの（改行はそれぞれ 2 と数える：Windows のパイプは CR LF として渡しうる）。`context_size(output) + 2 <= max_chars` のとき、出力は収まる。
 - 出力の**部分**は、順に次のとおり：**頭**（フック：`# Recalled Memory Context`、`Source: N3MC Lite (7-day working memory)`、`Search query: <query>` と空行。MCP：なし）、**通知**、**版についての一文**、**普通の行**（`\n\n---\n\n` でつなぐ）、**弱い部分**（見出しと弱い行）、**尾**（MCP：`_NUDGE_AFTER_SEARCH`。フック：なし）。頭と尾以外の部分は、§3.14 / §5 (4) とまったく同じに `\n\n` でつなぐ。
 - **縮め方**：先にすべての出力を作る。収まれば、そのまま使う。収まらなければ、次を順に行い、収まった時点でやめる：
@@ -1946,7 +1937,6 @@ _SOFT_BREAKS = (
   "access_count_enabled":     false,
   "access_count_weight":      0.02,
   "access_count_max_boost":   0.5,
-  "ttl_refresh_on_search":    true,
   "ttl_refresh_top_k":        5,
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
@@ -1968,13 +1958,13 @@ _SOFT_BREAKS = (
 - `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 7 日）。下げるのは問題ないが、1 週間を大きく超える値に上げると Lite の目的が崩れるためレビュー時に指摘される。
 - `search_result_limit` — `search_memory` が返す最大件数。
 - `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 検索結果の整形（[§3.14](#314-検索結果の整形v170v172-から弱い候補で補充)）。`vector_min_cos`（0.85）と `version_sim_threshold`（0.98）は `multilingual-e5-base` で計測した値。別の `embedding_model` では計測し直すこと。`vector_min_cos` の妥当な範囲は 0.80〜0.88（低くすると再現率が上がり関連の薄い行も増える、高くすると結果が短くなり関連行も落ちやすい）。変更は MCP サーバープロセスの再起動時に反映される（MCP クライアントを再起動する）。
-- `min_results`（v1.7.2） — 下限を通った結果がこの件数に満たないとき、足りない分を**弱い候補**（下限で落ちた候補）で補う。別の見出しの下に出し、TTL は再設定しない（既定 `3`、[§3.14](#314-検索結果の整形v170v172-から弱い候補で補充) の手順 6）。`0` で補充しない。MCP サーバーのプロセスを起動し直すと効く。
+- `min_results`（v1.7.2） — 下限を通った結果がこの件数に満たないとき、足りない分を**弱い候補**（下限で落ちた候補）で補う。別の見出しの下に出し、`access_count` は数えない（既定 `3`、[§3.14](#314-検索結果の整形v170v172-から弱い候補で補充) の手順 6）。`0` で補充しない。MCP サーバーのプロセスを起動し直すと効く。
 - `dedup_threshold` と `context_char_limit`（v1.6.x）は**廃止** — 既存の `config.json` にあっても無視される（削除する必要はない）。
 - `min_score` — `filter_score`（`time_decay` と `b_session` を掛けないスコア、[§3.6](#36-ランキング式)）がこの値未満の結果を除外（既定 `0.2`）。`0.0` で無効化。**フィルタは語彙リランク（[§3.6](#36-ランキング式)）の後に適用される** — フレーズ一致・coverage の加点を受けたスコアで判定するため、融合スコアが閾値直下でもリランク加点で救済されうる。
 - `search_query_max_chars` — クエリから使う最大文字数（既定 `2000`；埋め込みモデルが ~512 トークンで飽和）。
 - `chunk_threshold` / `chunk_overlap` — スライディングウィンドウのサイズとオーバーラップ（既定 400 / 100 文字）。本文長がこの閾値を超えた場合に親ドキュメント＋チャンク化（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）に入る。
 - `access_count_enabled` / `access_count_weight` / `access_count_max_boost` — アクセス頻度ブーストの有効化・係数・上限（[§3.6](#36-ランキング式)）。**2026-11-17 から既定は `false`**: `stored_importance` のみが重みになる。`true` でブーストが有効になる。
-- `ttl_refresh_on_search` / `ttl_refresh_top_k` — 検索上位 K 件に対する TTL 再設定と `access_count` インクリメント。再設定は既存エントリの TTL をリセットするのみで、新規エントリの寿命を超えて延長することはない。チャンクがヒットして親ドキュメントを展開する際は、`mem:<chunk_id>` の TTL と同時に `doc:<parent_id>` の TTL も更新されるため、verbatim recall 能力はチャンクと同期して維持される。
+- `ttl_refresh_top_k` — 検索のたびに `access_count` を加算する、普通の行の上位の件数（§3.14 手順 7。`0` なら何も数えない）。名前は以前の版のままである：**TTL は設定し直さない**（2026-11-22 決定、§3.3）。`ttl_refresh_on_search` は同じ日に取り除いた。今ある `config.json` に残った値は無視する。
 - `lexical_rerank_enabled` / `rerank_weight` / `rerank_phrase_weight` — 融合スコア後の軽量語彙リランカー（[§3.6](#36-ランキング式)）。`false` で従来スコア素通し。
 - `b_session_match` / `b_session_mismatch` — ランキング式の `b_session` 係数（[§3.6](#36-ランキング式)）。検索リクエストの `effective_session`（呼び出し時引数 → `N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUID）と行の保存時 `session_id` を比較し、一致なら `b_session_match`（既定 `1.0`）、それ以外なら `b_session_mismatch`（既定 `0.6`）を最終スコアに乗算する。両方を `1.0` に設定すれば実質無効化（全行対称）。
 - `skip_code_blocks` — `true` のとき `save_memory` はトリプルバッククォートフェンス（```` ``` ````）を含む本文を拒否し、`{"status": "skipped_code", "saved": false}` を返す。既定は `false`（FastAPI 時代の N3MemoryCore に倣い「コードをメモリに入れたくない」ユーザー向けのオプトイン）。ヒューリスティックはフェンス記号のみ — 散文とコード混在でも一括拒否である。`false` のときは、コードブロックを `[code omitted]` に置き換えて保存する（v1.9.0、§3.13）。LLM は §5 の指示で、`skipped_code` を受けた同一ペイロードを再送せず、代わりにコードの要約散文を保存するよう誘導される。
@@ -2311,7 +2301,7 @@ n3mcmcp-lite/
 | `TestInsertAndRetrieve` | INSERT→COUNT、ハッシュ整合性、embedding 無し挿入、`parent_id` 格納 | CRUD |
 | `TestDedup` | 完全一致 SHA 衝突、親ドキュメント SHA ガード（v1.7.0 から類似度による拒否はない） | 重複排除 |
 | `TestDelete` | 単体削除、親→チャンクカスケード、`docsha:` ガード掃除 | トランザクション保護 |
-| `TestTTL` | 7 日 TTL 設定、検索ヒット時の `EXPIRE` リフレッシュ、期限切れ消失 | TTL |
+| `TestTTL` | 7 日 TTL 設定、**検索ヒットで TTL が変わらない**（2026-11-22）、期限切れ消失 | TTL |
 | `TestFTS` | 句読点除去、BM25 スコア、短クエリ、CJK バイグラム展開によるヒット | FTS / 日本語 |
 | `TestVectorSearch` | KNN 結果、空 DB 検索、`owner_id` フィルタ、独立したレコードだけ（`parent_id` が空。Python で絞る — `-@parent_id:{*}` の TAG のフィルタは使わない、§3.12） | KNN 検索 |
 | `TestCjkBigramExpand` | ひらがな・カタカナ・漢字混在のバイグラム展開、境界処理 | トークナイズ |
@@ -2371,20 +2361,20 @@ n3mcmcp-lite/
 | `TestSurroundingWhitespace`（v1.8.1、*Redis*） | 外側の `strip()`：`' \nAAA\n '` は `AAA` として保存される。親ドキュメントは中の改行を残し、外側の空白だけを落とす。前後の空白だけが違う本文は完全一致の重複になる。空白だけの本文は `empty content` で拒否される |
 | `TestModelWait`（v1.7.1） | ロードが `MODEL_WAIT_SECONDS`（テストでは短く差し替え）より長くロックを持つ間、`search_memory` は「still loading」の通知付きでキーワードだけで答え、`save_memory` は `detail` 付きでベクトルなしで保存する |
 | `TestListPaging`（v1.7.1、*Redis*） | 独立メモリと 260 チャンクの文書を保存したあと、`list_memories(20)` が両方を一覧に出す |
-| `TestGuardRefresh`（v1.7.1、*Redis*） | 検索ヒットで、レコードと一緒に `mem:sha:`（独立）と `docsha:`（文書）の TTL が設定し直される |
+| `TestNoTtlRefresh`（2026-11-22、*Redis*） | 検索ヒットは、`mem:` / `doc:` / `mem:sha:` / `docsha:` のどのキーの TTL も変えない：単独のレコード、親ドキュメント、そのチャンク、それらのガードは、保存の TTL のままである |
 | `TestOrBm25`（v1.7.1、*Redis*） | `quick fox elephant` と `what did the quick fox do` が `quick fox` を含む記録にヒットする。`記憶装置 大阪` が 記憶装置 を含む記録にヒットする。リランクの coverage が `note,` を `note` として数える |
 | `TestTimeBoundsStrict`（v1.7.1） | `since="yesterday"` / `"2026/11/13"` が `Error:` の文を返す。`since > until` はエラー。日付だけの値はローカルの 0 時（UTC 以外の固定タイムゾーン） |
 | `TestRepairReembed`（v1.7.1、*Redis*） | `embedding` なしで保存したエントリに `repair_memory` がベクトルを付ける（1 回の呼び出しで最大 200 件、TTL は変えない、`reembedded` / `remaining` を報告） |
 | `TestDeleteOwner`（v1.7.1、*Redis*） | 別のオーナーの ID への `delete_memory` は `not_found` を返し、何も削除しない。親のチャンクは `chunk_ids` から削除される |
 | `TestGuardNx`（v1.7.1、*Redis*） | 同じ内容を同時に 2 回保存してもレコードは 1 つ。ガードを取ったあとの書き込みが失敗するとガードを解放する |
-| `TestAccessCountNoGhost`（v1.7.1、*Redis*） | 検索と TTL 更新の間に失効したキーが `HINCRBY` で作り直されない。**v1.7.3**：TTL 更新のパイプライン 1 と 2 の間に削除された単独レコードと親ドキュメントについて、キーが 1 つも残らない（`access_count` だけのハッシュも、`mem:sha:` / `docsha:` ガードも残らない） |
+| `TestAccessCountNoGhost`（v1.7.1、*Redis*） | 検索と `access_count` の加算の間に失効したか削除されたレコードは、`HINCRBY` で作り直されない：キーが 1 つも残らない（`access_count` だけのハッシュも、`mem:sha:` / `docsha:` ガードも残らない） |
 | `TestRecallOrphanChunks`（v1.7.3、*Redis*） | 親があるとき、`recall_thread` は親を 1 回だけ出し（`[doc×N]`、全文）、チャンクは出さない。`doc:<id>` を消したあとは、`not_found` ではなく、その turn の各チャンクをチャンクの本文で出す |
 | `TestDeleteIdPrefix`（v1.7.3、*Redis*） | `doc:<uuid>` を渡した `delete_memory` は、前置きのない親の ID と同じく連鎖削除する。`mem:<uuid>` は単独レコードとそのガードを消す。応答の `id` は前置きのない UUID。`doc:doc:<uuid>`（前置き 2 つ）は `not_found` |
 | `TestNudgeOnErrors`（v1.7.3） | 数値でない `importance` の JSON、読めない `since` の `Error:`、予期しない例外、`search_memory` のバックエンドエラーが、どれもエラーの文で始まり、リマインダで終わる |
-| `TestConditionalWrites`（v1.7.3、*Redis*） | `INCR_IF_EXISTS`・`HSET_IF_EXISTS`・`SET_GUARD_IF_EXISTS` は、レコードがあれば書き込んで TTL を保ち、なければ何も作らない。`SCAN` のあとに消えたレコードに対する `repair_memory` はキーを作らず、`reembedded` に数えない。保存・検索・TTL 更新・修復のあと、テスト DB のすべてのキー（テスト用の印を除く）に TTL がある |
+| `TestConditionalWrites`（v1.7.3、*Redis*） | `INCR_IF_EXISTS`・`HSET_IF_EXISTS` は、レコードがあれば書き込んで TTL を保ち、なければ何も作らない。`SCAN` のあとに消えたレコードに対する `repair_memory` はキーを作らず、`reembedded` に数えない。保存・検索・修復のあと、テスト DB のすべてのキー（テスト用の印を除く）に TTL がある |
 | `TestHangulFiller`（v1.7.1） | `U+3164`、`U+115F`、`U+1160`、`U+FFA0`、`U+2800` だけの本文は見える文字なしとして拒否される。見える文字と一緒なら verbatim に保存される |
 | `TestPluginHook`（追加分、v1.7.1） | `settings.json` を書く直前に読み直し、アトミックに置き換える。フォールバックの文面に "or the permission script failed" が入る。`uvx` がないときは、§8 の案内の文がそのまま入る（L14） |
-| `TestWeakMatches`（v1.7.2、*Redis*） | 下限を通った行が 1 件で `min_results: 3` なら、弱い候補が 2 件その後に足され、`filter_score` の順に並び、`_weak` の印が付く、`vector_min_cos` 未満の候補は実際の cos で足される、`min_results: 0` では何も足さない、十分な件数が通ったときは足さない、`limit` が `min_results` より小さければ合計はその上限まで、1 つの親ドキュメントの 2 つのチャンクのヒットは弱い候補 1 行になり、すでに結果にある親は足さない、`filter_score` が `1e-6` 未満の候補は足さない、**弱い候補の `mem:` / `doc:` / ガードのキーの TTL と `access_count` は変わらない**（普通の行は更新される）、空のクエリ、または空白だけのクエリでは弱い候補を足さない、既定の設定は `min_results: 3` |
+| `TestWeakMatches`（v1.7.2、*Redis*） | 下限を通った行が 1 件で `min_results: 3` なら、弱い候補が 2 件その後に足され、`filter_score` の順に並び、`_weak` の印が付く、`vector_min_cos` 未満の候補は実際の cos で足される、`min_results: 0` では何も足さない、十分な件数が通ったときは足さない、`limit` が `min_results` より小さければ合計はその上限まで、1 つの親ドキュメントの 2 つのチャンクのヒットは弱い候補 1 行になり、すでに結果にある親は足さない、`filter_score` が `1e-6` 未満の候補は足さない、**弱い候補の `access_count` は変わらない**（普通の行は加算される）、空のクエリ、または空白だけのクエリでは弱い候補を足さない、既定の設定は `min_results: 3` |
 | `TestGuardReleasedOnAnyFailure`（2026-11-18 の最終レビュー、L-01、*Redis*） | 短い本文と長い本文で：`turn_id: 12` の保存は失敗し、`mem:sha:` / `docsha:` のキーを残さず、そのあと同じ本文を保存できる。`agent_name`・`session_id`・`turn_id` の単独のサロゲートは除かれ、記録は保存される。サロゲートのないフィールドは変わらずに入る |
 | `TestPluginHookAsciiStdout`（2026-11-18 の最終レビュー、L-03） | `uvx` がないとき、フックの標準出力は ASCII だけの 1 行で、`json.loads` すると `systemMessage` に日本語の案内がそのまま入っている |
 | `TestPublicRepoHygiene`（2026-11-18 の最終レビュー、L-05） | `tests/eval_uvx_missing.py` に絶対パスのユーザーのフォルダがない（外すフォルダは、`uvx` がある `PATH` の項目）。`.claude-plugin/marketplace.json` の `metadata.version` がパッケージの版と同じ |

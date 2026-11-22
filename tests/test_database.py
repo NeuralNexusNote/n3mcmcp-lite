@@ -107,12 +107,12 @@ class TestDelete:
 
 
 class TestTTL:
-    def test_refresh_on_search(self, db):
+    def test_search_does_not_refresh(self, db):
         res = db.save_memory("ttl refresh target text", session_id="s")
         db.r.expire(MEM + res["id"], 100)
         rows, _, _ = db.search("ttl refresh target text", "s", 5)
         assert rows
-        assert db.r.ttl(MEM + res["id"]) > 1000
+        assert 0 < db.r.ttl(MEM + res["id"]) <= 100
 
     def test_every_key_has_ttl(self, db):
         db.save_memory("alpha beta gamma")

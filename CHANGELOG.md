@@ -17,6 +17,13 @@ hooks. The code in this repository was regenerated from the specification
 (2026-11-20) and passes its tests; v2.0.0 is not on PyPI yet.
 
 ### Changed
+- **A search no longer extends a memory's life (decided 2026-11-22).** Every
+  entry is deleted 7 days after it was saved, as the instructions and the
+  rules file tell the user. Until now a search hit reset the TTL of the top
+  results (with their parent documents, chunks and duplicate guards), so a
+  record that kept coming up lived longer than that. `ttl_refresh_on_search`
+  is removed (a value left in `config.json` is ignored); `ttl_refresh_top_k`
+  now only sets how many top hits have their `access_count` increased.
 - **Claude Code uses the hooks only.** The plugin registers the
   `UserPromptSubmit` and `Stop` hooks (and `SessionStart` for permissions)
   and no longer registers the MCP server in Claude Code; `plugin.json` has no
