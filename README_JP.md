@@ -8,24 +8,14 @@ Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP �
 
 ```bash
 docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
-git clone https://github.com/NeuralNexusNote/n3mcmcp-lite.git
-pip install -e ./n3mcmcp-lite
+pip install n3memorycore-mcp-lite
 n3mc-lite --init
 ```
 
 そのあと、Claude Code を再起動します。次のセッションから記憶が働きます。
 手順の詳細、プラグインの経路、Claude デスクトップアプリの設定は、[クイックスタート](#step-1--redis-stack-を起動) にあります。
 
-> ⚠️ **v2.0.0 は、まだ PyPI にありません。**
-> この README は v2.0.0 を説明しています。v2.0.0 は、このリポジトリのコードです。指示書
-> （[`N3MemoryCore_MCP_Spec_JP.md`](./N3MemoryCore_MCP_Spec_JP.md)）から生成しました。
-> 上のコマンドがリポジトリから入れているのは、そのためです（clone したフォルダは、その後も使われます。消したり動かしたりすると、記憶が止まります）。
-> PyPI のパッケージと、Claude Code のマーケットプレイスのプラグインは、まだ **v1.12.2** です。
-> v1.12.2 は MCP サーバーだけです。Claude Code では、何を保存するかをモデルが決めます。
-> v1.12.2 の設定は、PyPI で v1.12.2 と一緒に公開されている README のとおりです
-> （<https://pypi.org/project/n3memorycore-mcp-lite/1.12.2/>）。
-> v2.0.0 のリリースまでは、`pip install n3memorycore-mcp-lite` で v1.12.2 が入ります。
-> 既存の利用者にとって何が変わるかは、[v2.0.0 で変わったこと](#v200-で変わったこと) にあります。
+> v1.12.2 から上げる方へ：既存の利用者にとって何が変わるかは、[v2.0.0 で変わったこと](#v200-で変わったこと) にあります。
 
 > NeuralNexusNote™ プロダクト — **無償 Lite** 版。
 > Redis Stack を使う、揮発性のハイブリッド（ベクトル + BM25）メモリです。
@@ -182,7 +172,6 @@ Claude Code の中で実行します。
 `SessionStart` は、CLI のコマンドを事前に許可します。
 `UserPromptSubmit` と `Stop` は、`uvx --from n3memorycore-mcp-lite==2.0.0 …` で動きます。
 この版の番号は、パッケージの版に合わせて固定されています。
-v2.0.0 のリリースまでは、マーケットプレイスからは v1.12.2 のプラグインが入ります。これは MCP サーバーを登録し、上のフックは登録しません。
 
 **(b) pip**
 
@@ -190,8 +179,6 @@ v2.0.0 のリリースまでは、マーケットプレイスからは v1.12.2 �
 pip install n3memorycore-mcp-lite
 n3mc-lite --init
 ```
-
-v2.0.0 が PyPI に出るまでは、1 行目を、このリポジトリを clone したフォルダでの `pip install -e .` に替えてください。
 
 `n3mc-lite --init` は、`~/.claude/settings.json` に 2 つのフックを登録します。
 コマンドは、`n3mc-lite-hook` / `n3mc-lite-stop-hook` の絶対パスです。
@@ -641,7 +628,6 @@ Lite には、専用のデータフォルダ（`~/.n3mc-workingmemory`）、デ�
 - **常駐サーバーが動ける必要があります。** 起動できないときは、検索はエラーか代わりの文を返します。保存は、ベクトルなしで Redis に入ります（キーワードではすぐ見つかり、ベクトルはあとで修復が足します）。
 - **すべてのクライアントで 1 つのインストール。** フック・CLI・MCP の入口は、同じ版を動かす必要があります。違うと、呼び出しのたびに、互いのサーバーを置き換えてしまいます。デスクトップアプリは、フックと同じ scripts フォルダか、同じ版に固定した `uvx` の形で登録します。
 - **プラグインと pip を一緒に使わないでください。** プラグインが有効なとき、`--init` はフックを登録しません。プラグインは、`--init` が書いたフックがあれば知らせます。
-- **まだ PyPI にはありません。** このリポジトリの v2.0.0 のコードは指示書から生成したもので、テストに合格しています。ただし、PyPI の最新版はまだ 1.12.2 です。v2.0.0 が公開されるまでは、このリポジトリから入れてください（`pip install -e .`）。`pip install n3memorycore-mcp-lite` では 1.12.2 が入ります。この README の `uvx --from n3memorycore-mcp-lite==2.0.0 …` の形は、その版がまだ PyPI にないので動きません。プラグインのマーケットプレイスからは、v1.12.2 のプラグインが入ります。
 
 ## なぜ N3MemoryCore？（組込みメモリとの違い）
 
