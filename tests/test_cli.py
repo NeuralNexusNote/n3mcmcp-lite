@@ -397,7 +397,7 @@ class TestReview20261122:
     def test_l1_l4_run_server_writes_pid_and_passes_early_version(self, isolate, monkeypatch):
         from n3mc_mcp import app as app_mod, processor, tools
         order, seen = [], {}
-        monkeypatch.setattr(config, "code_version", lambda: order.append("version") or "v-first")
+        monkeypatch.setattr(config, "code_version", lambda *a, **k: order.append("version") or "v-first")
 
         class FakeDb:
             def ensure_connected(self):
@@ -443,3 +443,203 @@ class TestReview20261122:
         monkeypatch.setattr(tools, "datetime", Boom)
         with pytest.raises(tools.TimeRangeError):
             tools.parse_time("2026-11-13", False, "since")
+
+
+_LOAD_IDS = ("import json, sys; from n3mc_mcp import config; c = config.load_config(); "
+             "print(json.dumps([c['owner_id'], c['local_id']]))")
+
+
+class TestConfigCreate:
+    """2026-11-22, review #2: filling a missing owner_id / local_id of an existing config.json under a lock."""
+
+    def test_processes_on_existing_file_without_ids_end_with_the_ids_on_disk(self, tmp_path):
+        import subprocess
+        folder = tmp_path / "shared"
+        folder.mkdir()
+        p = folder / "config.json"
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for _ in range(3):
+            p.write_text(json.dumps({"half_life_days": 5, "my_own_key": "kept"}), encoding="utf-8")
+            env = dict(os.environ, N3MC_DATA_DIR=str(folder), PYTHONPATH=root)
+            env.pop("N3MC_REDIS_URL", None)
+            procs = [subprocess.Popen([sys.executable, "-c", _LOAD_IDS], env=env, cwd=root,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(4)]
+            res = [pr.communicate(timeout=60) for pr in procs]
+            got = [json.loads(o.decode().strip().splitlines()[-1]) for o, _ in res]
+            disk = json.load(open(p, encoding="utf-8"))
+            assert all(g == [disk["owner_id"], disk["local_id"]] for g in got), (got, disk, [e for _, e in res])
+            assert disk["half_life_days"] == 5 and disk["my_own_key"] == "kept"
+            assert not os.path.exists(str(p) + ".lock")
+
+    def test_ids_are_read_again_under_the_lock(self, isolate, monkeypatch):
+        """Another process filled the IDs between our first read and our lock: we use (and keep) its IDs."""
+        path = paths.config_path()
+        real = config._acquire_lock
+
+        def other_process_first(lock):
+            c = json.load(open(path, encoding="utf-8"))
+            c.update({"owner_id": "owner-of-the-winner", "local_id": "local-of-the-winner"})
+            open(path, "w", encoding="utf-8").write(json.dumps(c))
+            return real(lock)
+
+        monkeypatch.setattr(config, "_acquire_lock", other_process_first)
+        cfg = config.load_config()
+        assert cfg["owner_id"] == "owner-of-the-winner" and cfg["local_id"] == "local-of-the-winner"
+        disk = json.load(open(path, encoding="utf-8"))
+        assert disk["owner_id"] == "owner-of-the-winner" and disk["local_id"] == "local-of-the-winner"
+        assert not os.path.exists(path + ".lock")
+
+    def test_lock_waits_and_stale_lock_is_removed(self, isolate, monkeypatch):
+        path = paths.config_path()
+        lock = path + ".lock"
+        open(lock, "w").close()
+        threading.Timer(0.3, lambda: os.unlink(lock)).start()
+        t0 = time.time()
+        cfg = config.load_config()
+        assert time.time() - t0 >= 0.25 and cfg["owner_id"] == json.load(open(path, encoding="utf-8"))["owner_id"]
+        assert not os.path.exists(lock)
+        c = json.load(open(path, encoding="utf-8"))
+        del c["owner_id"]
+        open(path, "w", encoding="utf-8").write(json.dumps(c))
+        open(lock, "w").close()
+        old = time.time() - 60
+        os.utime(lock, (old, old))                  # a lock left by a process that died
+        t0 = time.time()
+        cfg = config.load_config()
+        assert time.time() - t0 < 5 and not os.path.exists(lock)
+        assert cfg["owner_id"] == json.load(open(path, encoding="utf-8"))["owner_id"]
+
+    def test_no_lock_when_ids_are_present(self, isolate, monkeypatch):
+        config.load_config()                        # fills the IDs
+        monkeypatch.setattr(config, "_acquire_lock", lambda lock: pytest.fail("lock taken although IDs exist"))
+        config.load_config()
+
+    def test_records_of_both_are_listed_after_restart(self, isolate, redis_client, fake_embed):
+        from n3mc_mcp.database import Database
+        out, errors = [], []
+
+        def work(i):
+            try:
+                c = config.load_config()
+                d = Database(c)
+                d.ensure_connected()
+                out.append((c["owner_id"], d.save_memory("record from starter %d" % i, embed=False)["status"]))
+                d.close()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        ts = [threading.Thread(target=work, args=(i,)) for i in range(2)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        assert not errors and [s for _, s in out] == ["saved", "saved"]
+        assert out[0][0] == out[1][0]
+        c = config.load_config()                    # the restart
+        d = Database(c)
+        d.ensure_connected()
+        listed = [e["content"] for e in d.list_entries(20)]
+        d.close()
+        assert "record from starter 0" in listed and "record from starter 1" in listed
+
+
+class TestReview20261122b:
+    # ---- review #1: redis_display never shows any part of an unparseable URL
+    def test_redis_display(self):
+        from n3mc_mcp.database import redis_display
+        assert redis_display("redis://user:secret@example.org:6390/2") == "example.org:6390/2"
+        assert redis_display("redis://u:secret@host:abc/0") == "<unparseable redis_url>"
+
+    def test_health_has_no_password(self, client, svc):
+        svc.cfg["redis_url"] = "redis://u:secret@host:abc/0"
+        h = client.get("/health").json()
+        assert h["redis"] == "<unparseable redis_url>" and "secret" not in json.dumps(h)
+
+    def test_mismatch_notice_has_no_password(self, conf, capsys):
+        conf = dict(conf, redis_url="redis://u:secret@host:abc/0")
+        cli._after_ok(conf, own_health(redis="127.0.0.1:6390/0"))
+        err = capsys.readouterr().err
+        assert "<unparseable redis_url>" in err and "secret" not in err
+        for p in (paths.audit_log_path(), paths.notices_path()):
+            text = open(p, encoding="utf-8").read()
+            assert "<unparseable redis_url>" in text and "secret" not in text
+
+    # ---- review #9: the server hashes the config.json content load_config() used
+    def test_code_version_matches_client_after_fill_in(self, isolate):
+        assert "owner_id" not in json.load(open(paths.config_path(), encoding="utf-8"))
+        cfg = config.load_config()                  # fills owner_id / local_id and writes the file
+        assert config.code_version(cfg["_config_bytes"]) == config.code_version()
+        cfg = config.load_config()                  # nothing changed
+        assert config.code_version(cfg["_config_bytes"]) == config.code_version()
+
+    def test_code_version_of_missing_and_unreadable_file(self, isolate):
+        os.unlink(paths.config_path())
+        assert config.code_version(None) == config.code_version()
+        open(paths.config_path(), "w", encoding="utf-8").write("{not json")
+        cfg = config.load_config()
+        assert cfg["_unreadable"] and config.code_version(cfg["_config_bytes"]) == config.code_version()
+
+    def test_change_between_load_and_start_is_stale_then_ok(self, isolate, monkeypatch):
+        from n3mc_mcp import app as app_mod, processor, tools
+        seen = {}
+        real_load = config.load_config
+
+        def load_then_edit():
+            cfg = real_load()
+            c = json.load(open(paths.config_path(), encoding="utf-8"))
+            c["half_life_days"] = 7                 # the user edits config.json while the server starts
+            open(paths.config_path(), "w", encoding="utf-8").write(json.dumps(c))
+            return cfg
+
+        class FakeDb:
+            def ensure_connected(self):
+                pass
+
+        monkeypatch.setattr(config, "load_config", load_then_edit)
+        monkeypatch.setattr(tools, "Service", lambda cfg: types.SimpleNamespace(db=FakeDb(), cfg=cfg))
+        monkeypatch.setattr(processor, "import_backend", lambda: None)
+        monkeypatch.setattr(app_mod, "create_app", lambda *a, **k: seen.update(k) or "app")
+        monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda *a, **k: None))
+        cli.run_server()
+        first = seen["code_version"]
+        assert cli._health_decision(own_health(code_version=first)) == "stale"
+        monkeypatch.setattr(config, "load_config", real_load)
+        cli.run_server()                            # the restart
+        assert cli._health_decision(own_health(code_version=seen["code_version"])) == "ok"
+
+    # ---- review #8: --stop-server reports success only when the port became free
+    def test_stop_server_stopped(self, conf, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_get", lambda port, path, timeout=5: own_health())
+        monkeypatch.setattr(cli, "_request_shutdown", lambda port: {"status": "stopping"})
+        monkeypatch.setattr(cli, "_wait_port_free", lambda port, s=15: True)
+        assert cli.main(["--stop-server"]) == 0
+        assert capsys.readouterr().out.strip() == "Stopped the N3MC Lite server (pid 4242)."
+
+    def test_stop_server_none_running_or_foreign(self, conf, monkeypatch, capsys):
+        assert cli.main(["--stop-server"]) == 0     # nothing answers
+        assert capsys.readouterr().out.strip() == "No N3MC Lite server of this data folder is running."
+        monkeypatch.setattr(cli, "_get", lambda port, path, timeout=5: own_health(root="C:/other"))
+        monkeypatch.setattr(cli, "_request_shutdown", lambda port: pytest.fail("foreign server stopped"))
+        assert cli.main(["--stop-server"]) == 0
+        assert capsys.readouterr().out.strip() == "No N3MC Lite server of this data folder is running."
+
+    @pytest.mark.parametrize("fail_request", [True, False])
+    def test_stop_server_failed(self, conf, monkeypatch, capsys, fail_request):
+        monkeypatch.setattr(cli, "_get", lambda port, path, timeout=5: own_health())
+        if fail_request:
+            monkeypatch.setattr(cli, "_request_shutdown",
+                                lambda port: (_ for _ in ()).throw(cli.HttpStatusError(403, "forbidden")))
+        else:
+            monkeypatch.setattr(cli, "_request_shutdown", lambda port: {"status": "stopping"})
+        monkeypatch.setattr(cli, "_wait_port_free", lambda port, s=15: False)
+        assert cli.main(["--stop-server"]) == 1
+        out = capsys.readouterr()
+        assert "Stopped" not in out.out
+        assert out.err.startswith("Could not stop the N3MC Lite server (pid 4242): ")
+        assert out.err.strip().endswith(". End the process whose command line contains n3mc_mcp.cli and --run-server.")
+        assert ("shutdown request failed" in out.err) == fail_request
+
+    def test_stop_server_request_failed_but_port_freed(self, conf, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "_get", lambda port, path, timeout=5: own_health())
+        monkeypatch.setattr(cli, "_request_shutdown", lambda port: (_ for _ in ()).throw(ConnectionResetError("gone")))
+        monkeypatch.setattr(cli, "_wait_port_free", lambda port, s=15: True)
+        assert cli.main(["--stop-server"]) == 0
+        assert capsys.readouterr().out.strip() == "Stopped the N3MC Lite server (pid 4242)."

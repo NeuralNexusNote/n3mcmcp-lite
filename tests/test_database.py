@@ -105,6 +105,59 @@ class TestDelete:
         res = db.save_memory("prefix delete")
         assert db.delete_memory("mem:" + res["id"])["id"] == res["id"]
 
+    # 2026-11-22, review #6: a child chunk owns no guard; a guard is deleted only when it points at the record.
+    def _chunk_and_twin(self, db, session_id=""):
+        long_text = "".join("w%03d" % i for i in range(200))   # no breaks: the chunk text equals the twin's
+        doc = db.save_memory(long_text, session_id=session_id)
+        cid = doc["ids"][0]
+        chunk_text = hget(db.r, MEM + cid, "content")
+        single = db.save_memory(chunk_text, session_id="other-session")
+        assert single["status"] == "saved"
+        # the same text, so the pre-fix delete of the chunk computed this record's guard key
+        assert guard_key_for(MEM, chunk_text, "") == guard_key_for(MEM, hget(db.r, MEM + single["id"], "content"), "")
+        return doc, cid, chunk_text, single
+
+    def test_deleting_chunk_keeps_standalone_guard(self, db):
+        doc, cid, chunk_text, single = self._chunk_and_twin(db)
+        guard = guard_key_for(MEM, hget(db.r, MEM + single["id"], "content"), "")
+        assert db.r.get(guard) == single["id"].encode()
+        assert db.delete_memory(cid)["status"] == "deleted"
+        assert not db.r.exists(MEM + cid)
+        assert db.r.get(guard) == single["id"].encode()
+        assert db.save_memory(chunk_text)["status"] == "duplicate"
+        assert db.delete_memory(single["id"])["status"] == "deleted"
+        assert not db.r.exists(guard)
+        assert db.save_memory(chunk_text)["status"] == "saved"
+
+    def test_guard_of_another_record_is_kept(self, db):
+        res = db.save_memory("guard owner check")
+        guard = MEM_SHA + processor.sha1_hex("guard owner check")
+        db.r.set(guard, "someone-else")
+        assert db.delete_memory(res["id"])["status"] == "deleted"
+        assert not db.r.exists(MEM + res["id"])
+        assert db.r.get(guard) == b"someone-else"
+
+    def test_session_delete_of_orphan_chunk_keeps_standalone_guard(self, db):
+        doc, cid, chunk_text, single = self._chunk_and_twin(db, session_id="s-doc")
+        db.r.delete(DOC + doc["parent_id"])           # its chunks are now orphans of session s-doc
+        out = db.delete_by_session("s-doc")
+        assert out["status"] == "deleted" and out["chunks_deleted"] == len(doc["ids"])
+        guard = guard_key_for(MEM, hget(db.r, MEM + single["id"], "content"), "")
+        assert db.r.get(guard) == single["id"].encode()
+        assert db.save_memory(chunk_text)["status"] == "duplicate"
+
+    def test_session_delete_checks_guard_value(self, db):
+        a = db.save_memory("session guard a", session_id="s-g")
+        b = db.save_memory("session guard b", session_id="s-g")
+        ga = MEM_SHA + processor.sha1_hex("session guard a")
+        gb = MEM_SHA + processor.sha1_hex("session guard b")
+        db.r.set(gb, "someone-else")
+        out = db.delete_by_session("s-g")
+        assert out["singles_deleted"] == 2
+        assert not db.r.exists(MEM + a["id"]) and not db.r.exists(MEM + b["id"])
+        assert not db.r.exists(ga) and db.r.get(gb) == b"someone-else"
+        assert db.save_memory("session guard a")["status"] == "saved"
+
 
 class TestTTL:
     def test_search_does_not_refresh(self, db):
