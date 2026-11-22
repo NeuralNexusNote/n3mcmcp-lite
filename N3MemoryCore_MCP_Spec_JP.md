@@ -2430,7 +2430,7 @@ n3mcmcp-lite/
 | `TestNoProxy` | `HTTP_PROXY` がほかのローカルのサーバーを指していても、`_get` は N3MC Lite のサーバーに届き、プロキシには何も届かない |
 | `TestCommands` | `--search` → `max_chars` なしの `/search`。`--search --since/--until` はそのまま渡す。読めない `--since` は `Error:` の文を stderr に出し、exit 2 で終わる。`--buffer` → `/tools/save_memory?nudge=0`。`--list` → `list_memories`。`--recall-thread` → `--before` / `--after` 付きの `recall_thread`。`--delete` → `delete_memory`。`--delete-session` → `delete_memories_by_session`。`--repair` → `repair_memory`。どれも応答の文をそのまま出力する |
 | `TestForeignPort` | ポートにほかのフォルダのサーバーがいるとき：検索は `port_conflict` の代わりの出力を出し、`--list` / `--delete` はバックエンドエラーを出し、フックの保存は直接入る |
-| `TestStop` | `--stop` はルールファイルを書き（§12）、30 日より古い `turn_id_*.txt` を消し、50 MB を超えた `audit.log` をローテーションし（閾値は差し替える）、何も出力せず、サーバーは止めない |
+| `TestStop` | `--stop` はルールファイルを書き（§12）、30 日より古い `turn_id_*.txt` を消し、50 MB を超えた `audit.log` をローテーションし（閾値は差し替える）、何も出力せず、サーバーは止めない。**2026-11-22**: フックの `cwd`（なければ作業フォルダ）がホームフォルダのとき、`--stop` は `.claude/rules/` に何も作らない（§12.4 の手順 1） |
 
 ### Layer 8: `tests/test_mcp_client.py`（v2.0.0）
 

@@ -2441,7 +2441,7 @@ Fake embeddings (no model). Classes marked *Redis* need `N3MC_REDIS_TEST_URL`. T
 | `TestNoProxy` | With `HTTP_PROXY` pointing at another local server, `_get` reaches the N3MC Lite server and nothing reaches the proxy |
 | `TestCommands` | `--search` → `/search` without `max_chars`, `--search --since/--until` passed through; an unreadable `--since` prints the `Error:` text to stderr and exits 2; `--buffer` → `/tools/save_memory?nudge=0`; `--list` → `list_memories`; `--recall-thread` → `recall_thread` with `--before` / `--after`; `--delete` → `delete_memory`; `--delete-session` → `delete_memories_by_session`; `--repair` → `repair_memory`; each prints the answer's text unchanged |
 | `TestForeignPort` | With another folder's server on the port: searches print the `port_conflict` placeholder, `--list` / `--delete` print the backend error, hook saves go in directly |
-| `TestStop` | `--stop` writes the rules file (§12), removes `turn_id_*.txt` older than 30 days, rotates `audit.log` over 50 MB (threshold patched), prints nothing and does not stop the server |
+| `TestStop` | `--stop` writes the rules file (§12), removes `turn_id_*.txt` older than 30 days, rotates `audit.log` over 50 MB (threshold patched), prints nothing and does not stop the server. **2026-11-22**: with the hook's `cwd` (or, without one, the working folder) = the home folder, `--stop` creates nothing in `.claude/rules/` (§12.4 step 1) |
 
 ### Layer 8: `tests/test_mcp_client.py` (v2.0.0)
 
