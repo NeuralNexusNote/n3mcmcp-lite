@@ -78,6 +78,7 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("N3MC_REDIS_URL", raising=False)
     monkeypatch.delenv("N3MC_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)  # set when pytest runs from a Claude Code hook
     monkeypatch.delenv("N3MC_AGENT_NAME", raising=False)
     cfg = {"redis_url": REDIS_TEST_URL or "redis://127.0.0.1:1/0", "server_port": _SESSION_PORT}
     (data / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
