@@ -1,17 +1,19 @@
-"""config.json load/save and UUID generation (spec §6, §7)."""
+"""config.json load/save, validation, UUID generation, code_version (spec sections 3.9, 3.15, 6, 7)."""
 
+import copy
+import hashlib
 import json
-import math
 import os
-import pathlib
 import sys
 import tempfile
 import time
 import uuid
 
-from n3mc_mcp import paths
+from . import paths
 
 DEFAULTS = {
+    "owner_id": "",
+    "local_id": "",
     "redis_url": "redis://localhost:6379/0",
     "ttl_seconds": 604800,
     "half_life_days": 3,
@@ -45,95 +47,82 @@ DEFAULTS = {
     "context_max_chars": 9500,
 }
 
-# key -> (kind, low, high, low_inclusive)   kind: "int" | "num"
-_RANGES = {
-    "ttl_seconds": ("int", 1, None, True),
-    "search_result_limit": ("int", 1, None, True),
-    "search_query_max_chars": ("int", 1, None, True),
-    "embedding_dim": ("int", 1, None, True),
-    "chunk_threshold": ("int", 50, None, True),
-    "ttl_refresh_top_k": ("int", 0, None, True),
-    "version_min_chars": ("int", 0, None, True),
-    "min_results": ("int", 0, None, True),
-    "half_life_days": ("num", 0, None, False),
-    "bm25_min_threshold": ("num", 0, None, True),
-    "access_count_weight": ("num", 0, None, True),
-    "access_count_max_boost": ("num", 0, None, True),
-    "rerank_weight": ("num", 0, None, True),
-    "rerank_phrase_weight": ("num", 0, None, True),
-    "min_score": ("num", 0, 1, True),
-    "vector_min_cos": ("num", 0, 1, True),
-    "relative_min_score_ratio": ("num", 0, 1, True),
-    "version_sim_threshold": ("num", 0, 1, True),
-    "b_session_match": ("num", 0, 1, True),
-    "b_session_mismatch": ("num", 0, 1, True),
-    "server_port": ("int", 1, 65535, True),
-    "context_max_chars": ("int", 2000, 10000, True),
+_INT_MIN = {
+    "ttl_seconds": 1, "search_result_limit": 1, "search_query_max_chars": 1, "embedding_dim": 1,
+    "chunk_threshold": 50, "ttl_refresh_top_k": 0, "version_min_chars": 0, "min_results": 0,
 }
+_NUM_POSITIVE = ("half_life_days",)
+_NUM_NONNEG = ("bm25_min_threshold", "access_count_weight", "access_count_max_boost",
+               "rerank_weight", "rerank_phrase_weight")
+_NUM_UNIT = ("min_score", "vector_min_cos", "relative_min_score_ratio", "version_sim_threshold",
+             "b_session_match", "b_session_mismatch")
 
 
-def _is_int(v) -> bool:
+def _is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
 
 
-def _is_num(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
 
 
-def config_value_ok(key, value, chunk_threshold=None) -> bool:
-    """Type and range check of one config value (§6). Unknown keys and IDs are not checked."""
-    if key not in DEFAULTS:
+def config_value_ok(key, value, chunk_threshold=None):
+    """Type and range check for one setting (spec section 6). Unknown keys and keys without a default pass."""
+    if key not in DEFAULTS or key in ("owner_id", "local_id"):
         return True
-    if key == "chunk_overlap":
-        if not _is_int(value) or value < 0:
-            return False
-        ct = chunk_threshold if chunk_threshold is not None else DEFAULTS["chunk_threshold"]
-        return value < ct
     default = DEFAULTS[key]
     if isinstance(default, bool):
         return isinstance(value, bool)
     if isinstance(default, str):
         return isinstance(value, str)
-    rng = _RANGES.get(key)
-    if rng is None:
-        return _is_num(value)
-    kind, lo, hi, lo_incl = rng
-    if kind == "int" and not _is_int(value):
-        return False
-    if kind == "num" and not _is_num(value):
-        return False
-    if lo is not None and (value < lo if lo_incl else value <= lo):
-        return False
-    if hi is not None and value > hi:
-        return False
+    if key in _INT_MIN:
+        return _is_int(value) and value >= _INT_MIN[key]
+    if key == "chunk_overlap":
+        ct = chunk_threshold if chunk_threshold is not None else DEFAULTS["chunk_threshold"]
+        return _is_int(value) and 0 <= value < ct
+    if key == "server_port":
+        return _is_int(value) and 1 <= value <= 65535
+    if key == "context_max_chars":
+        return _is_int(value) and 2000 <= value <= 10000
+    if key in _NUM_POSITIVE:
+        return _is_num(value) and value > 0
+    if key in _NUM_NONNEG:
+        return _is_num(value) and value >= 0
+    if key in _NUM_UNIT:
+        return _is_num(value) and 0 <= value <= 1
     return True
 
 
-def _stderr(msg: str) -> None:
+def _atomic_write(path, text):
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=folder)
     try:
-        print(msg, file=sys.stderr, flush=True)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, path)
     except Exception:
-        pass
-
-
-def _write_tmp(folder: pathlib.Path, data: bytes) -> str:
-    folder.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=str(folder))
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    return tmp
-
-
-def _create_exclusive(path: pathlib.Path, data: bytes) -> bool:
-    """Create `path` only if it does not exist (§6). True when this call created it."""
-    tmp = _write_tmp(path.parent, data)
-    try:
         try:
-            os.link(tmp, str(path))
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _create_exclusive(path, data: bytes) -> bool:
+    """Create path only if it does not exist yet (temp file + os.link, or open(path, 'x'))."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        try:
+            os.link(tmp, path)
             return True
         except FileExistsError:
             return False
-        except OSError:
+        except (OSError, NotImplementedError, AttributeError):
             try:
                 with open(path, "xb") as f:
                     f.write(data)
@@ -142,174 +131,168 @@ def _create_exclusive(path: pathlib.Path, data: bytes) -> bool:
                 return False
     finally:
         try:
-            os.remove(tmp)
+            os.unlink(tmp)
         except OSError:
             pass
 
 
-def replace_atomic(path: pathlib.Path, data: bytes) -> None:
-    tmp = _write_tmp(path.parent, data)
-    try:
-        os.replace(tmp, str(path))
-    except Exception:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
-
-
-def _dump(obj) -> bytes:
-    return (json.dumps(obj, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-
-
-def _read_json(path: pathlib.Path):
+def _read_json(path):
     with open(path, "r", encoding="utf-8-sig") as f:
-        return json.load(f)
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("top level is not a JSON object")
+    return data
 
 
-def _new_file_content() -> dict:
-    d = {"owner_id": str(uuid.uuid4()), "local_id": str(uuid.uuid4())}
-    d.update(DEFAULTS)
-    return d
-
-
-def _migrate_legacy(path: pathlib.Path) -> None:
-    if os.environ.get("N3MC_DATA_DIR"):
-        return
-    try:
-        legacy = paths.legacy_config_path()
-    except Exception:
-        return
-    if not legacy.is_file():
-        return
-    try:
-        data = legacy.read_bytes()
-    except OSError:
-        return
-    if _create_exclusive(path, data):
-        _stderr(f"N3MC Lite: copied the settings from {legacy} to {path} (the old file was left in place).")
-
-
-def load_config() -> dict:
-    """Load (or create) config.json. Never overwrites a file it cannot read (§6)."""
-    path = paths.config_path()
-    notices = []
-    file_data = None
-    unreadable = False
-
-    if not path.exists():
-        _migrate_legacy(path)
-    if not path.exists():
-        _create_exclusive(path, _dump(_new_file_content()))
-
+def _read_with_retry(path):
+    """Read a config another process just created; retry up to 2 s while it is still unparsable."""
     deadline = time.time() + 2.0
     while True:
         try:
-            file_data = _read_json(path)
-            if not isinstance(file_data, dict):
-                raise ValueError("the top level is not a JSON object")
-            break
-        except Exception as e:  # noqa: BLE001
-            reason = f"{type(e).__name__}: {e}"
-            if time.time() < deadline and isinstance(e, (json.JSONDecodeError, ValueError)) and path.exists() \
-                    and path.stat().st_size == 0:
-                time.sleep(0.1)
-                continue
-            unreadable = True
-            file_data = None
-            notices.append(
-                f"config_unreadable: {path} could not be read ({reason}), so N3MC Lite is running with "
-                f"the default settings and a temporary owner_id for now; memories saved meanwhile will not be "
-                f"visible after the server restarts. The file was left unchanged: fix it and the server "
-                f"restarts with it on the next call.")
-            break
+            return _read_json(path)
+        except (ValueError, OSError):
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.1)
 
-    cfg = dict(DEFAULTS)
-    if unreadable:
-        cfg["owner_id"] = str(uuid.uuid4())
-        cfg["local_id"] = str(uuid.uuid4())
-    else:
-        bad = []
-        for key in DEFAULTS:
-            if key == "chunk_overlap" or key not in file_data:
-                continue
-            if config_value_ok(key, file_data[key]):
-                cfg[key] = file_data[key]
+
+def _emit(cfg, message):
+    cfg["_notices"].append(message)
+    try:
+        print(message, file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _effective(raw, cfg):
+    """Fill cfg from raw: valid keys only, invalid keys reported."""
+    bad = []
+    ct = raw.get("chunk_threshold")
+    if "chunk_threshold" not in raw or not config_value_ok("chunk_threshold", ct):
+        ct = DEFAULTS["chunk_threshold"]
+    for key, default in DEFAULTS.items():
+        if key in ("owner_id", "local_id"):
+            continue
+        if key in raw:
+            v = raw[key]
+            if config_value_ok(key, v, chunk_threshold=ct):
+                cfg[key] = v
             else:
                 bad.append(key)
-        ct = cfg["chunk_threshold"]
-        if "chunk_overlap" in file_data:
-            if config_value_ok("chunk_overlap", file_data["chunk_overlap"], ct):
-                cfg["chunk_overlap"] = file_data["chunk_overlap"]
-            else:
-                bad.append("chunk_overlap")
-                cfg["chunk_overlap"] = DEFAULTS["chunk_overlap"]
-        if cfg["chunk_overlap"] >= ct:
-            cfg["chunk_overlap"] = ct // 4
-        if bad:
-            notices.append(
-                f"config_type: these settings in {path} have the wrong type or are out of range and were "
-                f"ignored (the defaults are used): {', '.join(bad)}.")
-        changed = False
-        for k in ("owner_id", "local_id"):
-            v = file_data.get(k)
-            if isinstance(v, str) and v:
-                cfg[k] = v
-            else:
-                file_data[k] = cfg[k] = str(uuid.uuid4())
-                changed = True
-        for key, val in DEFAULTS.items():
-            if key not in file_data:
-                file_data[key] = val
-                changed = True
-        if changed:
-            try:
-                replace_atomic(path, _dump(file_data))
-            except OSError as e:
-                _stderr(f"N3MC Lite: could not update {path}: {e}")
+                cfg[key] = default
+        else:
+            cfg[key] = default
+    # chunk_overlap must stay below the effective chunk_threshold
+    if cfg["chunk_overlap"] >= cfg["chunk_threshold"]:
+        cfg["chunk_overlap"] = cfg["chunk_threshold"] // 4
+    for key, v in raw.items():
+        if key not in DEFAULTS and key not in cfg:
+            cfg[key] = v
+    return bad
 
+
+def load_config():
+    """Load config.json (creating it exclusively when missing). Never overwrites an unreadable file."""
+    path = paths.config_path()
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["_notices"] = []
+    cfg["_unreadable"] = False
+    cfg["_path"] = path
+
+    # One-time migration from the v1.6.x location.
+    if not os.path.exists(path) and not os.environ.get("N3MC_DATA_DIR"):
+        try:
+            legacy = paths.legacy_config_path()
+            if os.path.isfile(legacy):
+                with open(legacy, "rb") as f:
+                    data = f.read()
+                if _create_exclusive(path, data):
+                    print("N3MC Lite: migrated config.json from %s to %s" % (legacy, path), file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print("N3MC Lite: could not migrate the old config.json (%s)" % exc, file=sys.stderr)
+
+    if not os.path.exists(path):
+        new = {"owner_id": str(uuid.uuid4()), "local_id": str(uuid.uuid4())}
+        new.update({k: v for k, v in DEFAULTS.items() if k not in new})
+        data = (json.dumps(new, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            raw = new if _create_exclusive(path, data) else _read_with_retry(path)
+        except (ValueError, OSError) as exc:
+            _unreadable(cfg, path, exc)
+            return _finish(cfg)
+    else:
+        try:
+            raw = _read_json(path)
+        except (ValueError, OSError) as exc:
+            _unreadable(cfg, path, exc)
+            return _finish(cfg)
+
+    bad = _effective(raw, cfg)
+    ids_missing = False
+    for key in ("owner_id", "local_id"):
+        v = raw.get(key)
+        if isinstance(v, str) and v:
+            cfg[key] = v
+        else:
+            cfg[key] = str(uuid.uuid4())
+            ids_missing = True
+    if bad:
+        _emit(cfg, "config_type: %s has a wrong type or out-of-range value for: %s. "
+                   "Those settings were ignored and the defaults are used." % (path, ", ".join(bad)))
+    missing = [k for k in DEFAULTS if k not in raw]
+    if ids_missing:
+        missing += [k for k in ("owner_id", "local_id") if k not in missing]
+    if missing:
+        merged = dict(raw)
+        for k in missing:
+            merged[k] = cfg[k] if k in ("owner_id", "local_id") else DEFAULTS[k]
+        try:
+            _atomic_write(path, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            print("N3MC Lite: could not update %s (%s)" % (path, exc), file=sys.stderr)
+    return _finish(cfg)
+
+
+def _unreadable(cfg, path, exc):
+    cfg["_unreadable"] = True
+    cfg["owner_id"] = str(uuid.uuid4())
+    cfg["local_id"] = str(uuid.uuid4())
+    _emit(cfg, "config_unreadable: %s could not be read (%s). The file was left unchanged; "
+               "defaults and a temporary owner_id are used. Fix the file and restart the client."
+          % (path, exc))
+
+
+def _finish(cfg):
     env_url = os.environ.get("N3MC_REDIS_URL")
     if env_url:
         cfg["redis_url"] = env_url
-    cfg["_notices"] = notices
-    cfg["_unreadable"] = unreadable
-    cfg["_path"] = str(path)
-    for n in notices:
-        _stderr("N3MC Lite: " + n)
     return cfg
 
 
-CODE_FILES = ("app.py", "tools.py", "tooldefs.py", "instructions.py", "context.py", "database.py",
-              "processor.py", "config.py", "paths.py", "cli.py")
+_CODE_FILES = ("app.py", "tools.py", "tooldefs.py", "instructions.py", "context.py", "database.py",
+               "processor.py", "config.py", "paths.py", "cli.py")
 
 
 def code_version() -> str:
-    """SHA-256 (first 16 hex) of the server's code files plus config.json (§3.15)."""
-    import hashlib
-    pkg = os.path.dirname(os.path.abspath(__file__))
+    """First 16 hex chars of SHA-256 over the code files followed by config.json (spec section 3.15)."""
     h = hashlib.sha256()
-    for name in CODE_FILES:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in _CODE_FILES:
         try:
-            with open(os.path.join(pkg, name), "rb") as f:
+            with open(os.path.join(here, name), "rb") as f:
                 h.update(f.read())
         except OSError:
             pass
-    h.update(config_fingerprint())
-    return h.hexdigest()[:16]
-
-
-def config_fingerprint() -> bytes:
-    """config.json as it counts for code_version (§3.15): canonical JSON, raw bytes, or nothing."""
-    path = paths.config_path()
     try:
-        raw = path.read_bytes()
+        with open(paths.config_path(), "rb") as f:
+            raw = f.read()
+        try:
+            obj = json.loads(raw.decode("utf-8-sig"))
+            if isinstance(obj, dict):
+                raw = json.dumps(obj, sort_keys=True).encode("utf-8")
+        except ValueError:
+            pass
+        h.update(raw)
     except OSError:
-        return b""
-    try:
-        obj = json.loads(raw.decode("utf-8-sig"))
-        if isinstance(obj, dict):
-            return json.dumps(obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    except Exception:
         pass
-    return raw
+    return h.hexdigest()[:16]

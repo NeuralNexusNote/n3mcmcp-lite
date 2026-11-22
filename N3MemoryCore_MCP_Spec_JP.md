@@ -302,7 +302,7 @@ n3memorycore-mcp-lite/
 
 `.claude-plugin/marketplace.json` の `metadata.version` と、`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` の `version` は、パッケージのバージョン（`2.0.0`）である。**`uvx` のコマンドは同じバージョンに固定する（2026-11-19 決定）**。この文書にあるすべての `uvx --from n3memorycore-mcp-lite==<version>`（プラグインのフック、許可ルール、ルールファイルの `{cli}`、デスクトップの登録）は、パッケージのバージョンを書く。リリースでは、これらすべてを 2 つの `version` フィールドと一緒に変える。固定しないと、プラグインと pip のインストールが別のバージョンを動かしうる。それらのサーバーは `code_version` が違うので、互いを置き換え合う（§4.6）。
 
-**そのまま残すファイル（この指示書からは作らない）**：`SECURITY.md`、`CONTRIBUTING.md`、`docs/`、`.github/`（issue と PR のテンプレート、`workflows/test.yml`、`workflows/pypi-publish.yml`）、`server.json`（MCP レジストリの項目）、`.gitignore`、評価用スクリプト `tests/eval_*.py`、`tests/test_cross_session.py`（2026-11-19 決定：残す）。コードを作り直しても、これらを消したり書き換えたりしてはならない。（v2.0.0：この一覧は、これまでリポジトリにしかなかった。）`.github/workflows/test.yml` の CI マトリクスを手で直すときは、Windows と Linux だけを並べる。
+**そのまま残すファイル（この指示書からは作らない）**：`SECURITY.md`、`CONTRIBUTING.md`、`.github/`（issue と PR のテンプレート、`workflows/test.yml`、`workflows/pypi-publish.yml`）、`server.json`（MCP レジストリの項目）、`.gitignore`、評価用スクリプト `tests/eval_*.py`、`tests/test_cross_session.py`（2026-11-19 決定：残す）。コードを作り直しても、これらを消したり書き換えたりしてはならない。（v2.0.0：この一覧は、これまでリポジトリにしかなかった。）`.github/workflows/test.yml` の CI マトリクスを手で直すときは、Windows と Linux だけを並べる。
 
 ---
 
@@ -578,7 +578,7 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
 上記ハイブリッドスコア計算後、CPU のみの任意リランクパスで各候補のスコアに以下を加算する：
 
-- `coverage × rerank_weight`（既定重み `0.3`）：`coverage` はクエリトークンのうち content に出現するものの割合。**クエリと content の両方を `prepare_query`（§3.7）でトークナイズする** — NFKC、制御文字と ASCII・CJK・全角の句読点を空白に置換、**空白分割 + CJK バイグラム**の和集合、小文字化 — ので、content 中の `note,` は `note` として数えられる。バイグラムを足さないと `.split()` が純 CJK クエリ全体を 1 トークンに潰してしまい、coverage が「クエリ全体の部分文字列一致か否か」の二値に退化するため、日本語・中国語でも coverage が実効的な信号となるよう拡張している。（v1.7.0 は空白だけで分割していたので、句読点が続く語は一度も数えられなかった — Lite レビュー LM8。）
+- `coverage × rerank_weight`（既定重み `0.3`）：`coverage` はクエリトークンのうち content に出現するものの割合。**クエリと content の両方を `prepare_query`（§3.7）でトークナイズする** — NFKC、制御文字と ASCII・CJK・全角の句読点を空白に置換、**空白分割 + CJK バイグラム**の和集合、小文字化 — ので、content 中の `note,` は `note` として数えられる（トークンは `prepare_query(text).split()` を小文字にした集合である。純 CJK の連なりは 2 文字ずつのバイグラムだけを出し、連なり全体を 1 つのトークンとしては出さない）。バイグラムを足さないと `.split()` が純 CJK クエリ全体を 1 トークンに潰してしまい、coverage が「クエリ全体の部分文字列一致か否か」の二値に退化するため、日本語・中国語でも coverage が実効的な信号となるよう拡張している。（v1.7.0 は空白だけで分割していたので、句読点が続く語は一度も数えられなかった — Lite レビュー LM8。）
 - `rerank_phrase_weight`（既定 `0.2`）：クエリ文字列全体が content の部分文字列として出現する場合に加算（大文字小文字非依存）。
 
 親ドキュメントの解決は**語彙リランクの前に**行う：チャンクヒットは先に `doc:<parent_id>` の全文 verbatim に展開されてからリランク対象になる。これにより、クエリ句が「ヒットしたチャンク」ではなく「同じ文書の別チャンク」に存在する場合でも、親ドキュメントのランクが正しくブーストされる（[§3.11](#311-全文再現親ドキュメントチャンクパターン) 参照）。
@@ -675,7 +675,7 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
 親レベルのチェックを通過した場合、単一の `save_memory` 呼び出しで（v1.7.1）：
 1. 本文を分割し、**先にすべてのチャンクの埋め込みを計算する**（まだ Redis には書かない）。
 2. `doc:<parent_id>` と**すべての**チャンクのフィールドを組み立てる（チャンクごとの sha ガード無し、各チャンクの `parent_id` フィールドに親 ID を格納）。
-3. ガードを取り、それらを書くのを **1 つの** Lua スクリプト `SAVE_WITH_GUARD` で行う（(A) の手順 4 と同じ）。`KEYS = [docsha:<sha1(full_text)>, doc:<parent_id>, mem:<chunk_id>, …]` で、`SET <guard> <parent_id> NX EX <ttl_seconds>` のあと、親とすべてのチャンクに `HSET` + `EXPIRE` を行う。ガードがもうあれば何も書かず、既存の `parent_id` を付けて `duplicate` を返す。
+3. ガードを取り、それらを書くのを **1 つの** Lua スクリプト `SAVE_WITH_GUARD` で行う（(A) の手順 4 と同じ）。`KEYS = [docsha:<sha1(full_text)>, doc:<parent_id>, mem:<chunk_id>, …]` で、`SET <guard> <parent_id> NX EX <ttl_seconds>` のあと、親とすべてのチャンクに `HSET` + `EXPIRE` を行う。`ARGV` は `[<parent_id>, <ttl_seconds>]` に続けて、`KEYS` の 2 番目以降の各キーについて、その順に `<フィールドと値の組の数>, <フィールド>, <値>, …` を並べたものである（(A) の手順 4 の `ARGV` は、レコードが 1 つのときのこの並びである）。ガードがもうあれば何も書かず、既存の `parent_id` を付けて `duplicate` を返す。
 4. 失敗したときは (A) の手順 4 と同じ：書きかけのものは残らず、ガードはこの `parent_id` を持ち `doc:<parent_id>` がないときだけ削除し、同じ本文をもう一度保存できる。
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LM1）**：v1.7.0 は親と `docsha:` を最初のパイプラインで書き、そのあとでチャンクの埋め込みを計算してチャンクを書いていた。その間で失敗する（接続断、埋め込みの例外）と、チャンクのない親とガードが残った：文書は見つからず（検索はチャンクにしかヒットしない）、再保存は 7 日間 `duplicate` で拒否された（再現済み）。
@@ -1034,7 +1034,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 `GET /health` は `{"status": "ok", "root": "<absolute path of the data folder>", "code_version": "<16 hex chars>", "pid": 12345, "redis": "<host>:<port>/<db>"}` を返す。
 
 - `root`：データフォルダの絶対パス（`N3MC_DATA_DIR` か `~/.n3mc-workingmemory`）。`os.path.normcase(os.path.abspath(...))` で比べる。
-- `code_version`：`app.py`・`tools.py`・`tooldefs.py`・`instructions.py`・`context.py`・`database.py`・`processor.py`・`config.py`・`paths.py`・`cli.py` の内容に、続けて `config.json` の内容を足したものの SHA-256 の、先頭 16 桁の 16 進数。`config.json` は、JSON のオブジェクトとして読めればキーを並べた `json.dumps(..., sort_keys=True)`、読めなければ生のバイト列、ファイルがなければ何も足さない。空白やキーの順だけでは変わらない。**そのため `config.json` を直すと、次の呼び出しでサーバーが再起動する。** 変えた設定はこうして反映される。
+- `code_version`：`app.py`・`tools.py`・`tooldefs.py`・`instructions.py`・`context.py`・`database.py`・`processor.py`・`config.py`・`paths.py`・`cli.py` の内容に、続けて `config.json` の内容を足したものの SHA-256 の、先頭 16 桁の 16 進数。`config.json` は、JSON のオブジェクトとして読めればキーを並べた `json.dumps(..., sort_keys=True)`、読めなければ生のバイト列、ファイルがなければ何も足さない。空白やキーの順だけでは変わらない。**そのため `config.json` を直すと、次の呼び出しでサーバーが再起動する。** 変えた設定はこうして反映される。サーバーはこの値を**起動したときに 1 回だけ**計算し、`/health` は以後その値を返し続ける（`/health` のたびに計算し直すと、動いているサーバーは常にディスクのファイルと一致して見え、置き換わらない）。
 - `pid`：サーバーのプロセス ID。
 - `redis`（2026-11-20、L7）：サーバーが使う Redis（**サーバーの**環境の `N3MC_REDIS_URL` で上書きしたあとの `redis_url`、§3.3）。ユーザー名とパスワードは除く。サーバーは、それを起動したプロセス（フック、CLI、MCP の入口）の環境を引き継ぐ。そのため `ensure_server` は、これを自分の実際の `redis_url` と比べる。違うときは、そのサーバーをそのまま使い（データフォルダは同じ）、通知 `redis_url_mismatch` を出す（`The N3MC Lite server uses Redis at <server's>, but this process is set to <own>. Put redis_url into <config.json path> instead of setting N3MC_REDIS_URL per application, then restart the server (it restarts after config.json changes).`）。これだけでサーバーを置き換えることはしない。設定の違う 2 つのアプリが、呼び出しのたびに互いのサーバーを止め合うからである。
 
@@ -1059,7 +1059,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 #### サーバーの起動（`_start_server`）
 
-1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（Windows の Python の `mcp` の stdio クライアント。`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さない。2026-11-20 に確かめた）では、サーバーは入口と一緒に終わる。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。
+1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さないもの）では、サーバーは入口と一緒に終わることがある。Windows の Python の `mcp` の stdio クライアントは、2026-11-20 に確かめたときは終わらせたが、2026-11-22 に `mcp` 1.27.0・Windows 11 で確かめたときは、入口を閉じた後もサーバーは動いていた。どちらも正しい動作である。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。
 2. 0.5 秒ごとに最大 60 秒、`/health` を確かめる。その間に子プロセスが終わったら（`proc.poll() is not None`）、すぐに待つのをやめる。
 3. その早い終了のとき：`server_start_failed`（"The N3MC Lite memory server could not start (exit code <n>). See <server.log path> for the reason."）を出し、データフォルダの目印のファイル `server_start_failed` に時刻を書き、PID ファイルが子プロセスの PID を持っていれば消し、サーバーなしで続ける。`Popen` 自体が例外を出したときは、サーバーなしで続ける（stderr に 1 行）。
    - **サーバーのプロセス自身も起動の失敗を記録する（M2、2026-11-20）**：`run_server` が例外で終わるとき、または 0 / `None` 以外のコードの `SystemExit` で終わるとき（uvicorn はポートを bind できないとき、こう終わる）は、終わる前に自分で `server_start_failed`（"The N3MC Lite memory server could not start (<exit code n \| ErrorType: message>). See <server.log path> for the reason."）を出し、目印のファイルを書く。例外は握りつぶさない。**理由**：フックは `ensure_server(cfg, max_wait=0)` で呼ぶので子プロセスの終了を見ない。これがないと、起動できないサーバーをフックのたびに起動し直し、通知も 5 分の待ちも働かず、表示は「still starting」のままだった。
@@ -1120,7 +1120,7 @@ def python_cmd():
 
 #### `/shutdown`
 
-`{"root": str}` を付けた `POST /shutdown`：`root` がサーバー自身のデータフォルダと同じときだけ、`{"status": "ok"}` と応答し、0.3 秒後に終わる（PID ファイルが自分の PID を持っていれば消す）。そうでなければ 403。テストでは `_request_shutdown` と HTTP の送り手を差し替え、本物のサーバーには何も届かないようにする。
+`{"root": str}` を付けた `POST /shutdown`：`root` がサーバー自身のデータフォルダと同じときだけ、`{"status": "ok"}` と応答し、0.3 秒後に終わる（PID ファイルが自分の PID を持っていれば消す。ファイルを読んで閉じてから消す：Windows は開いているファイルを消せない）。そうでなければ 403。テストでは `_request_shutdown` と HTTP の送り手を差し替え、本物のサーバーには何も届かないようにする。
 
 #### ポートがほかのフォルダのサーバーのものだったとき
 
@@ -2301,6 +2301,8 @@ n3mcmcp-lite/
 
 **（v2.0.0）Layer 3** はテストを保つ。ツールのハンドラは今は `tools.py` にあり（常駐サーバーの中で `/tools/<name>` のハンドラとして呼ばれる）、文の確認は変わらない。
 
+**残すテスト `tests/test_cross_session.py` が使う内部の形（2026-11-22、書き漏れの補足）**：このファイルはこの指示書からは作らないが、次の名前を呼ぶので、生成するコードと `conftest.py` はそれらを備えなければならない。`conftest.py`：`cfg` と並べて、フィクスチャ `rconn`（フラッシュ済みのテスト用 Redis の接続。決定的な偽の埋め込みを適用済み）。`Database(cfg, default_session=<str>)`：セッションを渡さなかったときの `save_memory` と `search` のセッション。`Database.ensure_connected()` は成功すると `"ok"` を返す。`Database.client` は redis-py のクライアント（`close()` できる）。`Database.search(query)` は `(普通の行, 弱い行, メッセージ)` の 3 つ組を返し、行は `content`・`score`・`session_id` を持つ dict で、親ドキュメントのヒットは `_doc` が真。`tools.ToolRunner(cfg, db).call(name, args, nudge=False)` は、その `Database` でツールのハンドラを動かし、文を返す。
+
 ### Layer 1: `tests/test_database.py`（34 テスト）
 
 | テストクラス | テスト内容 | カバレッジ |
@@ -2444,7 +2446,7 @@ n3mcmcp-lite/
 | `TestThinNoServer` | サーバーがない / まだ起動中 / 起動に失敗した / ほかのフォルダのサーバー：`save_memory` は直接保存する（`embedding` フィールドなし、§4.6 の `warning` と `detail`）。ほかのツールは §4.6 の文を返す。Redis も止まっている → バックエンドエラーの JSON |
 | `TestThinStart` | `ensure_server` は、始まったときにバックグラウンドのスレッドで 1 回（それが止まっている間も `initialize` に応答する。差し替えて確かめる）と、毎回のツール呼び出しの前に動く。入口は決して `/shutdown` を呼ばない |
 | `TestThinNoModel` | 薄いクライアントを import して動かしても、`sentence_transformers` や `torch` を import しない（`sys.modules`）。MCP のメッセージ以外は stdout に何も書かない（取り込んで確かめる） |
-| `TestThinSubprocess`（*Redis*） | 一時的な `N3MC_DATA_DIR` と、`HF_HOME` に本物の Hugging Face のキャッシュのフォルダ（fixture が `HOME` を差し替える前に求める。モデルがそのキャッシュになければ飛ばす。テストが約 440 MB を取りに行くことはない — L16）を付けて子プロセスとして起動した `n3mc-workingmemory` と、`mcp.client.stdio.stdio_client` で話す：2 秒以内の `initialize`、7 つのツール、テスト用のポートの本物のサーバーを通した `save_memory` から `search_memory` への往復。クライアントを閉じた後もサーバーは動いており、テストがそれを止める。ただし Windows では、Python の `mcp` の stdio クライアントのジョブがサーバーも終わらせる（§3.15）ので、閉じた後はサーバーがないことを確かめる（2026-11-20） |
+| `TestThinSubprocess`（*Redis*） | 一時的な `N3MC_DATA_DIR` と、`HF_HOME` に本物の Hugging Face のキャッシュのフォルダ（fixture が `HOME` を差し替える前に求める。モデルがそのキャッシュになければ飛ばす。テストが約 440 MB を取りに行くことはない — L16）を付けて子プロセスとして起動した `n3mc-workingmemory` と、`mcp.client.stdio.stdio_client` で話す：2 秒以内の `initialize`、7 つのツール、テスト用のポートの本物のサーバーを通した `save_memory` から `search_memory` への往復。クライアントを閉じた後もサーバーは動いており、テストがそれを止める。ただし、クライアントのジョブがサーバーも終わらせることがある（§3.15）ので、閉じた後にサーバーが動いていれば止め、なくなっていれば次の CLI の呼び出しで起動し直すことを確かめる（どちらでも合格。2026-11-22） |
 
 ### Layer 9: `tests/test_context_limit.py`（v2.0.0）
 
@@ -2567,7 +2569,7 @@ pytest tests/ -v -k "not TestEmbedding"
     3. `save_memory` で保存し、`python -m n3mc_mcp.cli --search`（同じ `N3MC_DATA_DIR`）で見つける。`--buffer` で保存し、`search_memory` で見つける。`save_memory` のレコードは `agent_name` が `test-client`（呼び出しが何も渡さないとき）で、役割の前置きはない。
     4. `list_memories`、`recall_thread`、`delete_memory`、`delete_memories_by_session`、`repair_memory` は v1.12.2 の文を返す（Layer 3）。
     5. サーバーを止め（`/shutdown`）、その起動をふさぎ（ポートを使用中にする）、`save_memory` を呼ぶ：レコードは §4.6 の `warning` / `detail` 付きでベクトルなしで保存される。`search_memory` は `Error: memory backend unreachable. …` を返す。入口は動き続ける。
-    6. MCP の入口を閉じる：サーバーは（動いていれば）まだ動いている（`/health`）。その後 `/shutdown` で止め、一時フォルダを消す。Windows では、このテストが使う Python の `mcp` の stdio クライアントは、閉じるときにジョブで子孫のプロセスを終わらせるので、サーバーも終わる（§3.15）。そこでは「サーバーがもうない」ことと、次の CLI の呼び出しでサーバーが起動し直すことを確かめる（2026-11-20）。
+    6. MCP の入口を閉じる：サーバーは（動いていれば）まだ動いている（`/health`）。その後 `/shutdown` で止め、一時フォルダを消す。Windows では、このテストが使う Python の `mcp` の stdio クライアントが、閉じるときにジョブで子孫のプロセスを終わらせ、サーバーも終わることがある（§3.15。2026-11-20 は終わり、2026-11-22 の `mcp` 1.27.0 では動いたままだった）。終わっていたら、次の CLI の呼び出しでサーバーが起動し直すことを確かめる。動いていたら、上のとおり `/shutdown` で止める。どちらでも合格である。
     このテストのために、MCP の入口を Claude Code や本物のデスクトップアプリの設定に登録しては**ならない**。
 
 11. **コンテキストの大きさの上限（v2.0.0、N3MC-Pro §6 テスト 19 と同様）**：`config.json` に `context_max_chars: 4000` と自分の `server_port` を書いた一時的なデータフォルダで、**テスト用**の Redis に対し、同じ話題についての 300〜400 文字のレコード 30 件（同じ文の単語をいくつかずつ変えたもの）を `--buffer` で保存する。その話題について尋ねる `prompt` を持つ `UserPromptSubmit` の JSON で `--hook-submit` を実行し、同じ質問で手の `--search` を実行し、それで MCP の `search_memory` を実行する。`--hook-submit` の stdout と `search_memory` の文は、それぞれ `context_size` の数え方（§3.17）で最大 4,000 であり、手の検索より行が少なく、`lower-ranked match(es) omitted to keep this block within the context limit` を含む。手の `--search` はすべての行を出力し、そのような行はない。次に、同じ話題の 20,000 文字の親ドキュメントを 1 つ保存し、フックの検索を繰り返す：出力はやはり収まり、その文書が最初の 3 つのヒットに入っていれば `_(cut here to keep this block within the context limit.)_` で終わる。
