@@ -4,7 +4,7 @@ This document records, as asked by section 4(b) of the Apache License 2.0,
 how **N3MemoryCore MCP Lite** (`n3mcmcp-lite`, PyPI
 `n3memorycore-mcp-lite`) uses and changes parts of **N3MC-Free**
 (`n3memorycore-free`). It applies from version 2.0.0 (see
-[CHANGELOG.md](./CHANGELOG.md); 2.0.0 is not released yet, and the code is
+[CHANGELOG.md](./CHANGELOG.md); the code is
 generated from the specification
 [`N3MemoryCore_MCP_Spec_EN.md`](./N3MemoryCore_MCP_Spec_EN.md)).
 

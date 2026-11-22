@@ -40,15 +40,15 @@ from pathlib import Path
 
 # The package version (spec §2). Release: change it together with hooks.json,
 # plugin.json and marketplace.json.
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 RULES = [
-    "Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search *)",
-    "Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --buffer *)",
-    "Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --list*)",
-    "Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --recall-thread *)",
-    "Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --repair*)",
-    "Bash(uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --stop*)",
+    "Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --search *)",
+    "Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --buffer *)",
+    "Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --list*)",
+    "Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --recall-thread *)",
+    "Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --repair*)",
+    "Bash(uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --stop*)",
 ]
 SEARCH_RULE = RULES[0]
 

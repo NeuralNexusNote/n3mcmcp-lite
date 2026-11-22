@@ -181,7 +181,7 @@ class TestRulesFile:
         cli._ensure_rules_md(str(b), uvx=True)
         ta, tb = open(self.rules(a), encoding="utf-8").read(), open(self.rules(b), encoding="utf-8").read()
         assert "-m n3mc_mcp.cli --search" in ta and "uvx" not in ta
-        assert "uvx --from n3memorycore-mcp-lite==2.0.0 n3mc-lite --search" in tb
+        assert "uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite --search" in tb
         assert ta.split("\n")[0] == "<!-- n3mc-lite-behavior v1 -->"
 
     def test_other_form_is_replaced_with_backup(self, isolate, tmp_path):
