@@ -494,7 +494,6 @@ On first run, `config.json` is auto-generated with random UUIDs for
   "access_count_enabled":     false,
   "access_count_weight":      0.02,
   "access_count_max_boost":   0.5,
-  "ttl_refresh_on_search":    true,
   "ttl_refresh_top_k":        5,
   "lexical_rerank_enabled":   true,
   "rerank_weight":            0.3,
@@ -514,11 +513,11 @@ On first run, `config.json` is auto-generated with random UUIDs for
 - `ttl_seconds` — TTL on every new memory and sha-guard (default 7 d).
 - `vector_min_cos` — how close (cosine) a record must be to the query to become a vector candidate (default `0.85`). A sensible range is 0.80–0.88 (lower: more recall, more loosely related rows; higher: shorter results). 0.85 was measured with `multilingual-e5-base`, so re-measure it if you change `embedding_model`.
 - `relative_min_score_ratio` — drop results scoring below this ratio × the top score (default `0.6`; `0.0` disables).
-- `min_results` — when fewer results than this pass the floors, the search adds the closest of the rows it dropped under a separate heading `#### Possibly related (weak matches — may be unrelated)` (default `3`; `0` turns it off). Weak rows never get their TTL reset.
+- `min_results` — when fewer results than this pass the floors, the search adds the closest of the rows it dropped under a separate heading `#### Possibly related (weak matches — may be unrelated)` (default `3`; `0` turns it off). Weak rows are not counted in `access_count`.
 - `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — results whose content is ≥ 0.98 similar are treated as versions and listed newest first. Each hit shows its `saved=` time.
 - `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (chars). Bodies longer than the threshold are stored as a parent document plus chunks, and a hit returns the whole text.
 - `access_count_*` — access-frequency boost; **off by default since 2026-11-17** (`access_count_enabled: false`); the hits are still counted.
-- `ttl_refresh_on_search` / `ttl_refresh_top_k` — TTL reset for the top-K hits on each search (reset-only; no extension past a fresh save).
+- `ttl_refresh_top_k` — the number of top hits whose `access_count` goes up on each search. The name is kept from earlier versions: a search never resets a TTL. (`ttl_refresh_on_search` was removed on 2026-11-22; a value left in your `config.json` is ignored.)
 - `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (CPU-only).
 - `b_session_match` / `b_session_mismatch` — ranking factor for rows whose stored `session_id` matches (default `1.0`) or not (`0.6`). Set both to `1.0` to disable the bias.
 - `skip_code_blocks` — when `true`, content containing a triple-backtick fence is not saved (`status: "skipped_code"`), also for hook saves. Default `false`: the body is saved with each code block replaced by `[code omitted]`.
@@ -614,8 +613,8 @@ port (18524), its own hook commands (`n3mc-lite-hook`,
 
 ## Limits
 
-- **7 days.** Every entry is deleted 7 days after it was saved (every normal
-  hit of a search gets its 7 days reset). `audit.log` is the exception: it has no TTL.
+- **7 days.** Every entry is deleted 7 days after it was saved. A search does
+  not extend it. `audit.log` is the exception: it has no TTL.
 - **In applications without hooks, saving is up to the model** (see below).
   Full conversations are kept only in Claude Code.
 - **The resident server must be able to run.** When it cannot start,

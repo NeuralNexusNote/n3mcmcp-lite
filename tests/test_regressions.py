@@ -528,20 +528,21 @@ class TestListPaging:
         assert "the earlier single memory" in out and "[doc×" in out
 
 
-class TestGuardRefresh:
-    def test_guard_ttl_follows_record(self, svc, db):
+class TestNoTtlRefresh:
+    def test_search_changes_no_ttl(self, svc, db):
+        # 2026-11-22: every record is deleted 7 days after it was saved; a search never resets a TTL.
         r = save(svc, "refresh guard record text")
         guard = MEM_SHA + processor.sha1_hex("refresh guard record text")
-        db.r.expire(guard, 50)
-        db.r.expire(MEM + r["id"], 50)
-        search(svc, "refresh guard record text")
-        assert db.r.ttl(guard) > 1000
         text = "refresh doc guard. " * 60
         p = save(svc, text)
         dg = DOC_SHA + processor.sha1_hex(text.strip())
-        db.r.expire(dg, 50)
-        search(svc, "refresh doc guard")
-        assert db.r.ttl(dg) > 1000
+        keys = [MEM + r["id"], guard, DOC + p["parent_id"], dg] + [MEM + c for c in p["ids"]]
+        for k in keys:
+            db.r.expire(k, 50)
+        assert "refresh guard record text" in search(svc, "refresh guard record text")
+        assert "refresh doc guard" in search(svc, "refresh doc guard")
+        for k in keys:
+            assert 0 < db.r.ttl(k) <= 50, k
 
 
 class TestOrBm25:
@@ -626,7 +627,7 @@ class TestAccessCountNoGhost:
         r = save(svc, "ghost candidate memory")
         rows, _, _ = db.search("ghost candidate memory", "s", 5)
         db.delete_memory(r["id"])
-        db._refresh(rows)
+        db._count_access(rows)
         assert db.r.keys("mem:*") == []
 
 
@@ -670,8 +671,8 @@ class TestConditionalWrites:
         s = db._scripts
         assert s["incr"](keys=[MEM + "no1"], args=["access_count", 1]) is None
         assert s["hset"](keys=[MEM + "no2"], args=["embedding", b"x"]) == 0
-        assert s["guard"](keys=[MEM + "no3", MEM_SHA + "g"], args=["id", 100]) == 0
-        assert not db.r.exists(MEM + "no1", MEM + "no2", MEM + "no3", MEM_SHA + "g")
+        assert "guard" not in s
+        assert not db.r.exists(MEM + "no1", MEM + "no2")
 
     def test_existing_record_keeps_ttl(self, db):
         r = db.save_memory("conditional write target")
@@ -763,7 +764,7 @@ class TestWeakMatches:
     def test_default_min_results_is_3(self):
         assert config.DEFAULTS["min_results"] == 3
 
-    def test_weak_rows_do_not_refresh_ttl(self, svc, db):
+    def test_weak_rows_are_not_counted(self, svc, db):
         svc.cfg["min_score"] = 0.9
         a = save(svc, "alpha beta gamma delta")
         b = save(svc, "alpha completely different words here")
@@ -775,7 +776,8 @@ class TestWeakMatches:
         if "Possibly related" in out:
             assert db.r.ttl(MEM + b["id"]) <= 300
             assert int(db.r.hget(MEM + b["id"], "access_count")) == 0
-        assert db.r.ttl(MEM + a["id"]) > 1000
+        assert int(db.r.hget(MEM + a["id"], "access_count")) == 1
+        assert 0 < db.r.ttl(MEM + a["id"]) <= 300
 
 
 class TestGuardReleasedOnAnyFailure:

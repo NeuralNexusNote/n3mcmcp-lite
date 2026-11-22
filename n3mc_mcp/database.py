@@ -56,14 +56,6 @@ end
 return 0
 """
 
-SET_GUARD_IF_EXISTS = """
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
-  return 1
-end
-return 0
-"""
-
 _SEARCH_FIELDS = ["content", "timestamp", "timestamp_epoch", "owner_id", "agent_name", "session_id",
                   "turn_id", "importance", "access_count", "parent_id"]
 
@@ -163,7 +155,6 @@ class Database:
             "save": self.r.register_script(SAVE_WITH_GUARD),
             "incr": self.r.register_script(INCR_IF_EXISTS),
             "hset": self.r.register_script(HSET_IF_EXISTS),
-            "guard": self.r.register_script(SET_GUARD_IF_EXISTS),
         }
         return self.r
 
@@ -629,48 +620,19 @@ class Database:
         rows = list(merged.values())
         main, weak = processor.build_results(rows, query, cfg, effective_session, limit,
                                              self._parents, self._repr)
-        self._refresh(main[:max(0, cfg["ttl_refresh_top_k"])] if cfg["ttl_refresh_on_search"] else [])
+        self._count_access(main[:max(0, cfg["ttl_refresh_top_k"])])
         return main[:limit], weak, (processor.model_unavailable_message(cfg) if model_missing else "")
 
-    def _refresh(self, rows):
-        """TTL refresh and access_count for ordinary rows (3.14 step 7). Never called for weak rows."""
+    def _count_access(self, rows):
+        """access_count +1 on the matched chunk of ordinary rows (3.14 step 7). Never called for weak rows.
+
+        A search changes no TTL (decided 2026-11-22, 3.3): every record is deleted 7 days after it was saved."""
         if not rows:
             return
-        ttl = self.cfg["ttl_seconds"]
-        r = self.r
-        plan = []  # (row, [keys])
-        p1 = r.pipeline(transaction=False)
+        pipe = self.r.pipeline(transaction=False)
         for row in rows:
-            if row.get("_is_parent"):
-                keys = [DOC + row["id"]]
-                chunk_ids = list(row.get("chunk_ids") or [])
-                if row["_chunk_id"] not in chunk_ids:
-                    chunk_ids.append(row["_chunk_id"])
-                keys += [MEM + c for c in chunk_ids]
-            else:
-                keys = [MEM + row["id"]]
-            plan.append((row, keys))
-            for k in keys:
-                p1.expire(k, ttl)
-        res = p1.execute()
-        p2 = r.pipeline(transaction=False)
-        pos = 0
-        any_cmd = False
-        for row, keys in plan:
-            ok = {k: bool(res[pos + i]) for i, k in enumerate(keys)}
-            pos += len(keys)
-            hit_key = MEM + row["_chunk_id"]
-            if ok.get(hit_key):
-                self._scripts["incr"](keys=[hit_key], args=["access_count", 1], client=p2)
-                any_cmd = True
-            rec_key = (DOC + row["id"]) if row.get("_is_parent") else (MEM + row["id"])
-            if ok.get(rec_key) and not (not row.get("_is_parent") and row.get("parent_id")):
-                prefix = DOC if row.get("_is_parent") else MEM
-                guard = guard_key_for(prefix, row.get("content", ""), row.get("turn_id", ""))
-                self._scripts["guard"](keys=[rec_key, guard], args=[row["id"], ttl], client=p2)
-                any_cmd = True
-        if any_cmd:
-            p2.execute()
+            self._scripts["incr"](keys=[MEM + row["_chunk_id"]], args=["access_count", 1], client=pipe)
+        pipe.execute()
 
     # ------------------------------------------------------------------ list / thread
     def _scan(self, pattern):

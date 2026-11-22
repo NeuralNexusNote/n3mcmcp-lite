@@ -32,7 +32,6 @@ DEFAULTS = {
     "access_count_enabled": False,
     "access_count_weight": 0.02,
     "access_count_max_boost": 0.5,
-    "ttl_refresh_on_search": True,
     "ttl_refresh_top_k": 5,
     "lexical_rerank_enabled": True,
     "rerank_weight": 0.3,
