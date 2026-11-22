@@ -87,7 +87,7 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 | モデルが `save_memory` に渡すと決めたものだけが保存された | **空でないすべてのメッセージと応答をフックが保存する**（コードブロックは `[code omitted]` にする）。保存は `[user]` / `[claude]` のレコードになる（§3.16） |
 | モデルがターンの最初に `search_memory` を呼んでいた | `UserPromptSubmit` フックが、メッセージのたびに検索し、結果を `# Recalled Memory Context` の見出しで Claude のコンテキストに入れる（§12） |
 | 検索・一覧・取り出し・削除は MCP のツールだった | Claude Code では CLI が同じことをする：`n3mc-lite --search`、`--list`、`--recall-thread`、`--delete`、`--delete-session`、`--buffer`、`--repair`（§13）。表示する文はツールの文と同じである |
-| アプリごとに自分の MCP サーバーを起動し、モデル（約 440 MB）を読み込んでいた | 1 つの常駐サーバーがモデルを 1 回だけ読み込む（§3.15）。MCP の入口は薄いクライアントで、モデルを読み込まない（§4.6） |
+| アプリごとに自分の MCP サーバーを起動し、モデル（約 1.1 GB）を読み込んでいた | 1 つの常駐サーバーがモデルを 1 回だけ読み込む（§3.15）。MCP の入口は薄いクライアントで、モデルを読み込まない（§4.6） |
 | セッションの合間に動くプロセスはなかった | 常駐サーバーは、一度起動するとバックグラウンドで動き続ける |
 | pip の利用者は MCP サーバーを登録した | pip の利用者は `n3mc-lite --init` を 1 回実行してフックを登録する（§12）。Claude Code に残った古い `n3mc-workingmemory` の登録はもう使われない。方法 A はそれを消し、`--init` は知らせるだけで残す（§8） |
 | 古いプラグインや `.mcp.json` が `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`（版の指定なし）を起動していた | **プラグインを更新する**（`/plugin update`）。それまでは、`uvx` が 2.0.0 を取ってくると、その登録が 2.0.0 の薄いクライアントを Claude Code の MCP サーバーとして、フックなしで起動する。モデルは v1.12.2 と同じくツールで検索と保存をし、それが常駐サーバーを通る（§4.6）。`n3mc-lite --init` は、そのような登録を知らせる（§8） |
@@ -158,7 +158,7 @@ docker start redis-stack
 1. **Redis Stack を起動**（上記）。
 2. **本仕様書を AI に読み込ませて実装を依頼**：この指示書だけを入れた**空のフォルダ**(たとえば `~/n3mcmcp-lite`)で Claude Code を開きます。AI は最初にフォルダ・Python・Redis を確かめ([§1](#1-ビジョン) の「セットアップ前の確認」)、足りないものがあれば手順を示して止まります。そのうえで `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）を Claude 等に渡し、「この指示書に従って n3mcmcp-lite を実装してください」と依頼します。AI がパッケージ構成・RediSearch インデックス作成・常駐サーバー・フック・CLI・MCP の薄いクライアントまで生成します。段階的な **実装 → デバッグ → 自律評価 → 品質レビュー** の 4 フェーズ・ワークフローは [付録 B](#付録-b推奨-ai-支援ワークフロー) を参照。
 3. **導入と登録(AI が行う)**：AI がプロジェクトルートで `pip install -e .` を実行し、`n3mc-lite --init` で Claude Code に**フック**を登録し(v2.0.0)、Claude デスクトップアプリが入っていれば、その設定に足す MCP の入口の項目(絶対パス入り)を示し(そのアプリの設定ファイルは AI が書き換えず、利用者が足す。決定 D11)、すべてが起動することを確かめます([§8「コード生成の後の自動登録」](#コード生成の後の自動登録方法-a--必須))。Claude Code の設定ファイルを自分で編集する必要はありません。
-4. **クライアントを再起動**。再起動の後の最初の記憶の検索は、常駐サーバーが ~440 MB の埋め込みモデルをダウンロードしてロードするので 30–60 秒かかります。
+4. **クライアントを再起動**。再起動の後の最初の記憶の検索は、常駐サーバーが ~1.1 GB の埋め込みモデルをダウンロードしてロードするので 30–60 秒かかります。
 
 #### 方法 B：パッケージ導入（おまけ）
 
@@ -182,7 +182,7 @@ docker start redis-stack
 3. **アプリをつなぐ**（v2.0.0）：
    - **Claude Code**：プラグインの利用者は何もしない。プラグインがフックを登録する。pip の利用者は `n3mc-lite --init` を 1 回実行する（§12）。Claude Code に MCP サーバーを登録してはならない。
    - **Claude デスクトップアプリ**（とその他の MCP クライアント）：アプリの設定に MCP の入口を登録する（[§8](#8-クライアント設定) 参照）。
-4. **クライアントを再起動**。最初の記憶の検索は、常駐サーバーが ~440 MB の埋め込みモデルをダウンロードしてロードするので 30–60 秒かかります。
+4. **クライアントを再起動**。最初の記憶の検索は、常駐サーバーが ~1.1 GB の埋め込みモデルをダウンロードしてロードするので 30–60 秒かかります。
 
 ### データバックアップ
 
@@ -227,7 +227,7 @@ Lite は Claude Marketplace で N3MemoryCore MCP の外向き仕様をゼロリ�
 >
 > git は要らない。`git clone` ではなくコピーでコードを受け取った場合も、git なしで続けよ。
 
-> **⚠️ 初回ダウンロード**：`sentence-transformers` が初回ツール使用時に `multilingual-e5-base` モデル（~440 MB）をダウンロードします。その間サーバーは無応答に見えますが、これは想定動作です。キャッシュ後は数秒で起動します。
+> **⚠️ 初回ダウンロード**：`sentence-transformers` が初回ツール使用時に `multilingual-e5-base` モデル（~1.1 GB）をダウンロードします。その間サーバーは無応答に見えますが、これは想定動作です。キャッシュ後は数秒で起動します。
 
 > **重要：文字数上限（設計制約）**
 > - フックの保存（Claude Code、v2.0.0）：空でないすべてのメッセージと応答を丸ごと保存する。長さやスキップのパターンによる絞り込みはない。長いものは下の親ドキュメントの経路をとる（§3.16）。
@@ -344,7 +344,7 @@ n3memorycore-mcp-lite/
 > | 26 | ツール呼び出しがモデルのロックを無制限に待つ | 初回のダウンロード中（数分）はツール呼び出しがすべて止まり、クライアントのツールタイムアウトに達しうる | 待つのは最大 20 秒。そのあとは通知付きでキーワードだけで続ける | [§3.9](#39-起動シーケンスと自己回復) |
 > | 27 | TTL の更新が重複ガードを飛ばす／BM25 の語を AND でつなぐ／読めない `since` を無視する | よく使う記録が 7 日後に 2 回保存されうる／文のようなクエリでキーワードがヒットしない／`since="yesterday"` で全件を検索する | ガードもレコードと一緒に更新する（2026-11-22 に廃止：検索は TTL を変えない、§3.3）。語は OR でつなぐ。読めない時刻の範囲は拒否する | [§3.3](#33-redis-接続と-ttl)、[§3.7](#37-トークナイズと句読点処理)、[§4.3.1](#431-取り出し拡張ツールretrieval-extensions) |
 > | 28 | 「キーがあるか」の確認と書き込みを別々のコマンドで送る | 確認と書き込みの間に削除（別のプロセスの `delete_memory`）または失効したレコードが、`access_count` か `embedding` だけを持つハッシュとして **TTL なしで**作り直される — 失効せず、どの削除でも消えない。レコードの削除後にガードを設定し直すと、同じ内容を 7 日間保存できなくなる | 確認と書き込みを **1 つの Lua スクリプト**で行う（`EXISTS` のあとに `HINCRBY` / `HSET` / `SET … EX`） | [§3.3](#33-redis-接続と-ttl) |
-> | 29 | （v2.0.0）MCP の入口がモデルを import する、または stdout に出力する | アプリごとに約 440 MB をまた読み込む。紛れ込んだ `print()` が JSON-RPC の流れを壊す | 薄いクライアントは `sentence_transformers` も `torch` も import しない。stdout には MCP のメッセージ以外を出さない | [§4.6](#46-mcp-の薄いクライアントv200) |
+> | 29 | （v2.0.0）MCP の入口がモデルを import する、または stdout に出力する | アプリごとに約 1.1 GB をまた読み込む。紛れ込んだ `print()` が JSON-RPC の流れを壊す | 薄いクライアントは `sentence_transformers` も `torch` も import しない。stdout には MCP のメッセージ以外を出さない | [§4.6](#46-mcp-の薄いクライアントv200) |
 > | 30 | （v2.0.0）`127.0.0.1` に `urllib.request.urlopen` を使う | `HTTP_PROXY` が設定されている（会社の PC）と、すべてのリクエストがプロキシに行く。サーバーが止まっているように見え、フックはすべて待たされる | リクエストは `build_opener(ProxyHandler({}))` で開く | [§3.15](#315-常駐サーバーv200) |
 > | 31 | （v2.0.0）エンドポイントを `async def` で書く | 長い `/repair` や検索が `/health` を止める。CLI はサーバーがないと判断し、もう 1 つ起動する | Redis かモデルにさわるエンドポイントは、すべて普通の `def` にする | [§3.15](#315-常駐サーバーv200) |
 > | 32 | （v2.0.0）プラグインのフックと `--init` のフックの両方が登録される | メッセージごとに検索が 2 つ差し込まれる。1 つのやりとりの `[user]` と `[claude]` のレコードが別々の `turn_id` を持つ | プラグインが有効な間、`--init` は何も登録しない。プラグインの SessionStart フックは `--init` のフックを知らせる | [§14](#14-ほかの-n3mc-製品との共存v200) |
@@ -724,8 +724,8 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
    - `intfloat/multilingual-e5-base` をメモリにロードし、初回ツール呼び出しが一度だけのモデルロードで遅くならないようにする。
    - **まずローカルのキャッシュだけで構築する**：`huggingface_hub.constants.HF_HUB_OFFLINE` を `True` にした状態で（終わったら元の値に戻す）`SentenceTransformer(<model>, local_files_only=True)` で構築する。それが失敗したとき（初回の起動、キャッシュが欠けている）だけ、これらの指定なしで構築し直す（ここでダウンロードする）。**理由**：ファイルがキャッシュ済みでも、通常の構築は各ファイルが更新されていないかを Hub に問い合わせる。transformers 5.x は `local_files_only` を指定しても、tokenizer の読み込みでモデルの情報を Hub に問い合わせる。Windows 11（2026-11-16）での実測：構築は通常 5.5 秒・キャッシュだけ 2.0 秒、この構築を待つ `initialize` 直後の最初の `search_memory` は 5.7〜5.9 秒と 1.8〜2.0 秒で、§10-1 の目標 3.0 秒を超えるか下回るかが分かれた。
    - **非致命的**：ロード失敗（オフライン・HF キャッシュ未生成等）時は警告を出して続行。あとの `save_memory` / `search_memory` で遅延リトライするが、**再試行は 60 秒に 1 回まで**（`MODEL_RETRY_SECONDS`）。その間は `embed()` が取得を試みずにすぐ `None` を返す。
-   - **ロード中のツール呼び出しが待つのは最大 20 秒（v1.7.1、決定 LD4）**：バックグラウンドのロードがロックを持っている間にモデルを必要とするツール呼び出しは、ロックを最大 `MODEL_WAIT_SECONDS = 20` 秒だけ待つ。それまでにロードが終わらなければ、この呼び出しでは `embed()` が `None` を返す：`search_memory` はキーワードだけで動き、先頭に `> ⚠️ N3MC notice: The embedding model (<embedding_model>) is still loading (the first start downloads ~440 MB), so this search used keywords only and new entries are saved without vectors. Retry in a minute.` を付ける。`save_memory` はベクトルなしで保存し、`"warning": "embedding_unavailable", "detail": "<the same text>"` を付ける。ベクトルなしで保存したエントリは、あとで `repair_memory`（§3.10）がベクトルを付ける。**20 秒にする理由**：Hugging Face のキャッシュがあれば、モデルの構築は import のあと約 5 秒（実測、下の注記）なので、通常の起動中に来た呼び出しも 4 倍の余裕でベクトルを得られる。初回のダウンロードは数分かかり、そのままではすべてのツール呼び出し（とイベントループ）を、一般的なクライアントのツールタイムアウトを超えて止めてしまう。**フックはまったく待たない（M3、2026-11-20）**：フックがサーバー経由で送る保存と検索は `"no_model_wait": true` を付ける（§4.5、§12.3 の手順 4）。その要求の中では、`get_model()` はロックを取らず、待たず、自分でモデルを読み込まない。モデルの準備ができていなければ、上の通知の文とともにすぐ戻る（検索はその通知を付けてキーワードだけで動き、保存はベクトルなしで続け、あとで `/repair` がベクトルを足す）。モデルが読み込まれておらず、読み込みも動いていない（失敗した読み込みの 60 秒の再試行の待ちも過ぎている）ときは、裏のスレッドで読み込みを始める。**理由**：フックは発言のたびにこの呼び出しを 3 回する（前の応答、検索、発言）ので、20 秒の待ちでは、初回のダウンロードの間、発言のたびに約 55 秒（フックの子プロセスのタイムアウト）待った。「フックはサーバーの起動を待たない」（L8）と同じ決定である。MCP のツールと CLI のコマンドは、20 秒の待ちのまま。
-   - **劣化中の知らせ（v1.7.0）**：モデルが使えない間は、黙って劣化せずにそう伝える。`processor.model_status()` は最後の読み込みエラーを返す。`search_memory` は出力の先頭に `> ⚠️ N3MC notice: <model_unavailable_message>` を付け（最初の 1 回だけでなく、劣化中は毎回）、`save_memory` は `"warning": "embedding_unavailable"` の横に `"detail": "<model_unavailable_message>"` を付ける。文面（英語）：`The embedding model (<embedding_model>) could not be loaded (<error>), so search is keyword-only (BM25) and new entries are saved without vectors. The first start downloads the model (~440 MB) from Hugging Face: check the network or proxy, or pre-download it. The server retries automatically.` `stderr` には、失敗した試行ごとに 1 行（多くても 1 分に 1 回）出す。
+   - **ロード中のツール呼び出しが待つのは最大 20 秒（v1.7.1、決定 LD4）**：バックグラウンドのロードがロックを持っている間にモデルを必要とするツール呼び出しは、ロックを最大 `MODEL_WAIT_SECONDS = 20` 秒だけ待つ。それまでにロードが終わらなければ、この呼び出しでは `embed()` が `None` を返す：`search_memory` はキーワードだけで動き、先頭に `> ⚠️ N3MC notice: The embedding model (<embedding_model>) is still loading (the first start downloads ~1.1 GB), so this search used keywords only and new entries are saved without vectors. Retry in a minute.` を付ける。`save_memory` はベクトルなしで保存し、`"warning": "embedding_unavailable", "detail": "<the same text>"` を付ける。ベクトルなしで保存したエントリは、あとで `repair_memory`（§3.10）がベクトルを付ける。**20 秒にする理由**：Hugging Face のキャッシュがあれば、モデルの構築は import のあと約 5 秒（実測、下の注記）なので、通常の起動中に来た呼び出しも 4 倍の余裕でベクトルを得られる。初回のダウンロードは数分かかり、そのままではすべてのツール呼び出し（とイベントループ）を、一般的なクライアントのツールタイムアウトを超えて止めてしまう。**フックはまったく待たない（M3、2026-11-20）**：フックがサーバー経由で送る保存と検索は `"no_model_wait": true` を付ける（§4.5、§12.3 の手順 4）。その要求の中では、`get_model()` はロックを取らず、待たず、自分でモデルを読み込まない。モデルの準備ができていなければ、上の通知の文とともにすぐ戻る（検索はその通知を付けてキーワードだけで動き、保存はベクトルなしで続け、あとで `/repair` がベクトルを足す）。モデルが読み込まれておらず、読み込みも動いていない（失敗した読み込みの 60 秒の再試行の待ちも過ぎている）ときは、裏のスレッドで読み込みを始める。**理由**：フックは発言のたびにこの呼び出しを 3 回する（前の応答、検索、発言）ので、20 秒の待ちでは、初回のダウンロードの間、発言のたびに約 55 秒（フックの子プロセスのタイムアウト）待った。「フックはサーバーの起動を待たない」（L8）と同じ決定である。MCP のツールと CLI のコマンドは、20 秒の待ちのまま。
+   - **劣化中の知らせ（v1.7.0）**：モデルが使えない間は、黙って劣化せずにそう伝える。`processor.model_status()` は最後の読み込みエラーを返す。`search_memory` は出力の先頭に `> ⚠️ N3MC notice: <model_unavailable_message>` を付け（最初の 1 回だけでなく、劣化中は毎回）、`save_memory` は `"warning": "embedding_unavailable"` の横に `"detail": "<model_unavailable_message>"` を付ける。文面（英語）：`The embedding model (<embedding_model>) could not be loaded (<error>), so search is keyword-only (BM25) and new entries are saved without vectors. The first start downloads the model (~1.1 GB) from Hugging Face: check the network or proxy, or pre-download it. The server retries automatically.` `stderr` には、失敗した試行ごとに 1 行（多くても 1 分に 1 回）出す。
 
      > **⚠️ 理由（v1.7.0、§A6 のオフラインの試験）**：ネットワークがなくモデルも未取得のとき、v1.6.x はツールの呼び出しのたびにダウンロードをやり直し、`save_memory` は 1 回約 24 秒、`search_memory` は約 12 秒かかった。`search_memory` にはベクトル検索が止まっている印がなく、ログも `Cannot send a request, as the client has been closed.` だけだった。
 
@@ -1293,7 +1293,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 #### サーバーが使えないとき
 
-「使えない」とは、`ensure_server` が使えるサーバーなしで戻ったこと（60 秒たってもまだ起動中、起動に失敗した、または失敗から 5 分以内なので起動を飛ばした、ほかのフォルダのサーバーがポートを持っている）、または `/tools` のリクエストが失敗したこと（接続エラー、タイムアウト、2xx でない応答）である。`<reason>` は、`the memory server is still starting (the first start downloads the embedding model, ~440 MB)`、`the memory server could not start; see <server.log path>`、`another N3MC folder's server is using port <port>`、またはリクエストのエラーのどれかである。
+「使えない」とは、`ensure_server` が使えるサーバーなしで戻ったこと（60 秒たってもまだ起動中、起動に失敗した、または失敗から 5 分以内なので起動を飛ばした、ほかのフォルダのサーバーがポートを持っている）、または `/tools` のリクエストが失敗したこと（接続エラー、タイムアウト、2xx でない応答）である。`<reason>` は、`the memory server is still starting (the first start downloads the embedding model, ~1.1 GB)`、`the memory server could not start; see <server.log path>`、`another N3MC folder's server is using port <port>`、またはリクエストのエラーのどれかである。
 
 | ツール | 応答 |
 |---|---|
@@ -2439,7 +2439,7 @@ n3mcmcp-lite/
 | `TestReview20261122b` | 利用者とパスワードを含む正しい URL の `redis_display` はホスト・ポート・DB だけを示す。解析できない URL（`redis://u:secret@host:abc/0`）では `<unparseable redis_url>` になり、`/health` にも `redis_url_mismatch` の通知（stderr、`notices.json`、`audit.log`）にも `secret` が入らない。何も変えなければサーバーの `code_version` はクライアントと一致し（補完して書いたあとも）、`load_config()` と起動の間に `config.json` が変わると `stale`、再起動後に `ok`。`--stop-server`：止めた、動いていない、ほかのフォルダのサーバー、止められなかった（exit 1） |
 | `TestThinStart` | `ensure_server` は、始まったときにバックグラウンドのスレッドで 1 回（それが止まっている間も `initialize` に応答する。差し替えて確かめる）と、毎回のツール呼び出しの前に動く。入口は決して `/shutdown` を呼ばない |
 | `TestThinNoModel` | 薄いクライアントを import して動かしても、`sentence_transformers` や `torch` を import しない（`sys.modules`）。MCP のメッセージ以外は stdout に何も書かない（取り込んで確かめる） |
-| `TestThinSubprocess`（*Redis*） | 一時的な `N3MC_DATA_DIR` と、`HF_HOME` に本物の Hugging Face のキャッシュのフォルダ（fixture が `HOME` を差し替える前に求める。モデルがそのキャッシュになければ飛ばす。テストが約 440 MB を取りに行くことはない — L16）を付けて子プロセスとして起動した `n3mc-workingmemory` と、`mcp.client.stdio.stdio_client` で話す：2 秒以内の `initialize`、7 つのツール、テスト用のポートの本物のサーバーを通した `save_memory` から `search_memory` への往復。クライアントを閉じた後もサーバーは動いており、テストがそれを止める。ただし、クライアントのジョブがサーバーも終わらせることがある（§3.15）ので、閉じた後にサーバーが動いていれば止め、なくなっていれば次の CLI の呼び出しで起動し直すことを確かめる（どちらでも合格。2026-11-22） |
+| `TestThinSubprocess`（*Redis*） | 一時的な `N3MC_DATA_DIR` と、`HF_HOME` に本物の Hugging Face のキャッシュのフォルダ（fixture が `HOME` を差し替える前に求める。モデルがそのキャッシュになければ飛ばす。テストが約 1.1 GB を取りに行くことはない — L16）を付けて子プロセスとして起動した `n3mc-workingmemory` と、`mcp.client.stdio.stdio_client` で話す：2 秒以内の `initialize`、7 つのツール、テスト用のポートの本物のサーバーを通した `save_memory` から `search_memory` への往復。クライアントを閉じた後もサーバーは動いており、テストがそれを止める。ただし、クライアントのジョブがサーバーも終わらせることがある（§3.15）ので、閉じた後にサーバーが動いていれば止め、なくなっていれば次の CLI の呼び出しで起動し直すことを確かめる（どちらでも合格。2026-11-22） |
 
 ### Layer 9: `tests/test_context_limit.py`（v2.0.0）
 
@@ -2989,7 +2989,7 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 > 3. `~/.claude/settings.json` に CLI の許可ルール（`Bash(python -m n3mc_mcp.cli --search *)` …。[§8 自動許可](#自動許可claude-code-固有) 参照）があり、`claude mcp get n3mc-workingmemory` がそのようなサーバーはないと答えるか確認
 > 4. Redis Stack が起動していること（`docker ps` で確認、無ければ `docker start redis-stack` または `docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest`）
 > 5. Claude Code を**完全に終了 → 再起動**（**Windows**：右上 × ボタンや `/exit` だけでは残ることがあるため、**タスクマネージャ**で `Claude` / `claude` 関連プロセスをすべて終了させる。サーバーの新しい起動を計測するときは、コマンドラインに `n3mc_mcp.cli --run-server` を含む `python.exe` も終了させる）
-> 6. サーバー起動の後の最初の検索は、multilingual-e5-base（~440 MB）の HF キャッシュ未生成なら 2〜10 分。その間、フックは「まだ起動中」の代わりの出力か、通知付きのキーワードだけの結果を出力する（§3.9）
+> 6. サーバー起動の後の最初の検索は、multilingual-e5-base（~1.1 GB）の HF キャッシュ未生成なら 2〜10 分。その間、フックは「まだ起動中」の代わりの出力か、通知付きのキーワードだけの結果を出力する（§3.9）
 
 ---
 

@@ -7,6 +7,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **The model size in the notices is ~1.1 GB** (was ~440 MB): the "still
+  starting" reason of the MCP entry and the "still loading" / "could not be
+  loaded" notices name the size of `intfloat/multilingual-e5-base` that the
+  first start downloads (`model.safetensors` is 1,112 MB). Display change only;
+  the specification (EN / JP) says the same.
+
 ## [2.0.0] — 2026-11-22
 
 Specification v2.0.0 (EN / JP, 2026-11-19). A MAJOR version: the way Lite
