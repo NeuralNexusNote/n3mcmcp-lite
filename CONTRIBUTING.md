@@ -15,7 +15,7 @@ git clone https://github.com/<YOUR_USERNAME>/n3mcmcp-lite
 cd n3mcmcp-lite
 
 # 2. Start Redis Stack (required — RediSearch only indexes DB 0):
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
 
 # 3. Create a venv and install with dev deps:
 python -m venv .venv
@@ -134,7 +134,7 @@ git clone https://github.com/<YOUR_USERNAME>/n3mcmcp-lite
 cd n3mcmcp-lite
 
 # 2. Redis Stack を起動（必須 — RediSearch は DB 0 にしかインデックスを作れない）：
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
 
 # 3. venv を作って dev 依存込みでインストール：
 python -m venv .venv
