@@ -99,7 +99,8 @@ def parse_time(value, end_of_day: bool, name: str):
         if s.endswith(("Z", "z")):
             s = s[:-1] + "+00:00"
         return datetime.fromisoformat(s).timestamp()
-    except ValueError:
+    except (ValueError, OSError, OverflowError):
+        # OSError / OverflowError: a date the platform cannot convert (9999-12-31, 1969-12-31 on Windows; L3)
         raise err
 
 

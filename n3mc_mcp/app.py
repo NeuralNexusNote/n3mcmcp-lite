@@ -27,12 +27,13 @@ def _default_exit():
     os._exit(0)
 
 
-def create_app(service=None, port=None, start_model=False):
+def create_app(service=None, port=None, start_model=False, code_version=None):
     svc = service or Service(config_mod.load_config())
     serve_port = port or svc.cfg["server_port"]
     # The version of the code and config.json THIS server started with: a later edit of config.json makes
     # the next CLI/hook/MCP call see a different version and replace the server (spec 3.15).
-    started_version = config_mod.code_version()
+    # run_server computes it right after load_config() and passes it in (L4, 2026-11-22).
+    started_version = code_version or config_mod.code_version()
 
     @asynccontextmanager
     async def lifespan(app):

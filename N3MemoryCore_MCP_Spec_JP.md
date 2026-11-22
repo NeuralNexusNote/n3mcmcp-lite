@@ -96,7 +96,7 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 | `skip_code_blocks: true` は、フェンス付きの `save_memory` を断った | 同じ設定で、フェンスを含むフックのメッセージや応答も、すべて保存しない（§3.16）。既定の `false` なら `[code omitted]` にして保存する |
 | 最初の `uvx` の取得とモデルのダウンロードは、MCP サーバーの起動のときに起きた | 最初のフックの呼び出しのあと、裏で起きる。フックはサーバーを待たない（§12.3）ので、モデルの準備ができるまで、最初のメッセージはベクトルなしで保存され、キーワードだけで検索される |
 | `agent_name` のない `save_memory` は空の名前を保存した | MCP：`N3MC_AGENT_NAME`、なければクライアントの `clientInfo.name`、なければ空（§4.6）。フック：`claude-code` |
-| — | `--stop` は、Claude Code がターンを終えた各プロジェクトに `.claude/rules/n3mc-lite-behavior.md` を書く（§12.9） |
+| — | `--stop` は、Claude Code がターンを終えた各プロジェクトの根のフォルダに `.claude/rules/n3mc-lite-behavior.md` を書く（§12.4、§12.9） |
 | `examples/claude_code_mcp.json` が Claude Code への MCP の登録を示していた | 消した。Claude Code はフックを使う |
 | Redis の案内と README は `docker run … -p 6379:6379 …`（すべてのインターフェース）と書いていた | **（表示の変更、D9）** `-p 127.0.0.1:6379:6379` と書く。記憶がネットワークから届かなくなる。すでに作ったコンテナは、自分の設定のままである。変えるには作り直す（`docker rm -f redis-stack`、そのあと新しい `docker run`）。そのとき、そのコンテナの記憶は、ほかの再起動と同じく消える（§3.4） |
 | 規則 0 と検索のリマインダは、永続の記憶として `n3mc-longtermmemory` を挙げていた | **（表示の変更、D10）** `n3mc-pro`、`n3mc-pg`、`n3mc-longtermmemory`（N3MC MCP Pro、その PostgreSQL 版、以前の MCP Pro の MCP の登録名）を挙げる（§5 (1)、(2)） |
@@ -1025,9 +1025,9 @@ _If several versions of the same content appear, the one with the newest `saved`
 `GET /health` は `{"status": "ok", "root": "<absolute path of the data folder>", "code_version": "<16 hex chars>", "pid": 12345, "redis": "<host>:<port>/<db>"}` を返す。
 
 - `root`：データフォルダの絶対パス（`N3MC_DATA_DIR` か `~/.n3mc-workingmemory`）。`os.path.normcase(os.path.abspath(...))` で比べる。
-- `code_version`：`app.py`・`tools.py`・`tooldefs.py`・`instructions.py`・`context.py`・`database.py`・`processor.py`・`config.py`・`paths.py`・`cli.py` の内容に、続けて `config.json` の内容を足したものの SHA-256 の、先頭 16 桁の 16 進数。`config.json` は、JSON のオブジェクトとして読めればキーを並べた `json.dumps(..., sort_keys=True)`、読めなければ生のバイト列、ファイルがなければ何も足さない。空白やキーの順だけでは変わらない。**そのため `config.json` を直すと、次の呼び出しでサーバーが再起動する。** 変えた設定はこうして反映される。サーバーはこの値を**起動したときに 1 回だけ**計算し、`/health` は以後その値を返し続ける（`/health` のたびに計算し直すと、動いているサーバーは常にディスクのファイルと一致して見え、置き換わらない）。
+- `code_version`：`app.py`・`tools.py`・`tooldefs.py`・`instructions.py`・`context.py`・`database.py`・`processor.py`・`config.py`・`paths.py`・`cli.py` の内容に、続けて `config.json` の内容を足したものの SHA-256 の、先頭 16 桁の 16 進数。`config.json` は、JSON のオブジェクトとして読めればキーを並べた `json.dumps(..., sort_keys=True)`、読めなければ生のバイト列、ファイルがなければ何も足さない。空白やキーの順だけでは変わらない。**そのため `config.json` を直すと、次の呼び出しでサーバーが再起動する。** 変えた設定はこうして反映される。サーバーはこの値を**起動したときに 1 回だけ、`config.json` を読んだ直後（`load_config()` のすぐあと、Redis への接続やモデルの読み込みより前）に計算し、`run_server` がそれを `create_app(..., code_version=...)` に渡す。** `/health` は以後その値を返し続ける（L4、2026-11-22：もっとあとで計算すると、起動の途中で `config.json` が変わったとき、サーバーは 1 回目の内容で動くのに 2 回目の内容のハッシュを返し、次に変えるまで置き換わらなかった。また、`/health` のたびに計算し直すと、動いているサーバーは常にディスクのファイルと一致して見え、置き換わらない）。
 - `pid`：サーバーのプロセス ID。
-- `redis`（2026-11-20、L7）：サーバーが使う Redis（**サーバーの**環境の `N3MC_REDIS_URL` で上書きしたあとの `redis_url`、§3.3）。ユーザー名とパスワードは除く。サーバーは、それを起動したプロセス（フック、CLI、MCP の入口）の環境を引き継ぐ。そのため `ensure_server` は、これを自分の実際の `redis_url` と比べる。違うときは、そのサーバーをそのまま使い（データフォルダは同じ）、通知 `redis_url_mismatch` を出す（`The N3MC Lite server uses Redis at <server's>, but this process is set to <own>. Put redis_url into <config.json path> instead of setting N3MC_REDIS_URL per application, then restart the server (it restarts after config.json changes).`）。これだけでサーバーを置き換えることはしない。設定の違う 2 つのアプリが、呼び出しのたびに互いのサーバーを止め合うからである。
+- `redis`（2026-11-20、L7）：サーバーが使う Redis（**サーバーの**環境の `N3MC_REDIS_URL` で上書きしたあとの `redis_url`、§3.3）。ユーザー名とパスワードは除く。サーバーは、それを起動したプロセス（フック、CLI、MCP の入口）の環境を引き継ぐ。そのため `ensure_server` は、これを自分の実際の `redis_url` と比べる。違うときは、そのサーバーをそのまま使い（データフォルダは同じ）、通知 `redis_url_mismatch` を出す（`The N3MC Lite server uses Redis at <server's>, but this process is set to <own>. Put redis_url into <config.json path> instead of setting N3MC_REDIS_URL per application, then restart the server (it restarts after config.json changes).`）。これだけでサーバーを置き換えることはしない。設定の違う 2 つのアプリが、呼び出しのたびに互いのサーバーを止め合うからである。**消すとき（2026-11-22）**：自分のサーバーが答え、その `redis` がこのプロセスの実際の `redis_url` と一致したら、`ensure_server` は `redis_url_mismatch` を消す（`_clear_notice`）。（それまでは消す処理がなく、設定を直したあとも通知が 1 日 1 回ずっと出た。）
 
 #### サーバーの確認と置き換え（`ensure_server`）
 
@@ -1045,7 +1045,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 - **止め方（`_stop_stale_server`）**：`{"root": "<our data folder>"}` を付けて `POST /shutdown` を送る。`/shutdown` を知らないサーバーだけを、psutil で確かめた後に終わらせる。**PID ファイルの番号でプロセスを止めてはならない**（その番号は使い回されているかもしれない）。
 - **psutil での確かめ（`_is_own_server_process`）**：PID は `/health` の `pid` から、またはポートで待ち受けているプロセス（`psutil.net_connections`）から取る。コマンドラインに `n3mc_mcp.cli` と `--run-server` の両方を含み、かつその `N3MC_DATA_DIR` 環境変数から決まるデータフォルダ（既定 `~/.n3mc-workingmemory`）が自分のものと同じときだけ、「自分のサーバー」である。psutil がない、権限で拒否された、または何かが一致しないときは「確かめられない」：止めない。通知 `stale_server`（"Cannot stop the old N3MC Lite server. Another program may be using server_port <port>. Check server_port in config.json and restart manually."）を出す。自分の古いサーバーを止められないときは、それを使い続ける（同じ Redis を使っている）。
 - **PID ファイルの扱い**：`/health` が応答せず、PID ファイルの番号のプロセスがこのフォルダのサーバー（起動中）だと確かめられたときは、PID ファイルを残し、最大 60 秒（0.5 秒ごと）`/health` を確かめる。60 秒たってもまだ起動中（初回の起動はモデルをダウンロードする）なら、別のサーバーを起動せず、PID ファイルも消さない。この呼び出しはサーバーなしで続ける（下記）。それ以外（プロセスが死んでいる、番号が使い回された）のときは、PID ファイルを消してサーバーを起動する。それでも `import psutil` が失敗したときは、PID ファイルのプロセスを、ファイルの更新時刻から 60 秒の間は「まだ起動中」、その後は死んでいるものとして扱う。
-  - **サーバーが別のポートにいるとき（M1、2026-11-20）**：確かめた PID ファイルのプロセスを待つ前に、それがいまの `server_port` 以外のポートで待ち受けていないかを調べる（psutil で、その PID の `LISTEN` の接続）。サーバーが動いている間に利用者が `server_port` を変えると、こうなる。新しいポートの `/health` はずっと答えないので、この確認がないとサーバーは再起動しなかった（CLI は呼び出しのたびに 60 秒待ち、フックはずっとベクトルなしで保存した）。そうしたポートのうち `/health` がこのフォルダの `root` を返すものに `POST /shutdown`（`{"root": "<自分のデータフォルダ>"}`）を送り、そのポートが空くまで待ち（上と同じ 15 秒）、PID ファイルがまだその PID を持っていれば消し、待たずに「サーバーの起動」へ進む。`/health` が答えないポートや、別の `root` を返すポートには何もしない。PID ファイルの番号でプロセスを終わらせることはしない。起動中のサーバーはまだどのポートでも待ち受けていないので、上の待ちはそのまま働く。サーバーの `Host` の確認は起動時のポートを使う（§4.5）ので、古いサーバーは自分のポートで答え続ける。
+  - **サーバーが別のポートにいるとき（M1、2026-11-20）**：確かめた PID ファイルのプロセスを待つ前に、それがいまの `server_port` 以外のポートで待ち受けていないかを調べる（psutil で、その PID の `LISTEN` の接続）。サーバーが動いている間に利用者が `server_port` を変えると、こうなる。新しいポートの `/health` はずっと答えないので、この確認がないとサーバーは再起動しなかった（CLI は呼び出しのたびに 60 秒待ち、フックはずっとベクトルなしで保存した）。そうしたポートのうち `/health` がこのフォルダの `root` を返すものに `POST /shutdown`（`{"root": "<自分のデータフォルダ>"}`）を送り、そのポートが空くまで待ち（上と同じ 15 秒）、PID ファイルがまだその PID を持っていれば消し、待たずに「サーバーの起動」へ進む。`/health` が答えないポートや、別の `root` を返すポートには何もしない。PID ファイルの番号でプロセスを終わらせることはしない。起動中のサーバーはまだどのポートでも待ち受けていないので、上の待ちはそのまま働く。この確認には、PID ファイルにサーバー自身の PID が要る。サーバーは自分でそれを書く（§13「PID ファイル」、L1）。サーバーの `Host` の確認は起動時のポートを使う（§4.5）ので、古いサーバーは自分のポートで答え続ける。
 - 自分が起動したサーバーが応答したら、通知 `stale_server`・`port_conflict`・`server_start_failed` を消す。
 
 #### サーバーの起動（`_start_server`）
@@ -1123,7 +1123,7 @@ def python_cmd():
 
 #### 通知（`_notify`）
 
-人の対応が要り、サーバーの外から来る通知 — `stale_server`、`port_conflict`、`server_start_failed`、`redis_unreachable`（§12）、`save_failed`（§12）、`rules_md_edited:<hash>`（§12）— は、Free の `_notify(key, message)` を通す：
+人の対応が要り、サーバーの外から来る通知 — `stale_server`、`port_conflict`、`server_start_failed`、`redis_unreachable`（§12）、`save_failed`（§12）、`rules_md_edited:<hash>`（§12）、`redis_url_mismatch`（上の「サーバーの識別」）— は、Free の `_notify(key, message)` を通す：
 
 1. stderr に出す。
 2. `{"ts", "hook": "notice", "key", "message"}` を `audit.log` に追記する（同じキーとメッセージでは 1 回だけ）。
@@ -1222,7 +1222,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 **タイムゾーン（v1.7.1）**：日付だけの値と、オフセットのない日時は、**サーバーのローカルタイムゾーン**で読む — 出力の `saved=`（[§3.14](#314-検索結果の整形v170v172-から弱い候補で補充)）と同じ時計 — そしてエポック秒に変換する。オフセット付きの値（`2026-11-13T09:00:00+09:00`、`…Z`）はそのまま使う。日付と時刻の区切りは `T` でも空白でもよい。
 
-**読めない値（v1.7.1）**：`since` または `until` が指定されていて解析できない（`yesterday`、`2026/11/13`、`2026-13-01`）ときは、検索を実行せず、`TextContent` の `Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 or 2026-11-13T09:00:00+09:00 (got '<value>')` を返す（`until` も同様）。`since` が `until` より後なら `Error: since is later than until`。v1.7.3 から、どちらの文の後にも §4.3 のリマインダが付く。空文字列は「範囲なし」を意味する。
+**読めない値（v1.7.1）**：`since` または `until` が指定されていて解析できない（`yesterday`、`2026/11/13`、`2026-13-01`）とき、またはこのプラットフォームでエポック秒に変換できない（Windows のローカル時刻での `9999-12-31`、`1970-01-01`、`1969-12-31`：変換が `OSError` か `OverflowError` を出す。これも読めない値とみなす — 2026-11-22、L3。それまでは CLI がトレースバックで終わり、ツールは `Error: [Errno 22] Invalid argument` を返し、`/search` は 500 だった）ときは、検索を実行せず、`TextContent` の `Error: since must be an ISO 8601 date or datetime, e.g. 2026-11-13 or 2026-11-13T09:00:00+09:00 (got '<value>')` を返す（`until` も同様）。`since` が `until` より後なら `Error: since is later than until`。v1.7.3 から、どちらの文の後にも §4.3 のリマインダが付く。空文字列は「範囲なし」を意味する。
 
 > **⚠️ 理由（v1.7.1、Lite レビュー LM9）**：v1.7.0 は解析できない値を「フィルタなし」として扱ったので、`since="yesterday"` はストア全体から結果を返し、LLM は絞り込まれたものとして答えていた。また、オフセットのない値を UTC として読む一方で `saved=` はローカル時刻を表示するので、UTC+9 のホストでは `since="2026-11-13"` が、`saved=` でその日の 00:00〜08:59 に保存されたと表示されるものを落としていた。Free も同じ変更をした（v1.5.0）。
 
@@ -2420,9 +2420,10 @@ n3mcmcp-lite/
 | `TestServerDecision` | 正常 / 別の `code_version` / 別の `root` / `root` がなく確かめられない。先に `/shutdown`。PID ファイルの番号でプロセスを止めない。死んだ PID ファイルで待たない |
 | `TestServerStart` | プラットフォームごとの切り離しのフラグ、stderr は `server.log` へ、`-m n3mc_mcp.cli --run-server`。早く終わった子プロセスは待ちを終わらせ、`server_start_failed` を出し、目印を書く。5 分以内には新しく起動しない。後で成功すれば両方を消す。60 秒たってもまだ起動中の PID ファイルのプロセスは、置き換えも重複もしない（プロセスの作成は偽物） |
 | `TestNoProxy` | `HTTP_PROXY` がほかのローカルのサーバーを指していても、`_get` は N3MC Lite のサーバーに届き、プロキシには何も届かない |
-| `TestCommands` | `--search` → `max_chars` なしの `/search`。`--search --since/--until` はそのまま渡す。読めない `--since` は `Error:` の文を stderr に出し、exit 2 で終わる。`--buffer` → `/tools/save_memory?nudge=0`。`--list` → `list_memories`。`--recall-thread` → `--before` / `--after` 付きの `recall_thread`。`--delete` → `delete_memory`。`--delete-session` → `delete_memories_by_session`。`--repair` → `repair_memory`。どれも応答の文をそのまま出力する |
+| `TestCommands` | `--search` → `max_chars` なしの `/search`。`--search --since/--until` はそのまま渡す。読めない `--since` は `Error:` の文を stderr に出し、exit 2 で終わる。`--buffer` → `/tools/save_memory?nudge=0`。`--list` → `list_memories`。`--recall-thread` → `--before` / `--after` 付きの `recall_thread`。`--delete` → `delete_memory`。`--delete-session` → `delete_memories_by_session`。`--repair` → `repair_memory`。どれも応答の文をそのまま出力する。（2026-11-22、L3）`--until 9999-12-31` と `--since 1969-12-31` は `Error:` の 1 行を stderr に出して exit 2 で終わり、`search_memory` / `/search` は §4.3.1 の `Error:` の文を返す（`/search` は 400） |
+| `TestReview20261122` | L1：`_write_own_pid` は、別の番号の入った PID ファイルを上書きし、ないファイルは作る。`run_server` はそれを 2 回呼び、2 回目は待ち受けの前。PID ファイルのサーバーが別のポートで待ち受け、その `/health` がこのフォルダを返すとき、`_handle_other_port` はそのポートに `/shutdown` を送る。L2：`redis_url_mismatch` を出したあと、`redis` の一致する自分のサーバーが答えると消える。L4：`run_server` は Redis への接続とモデルの読み込みより前に `code_version` を計算し、その値を `create_app(..., code_version=...)` に渡す |
 | `TestForeignPort` | ポートにほかのフォルダのサーバーがいるとき：検索は `port_conflict` の代わりの出力を出し、`--list` / `--delete` はバックエンドエラーを出し、フックの保存は直接入る |
-| `TestStop` | `--stop` はルールファイルを書き（§12）、30 日より古い `turn_id_*.txt` を消し、50 MB を超えた `audit.log` をローテーションし（閾値は差し替える）、何も出力せず、サーバーは止めない。**2026-11-22**: フックの `cwd`（なければ作業フォルダ）がホームフォルダのとき、`--stop` は `.claude/rules/` に何も作らない（§12.4 の手順 1） |
+| `TestStop` | `--stop` はルールファイルを書き（§12）、30 日より古い `turn_id_*.txt` を消し、50 MB を超えた `audit.log` をローテーションし（閾値は差し替える）、何も出力せず、サーバーは止めない。**2026-11-22**: フックの `cwd`（なければ作業フォルダ）がホームフォルダのとき、`--stop` は `.claude/rules/` に何も作らない（§12.4 の手順 1）。**プロジェクトのフォルダ（2026-11-22）**: `CLAUDE_PROJECT_DIR` が別の一時フォルダを指すときは、規則ファイルをそこに作り、フックの `cwd` には何も作らない。変数がないときはフックの `cwd` に作る。変数がホームを指すときは何も作らない |
 
 ### Layer 8: `tests/test_mcp_client.py`（v2.0.0）
 
@@ -2662,7 +2663,7 @@ LLM の自発性に依存せず保存を保証したい場合、**MCP の建付�
 
 **`--stop`**（セッションの終わりの片付け。サーバーは止め**ない** — 止めるのは `--stop-server`、§13）：
 
-1. `<cwd>/.claude/rules/n3mc-lite-behavior.md` を用意する（§12.9）。`<cwd>` は Stop フックの JSON の `cwd` で、`n3mc-lite-stop-hook` が `--save-claude-turn` と同じく `--stop` にも stdin で渡す（L21、2026-11-20）。なければ、プロセスの作業フォルダ。**`<cwd>` がホームフォルダのとき**（または `cwd` がなく、作業フォルダがホームフォルダのとき）は、この手順を飛ばす：`~/.claude/rules/` はすべてのプロジェクトに効いてしまう。
+1. `<project>/.claude/rules/n3mc-lite-behavior.md` を用意する（§12.9）。`<project>` は、環境変数 `CLAUDE_PROJECT_DIR` があり、実在するフォルダを指すときはその値（Claude Code が、自分の起動するフックのコマンドに渡す。プラグインのフックも同じ。セッションを始めたプロジェクトの根。Windows ではスラッシュで書かれる。例 `C:/Users/you/work`。フックの入口の子プロセスにも引き継がれる）。なければ `<cwd>`：Stop フックの JSON の `cwd` で、`n3mc-lite-stop-hook` が `--save-claude-turn` と同じく `--stop` にも stdin で渡す（L21、2026-11-20）。それもなければ、プロセスの作業フォルダ。**`<project>` がホームフォルダのとき**は、この手順を飛ばす：`~/.claude/rules/` はすべてのプロジェクトに効いてしまう。**プロジェクトのフォルダにする理由（F3、2026-11-22）**：フックの `cwd` はセッションの今の作業フォルダで、Claude が `cd` したあとはそのサブフォルダになる。そのため `--stop` はサブフォルダにも規則ファイルを作っていた（開発機で見つかった）。サブフォルダの規則ファイルは、Claude がそのフォルダのファイルを読むたびに、プロジェクトの規則ファイルに重ねて読み込まれ、この製品をアンインストールしたあとも残る。すでにサブフォルダにできたファイルには触れない（`--stop` は利用者のフォルダを探さない）。この変更で変わる Lite の動きは、この置き場所の 1 点だけである。
 2. データフォルダの `turn_id_*.txt` のうち、更新時刻が 30 日より前のファイルを消す。
 3. `audit.log` が 50 MB を超えていればローテーションする。
 4. exit 0 で終わり、何も出力しない。手順 1〜3 のエラーは、それぞれ stderr の 1 行である。
@@ -2812,7 +2813,7 @@ def resolve_cmd(script_name: str) -> str:
 
 ### 12.9 ルールファイル `.claude/rules/n3mc-lite-behavior.md`
 
-Claude Code は、セッションの始まりにプロジェクトの `.claude/rules/*.md` を読み込む。`--stop` は `<cwd>/.claude/rules/n3mc-lite-behavior.md` を最新に保つ（`_ensure_rules_md`）。Free は `n3mc-behavior.md` を書く。両方の製品を入れられるように、名前を変えてある（§14）。
+Claude Code は、セッションの始まりにプロジェクトの `.claude/rules/*.md` を読み込む。`--stop` は `<project>/.claude/rules/n3mc-lite-behavior.md` を最新に保つ（`_ensure_rules_md`。`<project>` は §12.4 の手順 1 のプロジェクトのフォルダで、ホームフォルダにはしない）。Free は `n3mc-behavior.md` を書く。両方の製品を入れられるように、名前を変えてある（§14）。
 
 **テンプレート**（`_RULES_MD_TEMPLATE`。この文そのままで、最後の行の後に改行を 1 つ付ける。言い換えない）。`{cli}` は、このインストールのコマンドの形に置き換える：`<python> -m n3mc_mcp.cli`（pip。`<python>` は `--stop` を動かすプロセスの `shell_path(sys.executable)` — パッケージを持つ Python の絶対パスを、スラッシュで、空白を含むときだけ引用符で囲んだもの、§12.8）、または `--stop` が `--uvx` 付きで呼ばれたときは `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite`（プラグイン）。（L11、2026-11-20：パッケージを venv に入れたとき、ただの `python` は別の Python である。）
 
@@ -2925,7 +2926,7 @@ kept only in `audit.log`.
 - `--search`、`--list`、`--recall-thread`：使えるサーバーがないとき、`--search` は §12.7 の代わりの出力を出し、ツールのコマンドは §4.6 の表の文をリマインダなしで出力する。サーバーのない `--buffer` は直接保存し（§3.16、`role` なし）、§4.6 の `save_memory` の JSON をリマインダなしで出力する。
 - **時刻の範囲**：`--since` / `--until` は、リクエストの前に §4.3.1 の決まりで読む。読めない値、または `since` が `until` より後なら、§4.3.1 の `Error: …` の文を stderr に出し、終了コード 2 で終わる。
 - **終了コード**：0。ただし引数のエラーは 2、読めない `settings.json` での `--init` は 1。ツール自身のエラーの文（`Error: …`、`"status": "error"`）は、ツールが返したとおり、終了コード 0 で出力する。
-- **PID ファイル**：サーバーを起動するプロセス（`_start_server`）は、`Popen` の前に `open(path, "x")` で PID ファイルを作り、子プロセスの PID を書く。排他的な作成が失敗したら、ほかのプロセスがサーバーを起動している：「PID ファイルの扱い」（§3.15）に従う。**空か読めない PID ファイル**（L19、2026-11-20：作ってから書くまでの間）は、ファイルの更新時刻から 60 秒の間「起動中」として扱い、死んだプロセスとは扱わない。消さず、2 つ目のサーバーも起動しない。
+- **PID ファイル**：サーバーを起動するプロセス（`_start_server`）は、`Popen` の前に `open(path, "x")` で PID ファイルを作り、子プロセスの PID を書く。排他的な作成が失敗したら、ほかのプロセスがサーバーを起動している：「PID ファイルの扱い」（§3.15）に従う。**サーバーは自分の PID を書く（L1、2026-11-22）**：サーバーは、自分の `os.getpid()` を PID ファイルに 2 回書く（`_write_own_pid`：ファイルがなければ排他的に作り、あれば上書きする。`OSError` は無視する）。1 回目は `_run_server` の始め（Redis とモデルより前）、2 回目は `uvicorn.run` の直前である。起動した側は `Popen` が返った直後に `Popen.pid` を書くので、最後に書くのがサーバーになるようにする。Free も同じことを 1 回行う。理由：Windows では venv の `python.exe`（標準の venv も uv の venv も。したがって `uvx` も）はランチャーで、本体の Python を子として起動する。そのため `Popen.pid` はランチャーの番号になる（例：ランチャー 37620、サーバー 32424）。ランチャーはどのポートでも待ち受けないので、`server_port` を変えたあと §3.15 の別ポートの確認（M1）がポートを見つけられず、古いサーバーが止まらず、CLI は呼び出しのたびに 60 秒待った。`remove_pid_file_if_own()` の比較も一致しなかった。**空か読めない PID ファイル**（L19、2026-11-20：作ってから書くまでの間）は、ファイルの更新時刻から 60 秒の間「起動中」として扱い、死んだプロセスとは扱わない。消さず、2 つ目のサーバーも起動しない。
 - **Claude が聞かずに動かしてよいコマンド**：§8「自動許可」。`--delete`、`--delete-session`、`--init` は、いつも利用者の許可が要る。
 - 普通の出力に「run n3mc-lite --search …」のような案内を出さない。どのコマンドがあるかは、ルールファイルが Claude に伝える。
 

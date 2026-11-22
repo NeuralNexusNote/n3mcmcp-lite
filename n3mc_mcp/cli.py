@@ -391,7 +391,9 @@ def _after_ok(cfg, health):
     from .database import redis_display
     mine = redis_display(cfg["redis_url"])
     theirs = health.get("redis")
-    if theirs and theirs != mine:
+    if theirs and theirs == mine:
+        _clear_notice("redis_url_mismatch")  # the setting was fixed (2026-11-22, L2)
+    elif theirs and theirs != mine:
         _notify("redis_url_mismatch",
                 "The N3MC Lite server uses Redis at %s, but this process is set to %s. Put redis_url into %s "
                 "instead of setting N3MC_REDIS_URL per application, then restart the server (it restarts "
@@ -572,11 +574,13 @@ def unavailable_reason(cfg):
 def run_server():
     """Run the resident server in this process."""
     cfg = config_mod.load_config()
+    # Right after reading config.json, so the hash matches the settings this server runs with (L4, 2026-11-22).
+    version = config_mod.code_version()
     if cfg["bind_host"] != "127.0.0.1":
         print("N3MC Lite WARNING: bind_host is %s; the server has no authentication, so your memories "
               "are exposed to the network." % cfg["bind_host"], file=sys.stderr)
     try:
-        _run_server(cfg)
+        _run_server(cfg, version)
     except SystemExit as exc:
         if exc.code not in (0, None):
             _record_start_failure(cfg, exc.code)
@@ -598,16 +602,29 @@ def _record_start_failure(cfg, what):
         pass
 
 
-def _run_server(cfg):
+def _write_own_pid():
+    """Write this process's pid into the PID file (spec section 13, L1 2026-11-22). The starter writes
+    Popen.pid, which on Windows is the venv / uv launcher of python.exe, not the server: the launcher listens
+    on no port, so the moved-port check (M1) found nothing and remove_pid_file_if_own() never matched."""
+    try:
+        with open(paths.pid_path(), "x", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except FileExistsError:
+        try:
+            with open(paths.pid_path(), "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def _run_server(cfg, version=None):
     import uvicorn
     from . import app as app_mod
     from .tools import Service
     paths.ensure_data_dir()
-    try:
-        with open(paths.pid_path(), "x", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
-    except OSError:
-        pass
+    _write_own_pid()
     svc = Service(cfg)
     try:
         svc.db.ensure_connected()
@@ -615,7 +632,8 @@ def _run_server(cfg):
         print("N3MC Lite: Redis is not ready (%s); the server keeps running and retries per call" % exc,
               file=sys.stderr)
     processor.import_backend()
-    application = app_mod.create_app(svc, port=cfg["server_port"], start_model=True)
+    application = app_mod.create_app(svc, port=cfg["server_port"], start_model=True, code_version=version)
+    _write_own_pid()  # again just before listening: the starter writes Popen.pid right after Popen returns
     uvicorn.run(application, host=cfg["bind_host"], port=cfg["server_port"], log_level="error")
 
 
@@ -1015,6 +1033,19 @@ _KNOWN_RULES_MD_HASHES = set()
 _CLI_FORM_RE = re.compile(r'(?:"[^"\n]*"|\S+) -m n3mc_mcp\.cli|uvx --from n3memorycore-mcp-lite==\S+ n3mc-lite')
 
 
+def _project_dir(cwd):
+    """The folder for the rules file (spec 12.4 step 1, F3 2026-11-22): $CLAUDE_PROJECT_DIR when it names an
+    existing folder (Claude Code sets it for hook commands: the project root), otherwise `cwd`. The hook's
+    cwd is the session's current folder, a subfolder after Claude has cd'ed into it."""
+    p = os.environ.get("CLAUDE_PROJECT_DIR")
+    try:
+        if p and os.path.isdir(p):
+            return os.path.abspath(p)
+    except Exception:  # noqa: BLE001
+        pass
+    return cwd
+
+
 def _is_dir_home(folder):
     try:
         return _norm(folder) == _norm(os.path.expanduser("~"))
@@ -1086,9 +1117,10 @@ def cmd_stop(uvx=False):
         if payload and isinstance(payload.get("cwd"), str) and payload["cwd"]:
             cwd = payload["cwd"]
     cwd = cwd or os.getcwd()
+    project = _project_dir(cwd)
     try:
-        if not _is_dir_home(cwd):
-            _ensure_rules_md(cwd, uvx)
+        if not _is_dir_home(project):
+            _ensure_rules_md(project, uvx)
     except Exception as exc:  # noqa: BLE001
         print("N3MC Lite: could not write the rules file (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
     try:

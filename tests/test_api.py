@@ -128,7 +128,7 @@ class TestReviewFixes:
 
     def test_m2_run_server_failure_marks(self, cfg, monkeypatch):
         from n3mc_mcp import cli
-        monkeypatch.setattr(cli, "_run_server", lambda c: (_ for _ in ()).throw(SystemExit(1)))
+        monkeypatch.setattr(cli, "_run_server", lambda c, v=None: (_ for _ in ()).throw(SystemExit(1)))
         with pytest.raises(SystemExit):
             cli.run_server()
         assert (open(paths.start_failed_path()).read())
@@ -136,7 +136,7 @@ class TestReviewFixes:
 
     def test_m2_clean_exit_writes_nothing(self, cfg, monkeypatch):
         from n3mc_mcp import cli
-        monkeypatch.setattr(cli, "_run_server", lambda c: None)
+        monkeypatch.setattr(cli, "_run_server", lambda c, v=None: None)
         cli.run_server()
         import os
         assert not os.path.exists(paths.start_failed_path())

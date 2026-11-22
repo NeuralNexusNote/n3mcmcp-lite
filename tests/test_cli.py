@@ -24,6 +24,11 @@ def own_health(**kw):
     return h
 
 
+def pathlib_posix(p):
+    import pathlib
+    return pathlib.Path(p).as_posix()
+
+
 def set_stdin(monkeypatch, text):
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(text.encode("utf-8")), isatty=lambda: False))
 
@@ -248,6 +253,15 @@ class TestCommands:
         rc, out = self.run(capsys, "--search", "x", "--since", "yesterday")
         assert rc == 2 and out.err.startswith("Error: since must be an ISO 8601")
 
+    @pytest.mark.skipif(os.name != "nt", reason="these dates convert on other platforms")
+    @pytest.mark.parametrize("flag,val", [("--until", "9999-12-31"), ("--since", "1969-12-31")])
+    def test_out_of_range_date_exits_2(self, wired, db, capsys, flag, val):
+        """L3 (2026-11-22): OSError from the conversion is an unreadable value, not a traceback."""
+        rc, out = self.run(capsys, "--search", "x", flag, val)
+        name = flag.lstrip("-")
+        assert rc == 2 and out.err.startswith("Error: %s must be an ISO 8601" % name)
+        assert len(out.err.strip().splitlines()) == 1
+
     def test_buffer_list_recall_delete_repair(self, wired, db, monkeypatch, capsys, svc):
         rec = Recorder(monkeypatch)
         rc, out = self.run(capsys, "--buffer", "remember this fact", "--turn-id", "T1")
@@ -308,6 +322,30 @@ class TestStop:
         assert text.startswith("<!-- n3mc-lite-behavior v1 -->\n# N3MemoryCore Lite Behavioral Guidelines")
         assert "-m n3mc_mcp.cli --search" in text and "{cli}" not in text and text.endswith("kept only in `audit.log`.\n")
 
+    def test_project_dir_is_used(self, isolate, monkeypatch, capsys, tmp_path):
+        """F3 (2026-11-22): CLAUDE_PROJECT_DIR wins over the hook's cwd (a subfolder after a cd)."""
+        proj, sub = tmp_path / "proj", tmp_path / "proj" / "sub"
+        sub.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", proj.as_posix())
+        self.run_stop(monkeypatch, capsys, str(sub))
+        assert (proj / ".claude" / "rules" / "n3mc-lite-behavior.md").exists()
+        assert not (sub / ".claude").exists()
+
+    def test_without_project_dir_hook_cwd_is_used(self, isolate, monkeypatch, capsys, tmp_path):
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "gone"))  # not an existing folder
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        self.run_stop(monkeypatch, capsys, str(proj))
+        assert (proj / ".claude" / "rules" / "n3mc-lite-behavior.md").exists()
+
+    def test_project_dir_home_creates_nothing(self, isolate, monkeypatch, capsys, tmp_path):
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", pathlib_posix(isolate["home"]))
+        self.run_stop(monkeypatch, capsys, str(work))
+        assert not os.path.exists(os.path.join(isolate["home"], ".claude", "rules"))
+        assert not (work / ".claude").exists()
+
     def test_home_folder_is_skipped(self, isolate, monkeypatch, capsys):
         self.run_stop(monkeypatch, capsys, isolate["home"])
         assert not os.path.exists(os.path.join(isolate["home"], ".claude", "rules"))
@@ -344,3 +382,64 @@ class TestStop:
         monkeypatch.setattr(cli, "_wait_port_free", lambda port, s=15: True)
         cli.main(["--stop-server"])
         assert capsys.readouterr().out.strip() == "Stopped the N3MC Lite server (pid 4242)." and stopped == [1]
+
+
+class TestReview20261122:
+    def test_l1_server_writes_its_own_pid(self, isolate):
+        with open(paths.pid_path(), "w", encoding="utf-8") as f:
+            f.write("37620")  # the launcher's number that the starter wrote
+        cli._write_own_pid()
+        assert open(paths.pid_path(), encoding="utf-8").read() == str(os.getpid())
+        os.unlink(paths.pid_path())
+        cli._write_own_pid()  # no file: created
+        assert open(paths.pid_path(), encoding="utf-8").read() == str(os.getpid())
+
+    def test_l1_l4_run_server_writes_pid_and_passes_early_version(self, isolate, monkeypatch):
+        from n3mc_mcp import app as app_mod, processor, tools
+        order, seen = [], {}
+        monkeypatch.setattr(config, "code_version", lambda: order.append("version") or "v-first")
+
+        class FakeDb:
+            def ensure_connected(self):
+                order.append("redis")
+
+        monkeypatch.setattr(tools, "Service", lambda cfg: types.SimpleNamespace(db=FakeDb(), cfg=cfg))
+        monkeypatch.setattr(processor, "import_backend", lambda: order.append("model"))
+        monkeypatch.setattr(app_mod, "create_app", lambda *a, **k: seen.update(k) or "app")
+        monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda *a, **k: order.append("listen")))
+        with open(paths.pid_path(), "w", encoding="utf-8") as f:
+            f.write("37620")
+        writes = []
+        real = cli._write_own_pid
+        monkeypatch.setattr(cli, "_write_own_pid", lambda: (writes.append(1), real())[1])
+        cli.run_server()
+        assert order.index("version") < order.index("redis") < order.index("model") < order.index("listen")
+        assert seen["code_version"] == "v-first" and len(writes) == 2
+
+    def test_l1_moved_port_server_gets_shutdown(self, conf, monkeypatch):
+        other = conf["server_port"] + 1
+        sent = []
+        monkeypatch.setattr(cli, "_listening_ports", lambda pid: [conf["server_port"], other])
+        monkeypatch.setattr(cli, "_health", lambda port: {"status": "ok", "root": cli._own_root()})
+        monkeypatch.setattr(cli, "_request_shutdown", lambda port: sent.append(port))
+        monkeypatch.setattr(cli, "_wait_port_free", lambda port, t: True)
+        assert cli._handle_other_port(conf, 32424) is True and sent == [other]
+
+    def test_l2_matching_redis_clears_mismatch(self, conf):
+        from n3mc_mcp.database import redis_display
+        cli._after_ok(conf, {"redis": "otherhost:6379/0"})
+        assert "redis_url_mismatch" in cli._read_notices()
+        cli._after_ok(conf, {"redis": redis_display(conf["redis_url"])})
+        assert "redis_url_mismatch" not in cli._read_notices()
+
+    def test_l3_conversion_error_is_unreadable(self, monkeypatch):
+        from n3mc_mcp import tools
+
+        class Boom:
+            @staticmethod
+            def fromisoformat(v):
+                raise OSError(22, "Invalid argument")
+
+        monkeypatch.setattr(tools, "datetime", Boom)
+        with pytest.raises(tools.TimeRangeError):
+            tools.parse_time("2026-11-13", False, "since")
