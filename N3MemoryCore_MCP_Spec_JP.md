@@ -302,7 +302,7 @@ n3memorycore-mcp-lite/
 
 `.claude-plugin/marketplace.json` の `metadata.version` と、`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` の `version` は、パッケージのバージョン（`2.0.0`）である。**`uvx` のコマンドは同じバージョンに固定する（2026-11-19 決定）**。この文書にあるすべての `uvx --from n3memorycore-mcp-lite==<version>`（プラグインのフック、許可ルール、ルールファイルの `{cli}`、デスクトップの登録）は、パッケージのバージョンを書く。リリースでは、これらすべてを 2 つの `version` フィールドと一緒に変える。固定しないと、プラグインと pip のインストールが別のバージョンを動かしうる。それらのサーバーは `code_version` が違うので、互いを置き換え合う（§4.6）。
 
-**そのまま残すファイル（この指示書からは作らない）**：`SECURITY.md`、`CONTRIBUTING.md`、`docs/`、`.github/`（issue と PR のテンプレート、`workflows/test.yml`、`workflows/pypi-publish.yml`）、`server.json`（MCP レジストリの項目）、`.gitignore`、評価用スクリプト `tests/eval_*.py`、`tests/test_cross_session.py`（2026-11-19 決定：残す）。コードを作り直しても、これらを消したり書き換えたりしてはならない。（v2.0.0：この一覧は、これまでリポジトリにしかなかった。）`.github/workflows/test.yml` の CI マトリクスを手で直すときは、Windows と Linux だけを並べる。
+**そのまま残すファイル（この指示書からは作らない）**：`SECURITY.md`、`CONTRIBUTING.md`、`.github/`（issue と PR のテンプレート、`workflows/test.yml`、`workflows/pypi-publish.yml`）、`server.json`（MCP レジストリの項目）、`.gitignore`、評価用スクリプト `tests/eval_*.py`、`tests/test_cross_session.py`（2026-11-19 決定：残す）。コードを作り直しても、これらを消したり書き換えたりしてはならない。（v2.0.0：この一覧は、これまでリポジトリにしかなかった。）`.github/workflows/test.yml` の CI マトリクスを手で直すときは、Windows と Linux だけを並べる。
 
 ---
 
