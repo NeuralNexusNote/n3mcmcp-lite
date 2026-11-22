@@ -1,24 +1,49 @@
 # N3MemoryCore MCP — Lite（揮発型）
 
+**7 日たつと自分で忘れる、Claude の作業メモリ。**
+
+Claude Code では、フックがすべてのメッセージと応答を保存し、関係のあるものを毎ターン呼び出します。ツールの呼び出しは要りません。
+Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP で同じ記憶を使います。
+記憶は、あなたが動かす Redis Stack に置きます。各エントリは、保存から 7 日で消えます。
+
+```bash
+docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
+git clone https://github.com/NeuralNexusNote/n3mcmcp-lite.git
+pip install -e ./n3mcmcp-lite
+n3mc-lite --init
+```
+
+そのあと、Claude Code を再起動します。次のセッションから記憶が働きます。
+手順の詳細、プラグインの経路、Claude デスクトップアプリの設定は、[クイックスタート](#step-1--redis-stack-を起動) にあります。
+
+> ⚠️ **v2.0.0 は、まだ PyPI にありません。**
+> この README は v2.0.0 を説明しています。v2.0.0 は、このリポジトリのコードです。指示書
+> （[`N3MemoryCore_MCP_Spec_JP.md`](./N3MemoryCore_MCP_Spec_JP.md)）から生成しました。
+> 上のコマンドがリポジトリから入れているのは、そのためです（clone したフォルダは、その後も使われます。消したり動かしたりすると、記憶が止まります）。
+> PyPI のパッケージと、Claude Code のマーケットプレイスのプラグインは、まだ **v1.12.2** です。
+> v1.12.2 は MCP サーバーだけです。Claude Code では、何を保存するかをモデルが決めます。
+> v1.12.2 の設定は、PyPI で v1.12.2 と一緒に公開されている README のとおりです
+> （<https://pypi.org/project/n3memorycore-mcp-lite/1.12.2/>）。
+> v2.0.0 のリリースまでは、`pip install n3memorycore-mcp-lite` で v1.12.2 が入ります。
+> 既存の利用者にとって何が変わるかは、[v2.0.0 で変わったこと](#v200-で変わったこと) にあります。
+
 > NeuralNexusNote™ プロダクト — **無償 Lite** 版。
 > Redis Stack を使う、揮発性のハイブリッド（ベクトル + BM25）メモリです。
 > 各エントリは 7 日で消えます。
-> **Claude Code** では**フック**で使います。すべてのメッセージと応答が、自動で保存・検索されます。
-> **Claude デスクトップアプリ**と、ほかの MCP 対応アプリでは **MCP** で使います。
-
-> ⚠️ **この README は、次の版 v2.0.0 を説明しています。**
-> v2.0.0 は、このリポジトリの指示書
-> （[`N3MemoryCore_MCP_Spec_JP.md`](./N3MemoryCore_MCP_Spec_JP.md)）で決まっています。
-> **v2.0.0 はまだリリースされていません。**
-> このリポジトリのコード、PyPI のパッケージ、Claude Code のプラグインは、まだ **v1.12.2** です。
-> v1.12.2 は MCP サーバーだけです。Claude Code では、何を保存するかをモデルが決めます。
-> v2.0.0 のリリースまでは、下のインストールのコマンドで v1.12.2 が入ります。
-> v1.12.2 の設定は、PyPI で v1.12.2 と一緒に公開されている README のとおりです
-> （<https://pypi.org/project/n3memorycore-mcp-lite/1.12.2/>）。
-> 既存の利用者にとって何が変わるかは、[v2.0.0 で変わったこと](#v200-で変わったこと) にあります。
-
+>
 > 🇺🇸 **[English README](./README.md)**
 > 🛡️ **[開発ポリシー](./PHILOSOPHY.md)**
+
+**読む場所の案内**
+
+| あなたは | 読む場所 |
+|---|---|
+| 初めて使う | [クイックスタート](#step-1--redis-stack-を起動)、そのあと [実際に Claude に届くもの](#実際に-claude-に届くもの) |
+| v1.x から来た | [v2.0.0 で変わったこと](#v200-で変わったこと) |
+| 無償の 2 つで迷っている | [Lite と Free、どちらを使うか](#lite-と-freeどちらを使うか) |
+| データの置き場所を知りたい | [記憶はあなたが管理するマシンに残ります](#記憶はあなたが管理するマシンに残ります)、[データ保存先](#データ保存先) |
+| 設定を変えたい | [設定](#設定)、[ランキング式](#ランキング式) |
+| 困っている | [トラブルシューティング](#トラブルシューティング)、[制限](#制限) |
 
 ## 概要
 
@@ -81,7 +106,7 @@ v1.12.2 までの Lite は MCP サーバーだけで、何を保存するかは�
 | モデルが `save_memory` に渡すと決めたものだけが保存された | **空でないすべてのメッセージと応答を、フックが保存する**（コードブロックは `[code omitted]` にする）。保存は `[user]` / `[claude]` のレコードになる |
 | モデルがターンの最初に `search_memory` を呼んでいた | `UserPromptSubmit` フックが、メッセージのたびに検索する。結果は `# Recalled Memory Context` の見出しで Claude のコンテキストに入る |
 | 検索・一覧・取り出し・削除は MCP のツールだった | Claude Code では CLI が同じことをする：`n3mc-lite --search`、`--list`、`--recall-thread`、`--delete`、`--delete-session`、`--buffer`、`--repair`。表示する文はツールの文と同じ |
-| アプリごとに自分の MCP サーバーを起動し、モデル（約 440 MB）を読み込んでいた | 1 つの常駐サーバーが、モデルを 1 回だけ読み込む。MCP の入口は薄いクライアントで、モデルを読み込まない |
+| アプリごとに自分の MCP サーバーを起動し、モデル（約 1.1 GB）を読み込んでいた | 1 つの常駐サーバーが、モデルを 1 回だけ読み込む。MCP の入口は薄いクライアントで、モデルを読み込まない |
 | セッションの合間に動くプロセスはなかった | 常駐サーバーは、一度起動するとバックグラウンドで動き続ける |
 | pip の利用者は MCP サーバーを登録した | pip の利用者は `n3mc-lite --init` を 1 回実行して、フックを登録する。Claude Code に残った古い `n3mc-workingmemory` の登録はもう使われないので、消す |
 | Redis のコマンドは `docker run … -p 6379:6379 …` だった | `docker run … -p 127.0.0.1:6379:6379 …` になる。記憶がネットワークから届かなくなる。すでに作ったコンテナは、その設定のまま。作り直す（`docker rm -f redis-stack`、そのあと新しいコマンド）と、Redis のほかの再起動と同じく、その記憶は消える |
@@ -116,6 +141,7 @@ v1.12.2 が保存したレコードは、そのまま読めます（同じ索引
 - **Claude デスクトップアプリの利用者**：項目の名前は `n3mc-workingmemory` のままです。
   v2.0.0 では、コマンドを絶対パスで書き、`env` の項目を足します
   （[Claude デスクトップアプリ](#step-3--claude-デスクトップアプリ任意) を見てください）。
+  セットアップは、書く項目を表示します。追加は自分で行います（セットアップは、アプリのファイルを書き換えません）。
 - **データフォルダに新しいファイルが増えます**：`audit.log`（フックの入力の原文。TTL なし）、`server.log`、`notices.json` と、小さなプロセス用のファイルです。
   [データ保存先](#データ保存先) を見てください。
 
@@ -156,6 +182,7 @@ Claude Code の中で実行します。
 `SessionStart` は、CLI のコマンドを事前に許可します。
 `UserPromptSubmit` と `Stop` は、`uvx --from n3memorycore-mcp-lite==2.0.0 …` で動きます。
 この版の番号は、パッケージの版に合わせて固定されています。
+v2.0.0 のリリースまでは、マーケットプレイスからは v1.12.2 のプラグインが入ります。これは MCP サーバーを登録し、上のフックは登録しません。
 
 **(b) pip**
 
@@ -163,6 +190,8 @@ Claude Code の中で実行します。
 pip install n3memorycore-mcp-lite
 n3mc-lite --init
 ```
+
+v2.0.0 が PyPI に出るまでは、1 行目を、このリポジトリを clone したフォルダでの `pip install -e .` に替えてください。
 
 `n3mc-lite --init` は、`~/.claude/settings.json` に 2 つのフックを登録します。
 コマンドは、`n3mc-lite-hook` / `n3mc-lite-stop-hook` の絶対パスです。
@@ -226,10 +255,10 @@ pip で入れた場合：
 
 Claude Code（とデスクトップアプリ）を再起動します。
 記憶は、次のセッションから始まります。
-最初の起動では、常駐サーバーが約 440 MB の埋め込みモデルをダウンロードして読み込みます（2 回目からはキャッシュを使います）。
+最初の起動では、常駐サーバーが埋め込みモデル（約 1.1 GB）をダウンロードして読み込みます（2 回目からはキャッシュを使います）。
 フックはこれを待ちません。モデルの準備ができるまで、記憶の検索はキーワードだけで行い、そのことを通知で知らせます。
 メッセージはベクトルなしで保存し、ベクトルはあとで自動で足します。
-MCP のツールは、モデルを最大 20 秒待ちます。
+MCP のツールと CLI は、モデルを最大 20 秒待ちます。
 
 ### 指示書からコードを作る
 
@@ -241,7 +270,7 @@ Redis Stack を起動し、そのフォルダで Claude Code を開きます。
 AI は、最初にフォルダ・Python・Redis を確かめます。
 そのあと、パッケージを生成し、`pip install -e .` を実行します。
 `n3mc-lite --init` でフックを登録します。
-Claude デスクトップアプリが入っていれば、MCP の入口も登録します。
+Claude デスクトップアプリが入っていれば、MCP の入口に書く項目を表示します（アプリのファイルへの追加は、自分で行います）。
 最後に、すべてが起動することを確かめます。
 フォルダはその後も使われます。消したり動かしたりすると、記憶が止まります。
 4 段階の作業の流れは、指示書の付録 B にあります。
@@ -327,6 +356,7 @@ Claude responds
 Claude Code への指示は、ルールファイル `.claude/rules/n3mc-lite-behavior.md` から届きます。
 このファイルは、Stop フックがプロジェクトのフォルダに書きます。
 手で編集したファイルは、置き換えません。
+Claude Code 自身が差し込む入力（タスクの通知、エージェントのメッセージ、システムの注意書き）は、保存も検索もしません。
 
 **Claude デスクトップアプリと、ほかの MCP 対応アプリ**
 
@@ -335,6 +365,36 @@ Claude Code への指示は、ルールファイル `.claude/rules/n3mc-lite-beh
 ツールの呼び出しは、すべて常駐サーバーに渡します。
 これらのアプリでは、保存するかどうかはモデル次第です。
 [コンプライアンスについて](#コンプライアンスについて--mcp-は促すことしかできない) を見てください。
+
+### 3 つの場面
+
+> **月曜** — Claude Code で、サイトのデータベースを PostgreSQL にすると決めます。理由も話します。フックが、そのやりとりを保存します。
+>
+> **火曜** — 新しいセッションで、「データベースは何にしたか」と聞きます。月曜の決定が、質問と一緒に Claude のコンテキストに届きます。
+>
+> **8 日後** — 月曜の記録は、もうありません。各エントリは、保存から 7 日で消えます。そういう設計です。残る記憶が要るなら、[N3MC Free](https://github.com/NeuralNexusNote/n3mc-free) か Pro 版を使ってください。
+
+### 実際に Claude に届くもの
+
+火曜の質問のときに、`UserPromptSubmit` フックが加えた塊です。フックを実際に動かして取ったものです（一時的なデータフォルダと、使い捨ての Redis Stack のコンテナを使い、2 つ目のセッションは 1 つ目と別のフォルダで始めました）。
+
+```text
+# Recalled Memory Context
+Source: N3MC Lite (7-day working memory)
+Search query: サイトのデータベースは、何にすると決めましたか。理由も教えてください。
+
+_If several versions of the same content appear, the one with the newest `saved` time is the current one._
+
+### [01a2020e-5bc8-7950-93b8-d79d3ef70cbb] turn=6ede374d-e530-4e02-a1fe-20b1a4be0038 score=0.491 saved=2026-11-22 16:00 (UTC+0900)
+[user] サイトのデータベースは PostgreSQL にしましょう。複数の人が同時に編集する予定で、SQLite は書き込みのたびにファイル全体をロックするからです。
+
+---
+
+### [01a2020e-78d8-7990-b966-eae2d6e917a9] turn=6ede374d-e530-4e02-a1fe-20b1a4be0038 score=0.463 saved=2026-11-22 16:00 (UTC+0900)
+[claude] 承知しました。データベースは PostgreSQL にします。理由は、同時に編集する人がいることと、SQLite は書き込みが 1 つずつになることです。次は、記事のテーブルの定義を書きます。
+```
+
+各ヒットは `### [<id>]` で始まり、`turn=`、`score=`、`saved=` の時刻が付きます。関連度の下限を通らなかった記録は、`Possibly related` という見出しの下に出ます（[設定](#設定) の `min_results`）。
 
 ### Claude 標準の auto-memory との違い
 
@@ -368,7 +428,7 @@ N3MC Lite は、利用者が動かす Redis Stack に記憶を置きます。
 
 - **インストール** — `pip` と `uvx` は、PyPI からパッケージと依存を取ってきます。Claude Code のマーケットプレイスは、GitHub の `NeuralNexusNote/n3mcmcp-lite` からプラグインを取ってきます。
 - **Redis Stack のイメージ** — 最初の `docker run` で、Docker Hub から `redis/redis-stack-server` を取ってきます。
-- **埋め込みモデル** — 最初の起動で、Hugging Face から `intfloat/multilingual-e5-base`（約 440 MB）を取ってきます。
+- **埋め込みモデル** — 最初の起動で、Hugging Face から `intfloat/multilingual-e5-base`（約 1.1 GB）を取ってきます。
 - **ほかのマシンの Redis** — `redis_url` / `N3MC_REDIS_URL` をほかのマシンにすると、保存と検索はすべてネットワークを通ります。
 - **AI が読むもの** — `# Recalled Memory Context` の塊と `search_memory` の結果は、会話の一部になります。だから、メッセージと一緒に、アプリの裏にある AI のサービス（Claude なら Anthropic）に送られます。N3MC が Redis の中身をどこかに上げることはありません。
 
@@ -391,6 +451,7 @@ Lite では、TTL を避けるための「永続化の工夫」（RDB スナッ�
 7 つのツール（MCP）と CLI のコマンド（Claude Code）は、常駐サーバーの同じ処理を呼びます。
 返す文も同じです。
 CLI は、自動保存を促す一文を付けずに表示します。Claude Code ではフックが保存するからです。
+`--search` は、フックと同じ塊を、`# Recalled Memory Context` の見出しを付けて表示します。
 
 | ツール（MCP） | CLI（`n3mc-lite`） | 目的 |
 |---|---|---|
@@ -580,7 +641,7 @@ Lite には、専用のデータフォルダ（`~/.n3mc-workingmemory`）、デ�
 - **常駐サーバーが動ける必要があります。** 起動できないときは、検索はエラーか代わりの文を返します。保存は、ベクトルなしで Redis に入ります（キーワードではすぐ見つかり、ベクトルはあとで修復が足します）。
 - **すべてのクライアントで 1 つのインストール。** フック・CLI・MCP の入口は、同じ版を動かす必要があります。違うと、呼び出しのたびに、互いのサーバーを置き換えてしまいます。デスクトップアプリは、フックと同じ scripts フォルダか、同じ版に固定した `uvx` の形で登録します。
 - **プラグインと pip を一緒に使わないでください。** プラグインが有効なとき、`--init` はフックを登録しません。プラグインは、`--init` が書いたフックがあれば知らせます。
-- **まだ PyPI にはありません。** このリポジトリの v2.0.0 のコードは指示書から生成したもので、テストに合格しています。ただし、PyPI の最新版はまだ 1.12.2 です。v2.0.0 が公開されるまでは、このリポジトリから入れてください（`pip install -e .`）。`pip install n3memorycore-mcp-lite` と `uvx` では 1.12.2 が入ります。
+- **まだ PyPI にはありません。** このリポジトリの v2.0.0 のコードは指示書から生成したもので、テストに合格しています。ただし、PyPI の最新版はまだ 1.12.2 です。v2.0.0 が公開されるまでは、このリポジトリから入れてください（`pip install -e .`）。`pip install n3memorycore-mcp-lite` では 1.12.2 が入ります。この README の `uvx --from n3memorycore-mcp-lite==2.0.0 …` の形は、その版がまだ PyPI にないので動きません。プラグインのマーケットプレイスからは、v1.12.2 のプラグインが入ります。
 
 ## なぜ N3MemoryCore？（組込みメモリとの違い）
 
@@ -650,9 +711,9 @@ $env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
 
 RediSearch は DB 0 にしか索引を作れません。だから、別の DB 番号でテストすることはできません。
 テストは、**専用の** Redis コンテナで実行してください。
-v2.0.0 のテストの層（フック、サーバーの API、CLI、MCP クライアント、大きさの制限、共存）は、指示書の §9 にあります。v2.0.0 のコードと一緒に入ります。
+v2.0.0 のテストの層（フック、サーバーの API、CLI、MCP クライアント、大きさの制限、共存）は、指示書の §9 にあります。テストは `tests/` にあります。
 
-CI は、push と PR のたびにテストを実行します。
+CI は、`main` への push と、`main` 向けの PR のたびにテストを実行します。
 [`.github/workflows/test.yml`](./.github/workflows/test.yml) を見てください。
 開発者向けの案内（英語 + 日本語）は [`CONTRIBUTING.md`](./CONTRIBUTING.md) にあります。
 
@@ -698,7 +759,7 @@ WARNING: Ignoring invalid distribution ~3memorycore-mcp-lite
 
 ```bash
 # Windows
-rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycore_mcp_lite-1.5.0.dist-info"
+rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycore_mcp_lite-<version>.dist-info"
 ```
 
 （パスは、自分の Python のインストールに合わせてください。）
