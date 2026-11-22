@@ -1,24 +1,52 @@
 # N3MemoryCore MCP — Lite (Ephemeral)
 
-> A NeuralNexusNote™ product — **free Lite** build: ephemeral hybrid
-> (vector + BM25) memory backed by Redis Stack, with a 7-day TTL per entry.
-> **Claude Code** uses it through **hooks**: every message and reply is saved
-> and searched automatically. The **Claude desktop app** and other
-> MCP-compatible applications use it through **MCP**.
+**A working memory for Claude that forgets by itself after 7 days.**
 
-> ⚠️ **This README describes v2.0.0, the next version.** v2.0.0 is defined
-> by the specification in this repository
-> ([`N3MemoryCore_MCP_Spec_EN.md`](./N3MemoryCore_MCP_Spec_EN.md)) and **has
-> not been released yet**. The code in this repository, the package on PyPI
-> and the Claude Code plugin are still **v1.12.2**, which is an MCP server
-> only (in Claude Code the model decides what to save). Until v2.0.0 is
-> released, the install commands below install v1.12.2, which is set up as
+In Claude Code, hooks save every message and reply and bring the related ones
+back on every turn; no tool call is needed. The Claude desktop app and other
+MCP applications reach the same memory through MCP. Everything is kept in a
+Redis Stack that you run, and every entry is deleted 7 days after it was
+saved.
+
+```bash
+docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
+git clone https://github.com/NeuralNexusNote/n3mcmcp-lite.git
+pip install -e ./n3mcmcp-lite
+n3mc-lite --init
+```
+
+Then restart Claude Code. Memory works from the next session. The steps, the
+plugin route and the Claude desktop app are in
+[Quickstart](#step-1--start-redis-stack).
+
+> ⚠️ **v2.0.0 is not on PyPI yet.** This README describes v2.0.0: the code in
+> this repository, generated from the specification
+> ([`N3MemoryCore_MCP_Spec_EN.md`](./N3MemoryCore_MCP_Spec_EN.md)). That is why
+> the commands above install from the repository (the cloned folder stays in
+> use: deleting or moving it stops the memory). The package on PyPI and the
+> plugin on the Claude Code marketplace are still **v1.12.2**, which is an MCP
+> server only (in Claude Code the model decides what to save); it is set up as
 > described in the README published with it on PyPI
-> (<https://pypi.org/project/n3memorycore-mcp-lite/1.12.2/>). What changes
+> (<https://pypi.org/project/n3memorycore-mcp-lite/1.12.2/>). Until v2.0.0 is
+> released, `pip install n3memorycore-mcp-lite` installs v1.12.2. What changes
 > for existing users is in [What changed in v2.0.0](#what-changed-in-v200).
 
+> A NeuralNexusNote™ product — **free Lite** build: ephemeral hybrid
+> (vector + BM25) memory backed by Redis Stack, with a 7-day TTL per entry.
+>
 > 🇯🇵 **[日本語版はこちら](./README_JP.md)**
 > 🛡️ **[Development Philosophy](./PHILOSOPHY.md)**
+
+**Where to go**
+
+| You are… | Read |
+|---|---|
+| new here | [Quickstart](#step-1--start-redis-stack), then [What Claude receives](#what-claude-receives) |
+| coming from v1.x | [What changed in v2.0.0](#what-changed-in-v200) |
+| choosing between the two free builds | [Lite or Free?](#lite-or-free-which-one-to-use) |
+| asking where your data is | [Your Memory Stays on Machines You Control](#your-memory-stays-on-machines-you-control), [Data location](#data-location) |
+| changing settings | [Configuration](#configuration), [Ranking formula](#ranking-formula) |
+| stuck | [Troubleshooting](#troubleshooting), [Limits](#limits) |
 
 ## What is this?
 
@@ -81,7 +109,7 @@ to v1.12.2 Lite was an MCP server only, and the model decided what to save.
 | Only what the model chose to pass to `save_memory` was saved | **Every non-empty message and reply is saved by the hooks** (fenced code blocks as `[code omitted]`), as `[user]` / `[claude]` records |
 | The model called `search_memory` at the start of a turn | The `UserPromptSubmit` hook searches with every message and puts the result into Claude's context under `# Recalled Memory Context` |
 | Search, list, recall and delete were MCP tools | In Claude Code the CLI gives the same: `n3mc-lite --search`, `--list`, `--recall-thread`, `--delete`, `--delete-session`, `--buffer`, `--repair`. The text they print is the tool's text |
-| Each application started its own MCP server and loaded the model (~440 MB) | One resident server loads the model once; the MCP entry is a thin client that never loads it |
+| Each application started its own MCP server and loaded the model (about 1.1 GB) | One resident server loads the model once; the MCP entry is a thin client that never loads it |
 | No process ran between sessions | The resident server keeps running in the background after it was started |
 | pip users: register the MCP server | pip users: run `n3mc-lite --init` once to register the hooks. An old `n3mc-workingmemory` registration in Claude Code is no longer used and should be removed |
 | The Redis command was `docker run … -p 6379:6379 …` | It is `docker run … -p 127.0.0.1:6379:6379 …`, so the memory is not reachable from the network. A container you already created keeps its setting; recreating it (`docker rm -f redis-stack`, then the new command) loses its memories, like any Redis restart |
@@ -95,8 +123,9 @@ to v1.12.2 Lite was an MCP server only, and the model decided what to save.
 **What did not change**: the PyPI name `n3memorycore-mcp-lite`, the Python
 package `n3mc_mcp`, the MCP command and server name `n3mc-workingmemory`
 (alias `n3mc-mcp-lite`), the seven tools with the same names, arguments and
-output texts, the Redis layout and settings (`redis_url`, `N3MC_REDIS_URL`),
-the 7-day TTL (the `search_memory` text is now kept within `context_max_chars`), the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the
+output texts (the `search_memory` text is now kept within `context_max_chars`),
+the Redis layout and settings (`redis_url`, `N3MC_REDIS_URL`), the 7-day TTL,
+the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the
 plugin name `n3mc-workingmemory`, and every search and save rule. Records
 saved by v1.12.2 stay readable (same index, same fields).
 
@@ -152,7 +181,8 @@ Choose one. **Do not register the MCP server in Claude Code**
 The plugin registers three hooks: `SessionStart` (pre-approves the CLI
 commands), and `UserPromptSubmit` and `Stop`, which run through
 `uvx --from n3memorycore-mcp-lite==2.0.0 …` (the version is pinned to the
-package version).
+package version). Until v2.0.0 is released, the marketplace still installs
+the v1.12.2 plugin, which registers the MCP server and not these hooks.
 
 **(b) pip.**
 
@@ -160,6 +190,9 @@ package version).
 pip install n3memorycore-mcp-lite
 n3mc-lite --init
 ```
+
+Until v2.0.0 is on PyPI, replace the first line with `pip install -e .` in a
+clone of this repository.
 
 `n3mc-lite --init` registers the two hooks in `~/.claude/settings.json` with
 the absolute paths of `n3mc-lite-hook` / `n3mc-lite-stop-hook`, keeps every
@@ -227,10 +260,11 @@ Plugin users (no pip installation):
 
 Restart Claude Code (and the desktop app). Memory starts with the next
 session. On the first start the resident server downloads and loads the
-~440 MB embedding model (later starts use the cache). The hooks do not wait
+embedding model, about 1.1 GB (later starts use the cache). The hooks do not wait
 for it: until the model is ready, the memory search uses keywords only and
 says so in a notice, and messages are saved without vectors, which are added
-later automatically. The MCP tools wait up to 20 seconds for the model.
+later automatically. The MCP tools and the CLI wait up to 20 seconds for the
+model.
 
 ### Generating the code from the specification
 
@@ -240,8 +274,9 @@ in an **empty folder** (for example `~/n3mcmcp-lite`) that holds only
 `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`), start Redis Stack, and ask
 "implement n3mcmcp-lite per this spec." The AI first checks the folder,
 Python and Redis, then generates the package, runs `pip install -e .`,
-registers the hooks with `n3mc-lite --init`, registers the MCP entry in the
-Claude desktop app if it is installed, and checks that everything starts.
+registers the hooks with `n3mc-lite --init`, shows the MCP entry for the
+Claude desktop app if it is installed (you add it to the app's file
+yourself), and checks that everything starts.
 The folder stays in use afterwards: deleting or moving it stops the memory.
 The four-phase workflow is in Appendix B of the specification.
 
@@ -319,7 +354,8 @@ itself. The hooks always exit 0: when the server or Redis is down, the text
 is safe in `audit.log` and a notice tells you what to do. Claude Code gets its
 guidance from the rules file `.claude/rules/n3mc-lite-behavior.md`, which the
 Stop hook writes into the project folder (a file you edited by hand is not
-replaced).
+replaced). Input that Claude Code itself injects (task notifications, agent
+messages, system reminders) is neither saved nor searched.
 
 **Claude desktop app and other MCP applications**
 
@@ -328,6 +364,36 @@ The thin MCP entry answers `initialize` with **behavioral instructions**
 forwards every tool call to the resident server. In these applications,
 saving is up to the model — see
 [On compliance](#on-compliance--mcp-can-persuade-not-force).
+
+### Three scenes
+
+> **Monday** — In Claude Code you decide to use PostgreSQL for the website, and say why. The hooks save the exchange.
+>
+> **Tuesday** — In a new session you ask which database you chose. Monday's decision arrives in Claude's context together with your question.
+>
+> **Eight days later** — Monday's records are gone: every entry is deleted 7 days after it was saved. That is the design. For memory that stays, use [N3MC Free](https://github.com/NeuralNexusNote/n3mc-free) or a Pro build.
+
+### What Claude receives
+
+This is the block the `UserPromptSubmit` hook added for the Tuesday question. It was captured from a real run of the hooks (a temporary data folder and a throwaway Redis Stack container; the second session was started in a different folder from the first).
+
+```text
+# Recalled Memory Context
+Source: N3MC Lite (7-day working memory)
+Search query: Which database did we decide to use for the website, and why?
+
+_If several versions of the same content appear, the one with the newest `saved` time is the current one._
+
+### [01a2020d-c67a-7373-93aa-39a0db176d4f] turn=8f3d1d47-3d9d-4b02-a9ae-a3236124c27b score=0.199 saved=2026-11-22 15:59 (UTC+0900)
+[user] Let's use PostgreSQL for the website's database. Several people will edit at the same time, and SQLite locks the whole file on every write.
+
+#### Possibly related (weak matches — may be unrelated)
+
+### [01a2020d-e3a3-7a63-a2f9-1a273e8847f0] turn=8f3d1d47-3d9d-4b02-a9ae-a3236124c27b score=0.409 saved=2026-11-22 15:59 (UTC+0900)
+[claude] Agreed, PostgreSQL it is. The reason, for the record: several editors at the same time, and SQLite allows one writer at a time. Next step: write the schema for the articles table.
+```
+
+Each hit starts with `### [<id>]` and shows its `turn=`, `score=` and `saved=` time. Hits under `Possibly related` did not pass the relevance floors (see `min_results` in [Configuration](#configuration)).
 
 ### Relationship with Claude's built-in auto-memory
 
@@ -362,7 +428,7 @@ What does go over the network:
 
 - **Installing** — `pip` and `uvx` download the package and its dependencies from PyPI; the Claude Code marketplace path fetches the plugin from the `NeuralNexusNote/n3mcmcp-lite` GitHub repository.
 - **The Redis Stack image** — The first `docker run` downloads `redis/redis-stack-server` from Docker Hub.
-- **The embedding model download** — On the first start, `intfloat/multilingual-e5-base` (~440 MB) is downloaded from Hugging Face.
+- **The embedding model download** — On the first start, `intfloat/multilingual-e5-base` (about 1.1 GB) is downloaded from Hugging Face.
 - **A Redis on another machine** — If you point `redis_url` / `N3MC_REDIS_URL` at another machine, every memory you save and every search goes over the network to that machine.
 - **What the AI reads** — The `# Recalled Memory Context` block and the results of `search_memory` become part of the conversation, so they are sent, together with your message, to the AI service behind your application (Anthropic, for Claude). N3MC does not upload your Redis contents anywhere.
 
@@ -389,7 +455,9 @@ dumps) to get around the TTL.
 
 The seven tools (MCP) and the CLI commands (Claude Code) call the same
 handlers in the resident server and give the same text. The CLI prints it
-without the auto-save reminder, because in Claude Code the hooks save.
+without the auto-save reminder, because in Claude Code the hooks save;
+`--search` prints the same block as the hook, with the
+`# Recalled Memory Context` heading.
 
 | Tool (MCP) | CLI (`n3mc-lite`) | Purpose |
 |---|---|---|
@@ -630,8 +698,9 @@ port (18524), its own hook commands (`n3mc-lite-hook`,
 - **Not on PyPI yet.** The v2.0.0 code in this repository was generated from
   the specification and passes its tests, but the newest version on PyPI is
   still 1.12.2. Until v2.0.0 is published, install it from this repository
-  (`pip install -e .`); `pip install n3memorycore-mcp-lite` and `uvx` give
-  1.12.2.
+  (`pip install -e .`). `pip install n3memorycore-mcp-lite` gives 1.12.2, the
+  `uvx --from n3memorycore-mcp-lite==2.0.0 …` forms in this README find no
+  such version yet, and the plugin marketplace installs the v1.12.2 plugin.
 
 ## Why N3MemoryCore? (vs. built-in memory)
 
@@ -715,10 +784,10 @@ $env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
 RediSearch refuses to create indexes outside DB 0, so a separate test DB is
 not an option — run the tests against a **dedicated** Redis container. The
 v2.0.0 test layers (hooks, server API, CLI, MCP client, context limit,
-coexistence) are described in §9 of the specification; they come with the
-v2.0.0 code.
+coexistence) are described in §9 of the specification; they are in
+`tests/`.
 
-CI runs the tests on every push and PR — see
+CI runs the tests on every push to `main` and every PR to `main` — see
 [`.github/workflows/test.yml`](./.github/workflows/test.yml). Read
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the developer guide (EN + JP).
 
@@ -767,7 +836,7 @@ named with a leading `~` and is harmless but noisy. Delete it manually:
 
 ```bash
 # Windows
-rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycore_mcp_lite-1.5.0.dist-info"
+rmdir /s "%LOCALAPPDATA%\Programs\Python\Python312\Lib\site-packages\~3memorycore_mcp_lite-<version>.dist-info"
 ```
 
 (Adjust the path to match your Python installation.)
