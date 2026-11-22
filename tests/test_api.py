@@ -22,7 +22,7 @@ class TestHealth:
         h = client.get("/health").json()
         assert h["status"] == "ok" and h["root"] == paths.data_dir()
         assert re.fullmatch(r"[0-9a-f]{16}", h["code_version"]) and isinstance(h["pid"], int)
-        assert h["redis"].startswith("127.0.0.1:") and "@" not in h["redis"]
+        assert h["redis"].startswith(("127.0.0.1:", "localhost:")) and "@" not in h["redis"]   # CI uses localhost:6390
 
     def test_code_version_follows_config_content_not_formatting(self, client):
         path = paths.config_path()
