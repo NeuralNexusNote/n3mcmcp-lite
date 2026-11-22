@@ -417,6 +417,11 @@ class TestIndexFailure:
 class TestEnforceEphemeral:
     def test_empty_db_turns_persistence_off(self, cfg, redis_client):
         redis_client.flushdb()
+        # A snapshot written while test_other_db_keys_keep_settings held its key may
+        # bring that key back after the test Redis restarts (2026-11-22).
+        other = redis.from_url(cfg["redis_url"].rsplit("/", 1)[0] + "/1", protocol=2)
+        other.delete("k")
+        other.close()
         redis_client.config_set("save", "3600 1")
         d = Database(cfg)
         d.ensure_connected()
@@ -437,16 +442,20 @@ class TestEnforceEphemeral:
     def test_other_db_keys_keep_settings(self, cfg, redis_client):
         redis_client.flushdb()
         other = redis.from_url(cfg["redis_url"].rsplit("/", 1)[0] + "/1", protocol=2)
-        other.set("k", "1")
-        redis_client.config_set("save", "3600 1")
-        d = Database(cfg)
-        d.ensure_connected()
-        assert redis_client.config_get("save")["save"] == "3600 1"
-        assert any(n.startswith("shared_redis") for n in cfg["_notices"])
-        other.delete("k")
-        other.close()
-        redis_client.config_set("save", "")
-        d.close()
+        other.set("k", "1", ex=60)       # never outlives the test, even in a snapshot
+        d = None
+        try:
+            redis_client.config_set("save", "3600 1")
+            d = Database(cfg)
+            d.ensure_connected()
+            assert redis_client.config_get("save")["save"] == "3600 1"
+            assert any(n.startswith("shared_redis") for n in cfg["_notices"])
+        finally:
+            if d is not None:
+                d.close()
+            other.delete("k")
+            other.close()
+            redis_client.config_set("save", "")
 
     def test_refused_config_adds_notice_without_failing(self, cfg, redis_client, monkeypatch):
         redis_client.flushdb()
