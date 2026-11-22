@@ -568,7 +568,7 @@ def unavailable_reason(cfg):
         return "another N3MC folder's server is using port %s" % cfg["server_port"]
     if _LAST_STATE == "failed":
         return "the memory server could not start; see %s" % paths.server_log_path()
-    return "the memory server is still starting (the first start downloads the embedding model, ~440 MB)"
+    return "the memory server is still starting (the first start downloads the embedding model, ~1.1 GB)"
 
 
 def run_server():

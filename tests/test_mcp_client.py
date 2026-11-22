@@ -147,7 +147,7 @@ class TestThinNoServer:
         res = json.loads(body)
         assert res["saved"] is True and res["warning"] == "embedding_unavailable"
         assert res["detail"] == ("The N3MC Lite memory server was not available (the memory server is still starting "
-                                 "(the first start downloads the embedding model, ~440 MB)), so this entry was saved "
+                                 "(the first start downloads the embedding model, ~1.1 GB)), so this entry was saved "
                                  "without a vector. It is found by keywords now and gets its vector from "
                                  "repair_memory once the server runs.")
         assert out.endswith(_NUDGE_AFTER_SAVE)

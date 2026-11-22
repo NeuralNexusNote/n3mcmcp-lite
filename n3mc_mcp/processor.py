@@ -609,9 +609,9 @@ def model_unavailable_message(cfg) -> str:
     if _last_error:
         return ("The embedding model (%s) could not be loaded (%s), so search is keyword-only (BM25) "
                 "and new entries are saved without vectors. The first start downloads the model "
-                "(~440 MB) from Hugging Face: check the network or proxy, or pre-download it. "
+                "(~1.1 GB) from Hugging Face: check the network or proxy, or pre-download it. "
                 "The server retries automatically." % (name, _last_error))
-    return ("The embedding model (%s) is still loading (the first start downloads ~440 MB), so this "
+    return ("The embedding model (%s) is still loading (the first start downloads ~1.1 GB), so this "
             "search used keywords only and new entries are saved without vectors. "
             "Retry in a minute." % name)
 
