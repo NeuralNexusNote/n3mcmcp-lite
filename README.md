@@ -10,8 +10,7 @@ saved.
 
 ```bash
 docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
-git clone https://github.com/NeuralNexusNote/n3mcmcp-lite.git
-pip install -e ./n3mcmcp-lite
+pip install n3memorycore-mcp-lite
 n3mc-lite --init
 ```
 
@@ -19,17 +18,8 @@ Then restart Claude Code. Memory works from the next session. The steps, the
 plugin route and the Claude desktop app are in
 [Quickstart](#step-1--start-redis-stack).
 
-> ⚠️ **v2.0.0 is not on PyPI yet.** This README describes v2.0.0: the code in
-> this repository, generated from the specification
-> ([`N3MemoryCore_MCP_Spec_EN.md`](./N3MemoryCore_MCP_Spec_EN.md)). That is why
-> the commands above install from the repository (the cloned folder stays in
-> use: deleting or moving it stops the memory). The package on PyPI and the
-> plugin on the Claude Code marketplace are still **v1.12.2**, which is an MCP
-> server only (in Claude Code the model decides what to save); it is set up as
-> described in the README published with it on PyPI
-> (<https://pypi.org/project/n3memorycore-mcp-lite/1.12.2/>). Until v2.0.0 is
-> released, `pip install n3memorycore-mcp-lite` installs v1.12.2. What changes
-> for existing users is in [What changed in v2.0.0](#what-changed-in-v200).
+> Upgrading from v1.12.2? What changes for existing users is in
+> [What changed in v2.0.0](#what-changed-in-v200).
 
 > A NeuralNexusNote™ product — **free Lite** build: ephemeral hybrid
 > (vector + BM25) memory backed by Redis Stack, with a 7-day TTL per entry.
@@ -181,8 +171,7 @@ Choose one. **Do not register the MCP server in Claude Code**
 The plugin registers three hooks: `SessionStart` (pre-approves the CLI
 commands), and `UserPromptSubmit` and `Stop`, which run through
 `uvx --from n3memorycore-mcp-lite==2.0.0 …` (the version is pinned to the
-package version). Until v2.0.0 is released, the marketplace still installs
-the v1.12.2 plugin, which registers the MCP server and not these hooks.
+package version).
 
 **(b) pip.**
 
@@ -190,9 +179,6 @@ the v1.12.2 plugin, which registers the MCP server and not these hooks.
 pip install n3memorycore-mcp-lite
 n3mc-lite --init
 ```
-
-Until v2.0.0 is on PyPI, replace the first line with `pip install -e .` in a
-clone of this repository.
 
 `n3mc-lite --init` registers the two hooks in `~/.claude/settings.json` with
 the absolute paths of `n3mc-lite-hook` / `n3mc-lite-stop-hook`, keeps every
@@ -695,12 +681,6 @@ port (18524), its own hook commands (`n3mc-lite-hook`,
 - **Plugin and pip together**: do not use both. `--init` registers no hooks
   while the plugin is enabled, and the plugin reports hooks written by
   `--init`.
-- **Not on PyPI yet.** The v2.0.0 code in this repository was generated from
-  the specification and passes its tests, but the newest version on PyPI is
-  still 1.12.2. Until v2.0.0 is published, install it from this repository
-  (`pip install -e .`). `pip install n3memorycore-mcp-lite` gives 1.12.2, the
-  `uvx --from n3memorycore-mcp-lite==2.0.0 …` forms in this README find no
-  such version yet, and the plugin marketplace installs the v1.12.2 plugin.
 
 ## Why N3MemoryCore? (vs. built-in memory)
 
