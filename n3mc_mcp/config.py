@@ -99,7 +99,7 @@ def _atomic_write(path, text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        os.replace(tmp, path)
+        _retry_permission(lambda: os.replace(tmp, path))
     except Exception:
         try:
             os.unlink(tmp)
@@ -135,12 +135,43 @@ def _create_exclusive(path, data: bytes) -> bool:
             pass
 
 
-def _read_json(path):
-    with open(path, "r", encoding="utf-8-sig") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
+def _parse(data: bytes):
+    obj = json.loads(data.decode("utf-8-sig"))
+    if not isinstance(obj, dict):
         raise ValueError("top level is not a JSON object")
-    return data
+    return obj
+
+
+def _retry_permission(fn, seconds=1.0):
+    """Windows: a file another process (or a virus scanner) has open briefly refuses os.replace / open
+    with PermissionError. Retry for up to a second so a fill-in is not lost to that."""
+    deadline = time.time() + seconds
+    while True:
+        try:
+            return fn()
+        except PermissionError:
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _read_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _read_json_bytes(path):
+    """(parsed object, the bytes it was parsed from). A ValueError carries the bytes as .config_bytes."""
+    data = _retry_permission(lambda: _read_bytes(path))
+    try:
+        return _parse(data), data
+    except ValueError as exc:
+        exc.config_bytes = data
+        raise
+
+
+def _read_json(path):
+    return _read_json_bytes(path)[0]
 
 
 def _read_with_retry(path):
@@ -148,11 +179,44 @@ def _read_with_retry(path):
     deadline = time.time() + 2.0
     while True:
         try:
-            return _read_json(path)
+            return _read_json_bytes(path)
         except (ValueError, OSError):
             if time.time() >= deadline:
                 raise
             time.sleep(0.1)
+
+
+LOCK_TIMEOUT = 10.0
+LOCK_STALE = 10.0
+
+
+def _acquire_lock(lock):
+    """open(lock, 'x'); retry every 0.05 s for up to 10 s; a lock file older than 10 s is stale and removed."""
+    deadline = time.time() + LOCK_TIMEOUT
+    while True:
+        try:
+            with open(lock, "x", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+            return True
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock) > LOCK_STALE:
+                    os.unlink(lock)
+                    continue
+            except OSError:
+                pass
+        except OSError:
+            return False
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _release_lock(lock):
+    try:
+        os.unlink(lock)
+    except OSError:
+        pass
 
 
 def _emit(cfg, message):
@@ -210,46 +274,84 @@ def load_config():
         except Exception as exc:  # noqa: BLE001
             print("N3MC Lite: could not migrate the old config.json (%s)" % exc, file=sys.stderr)
 
+    # The config.json content this process runs with: the bytes it parsed, or the bytes it wrote.
+    # The server's code_version() hashes exactly these (2026-11-22, review #9). None: no file.
+    cfg["_config_bytes"] = None
     if not os.path.exists(path):
         new = {"owner_id": str(uuid.uuid4()), "local_id": str(uuid.uuid4())}
         new.update({k: v for k, v in DEFAULTS.items() if k not in new})
         data = (json.dumps(new, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         try:
-            raw = new if _create_exclusive(path, data) else _read_with_retry(path)
+            if _create_exclusive(path, data):
+                raw = new
+            else:
+                raw, data = _read_with_retry(path)
         except (ValueError, OSError) as exc:
+            cfg["_config_bytes"] = getattr(exc, "config_bytes", None)
             _unreadable(cfg, path, exc)
             return _finish(cfg)
     else:
         try:
-            raw = _read_json(path)
+            raw, data = _read_json_bytes(path)
         except (ValueError, OSError) as exc:
+            cfg["_config_bytes"] = getattr(exc, "config_bytes", None)
             _unreadable(cfg, path, exc)
             return _finish(cfg)
+    cfg["_config_bytes"] = data
 
-    bad = _effective(raw, cfg)
-    ids_missing = False
+    if not all(_id_ok(raw.get(k)) for k in ("owner_id", "local_id")):
+        # A missing owner_id / local_id is filled under config.json.lock, from the file as read again under
+        # the lock, so every process runs with the IDs that are in the file (2026-11-22, review #2).
+        lock = path + ".lock"
+        locked = _acquire_lock(lock)
+        try:
+            if locked:
+                try:
+                    raw, data = _read_json_bytes(path)
+                    cfg["_config_bytes"] = data
+                except (ValueError, OSError):
+                    pass  # keep the content read before; it is filled in below as before
+            merged = _fill_missing(cfg, path, raw)
+        finally:
+            if locked:
+                _release_lock(lock)
+    else:
+        merged = _fill_missing(cfg, path, raw)
+
+    bad = _effective(raw, cfg)  # the settings as the file had them (filled-in keys are the defaults)
     for key in ("owner_id", "local_id"):
-        v = raw.get(key)
-        if isinstance(v, str) and v:
-            cfg[key] = v
-        else:
-            cfg[key] = str(uuid.uuid4())
-            ids_missing = True
+        cfg[key] = merged[key]
     if bad:
         _emit(cfg, "config_type: %s has a wrong type or out-of-range value for: %s. "
                    "Those settings were ignored and the defaults are used." % (path, ", ".join(bad)))
-    missing = [k for k in DEFAULTS if k not in raw]
-    if ids_missing:
-        missing += [k for k in ("owner_id", "local_id") if k not in missing]
-    if missing:
-        merged = dict(raw)
-        for k in missing:
-            merged[k] = cfg[k] if k in ("owner_id", "local_id") else DEFAULTS[k]
-        try:
-            _atomic_write(path, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
-        except OSError as exc:
-            print("N3MC Lite: could not update %s (%s)" % (path, exc), file=sys.stderr)
     return _finish(cfg)
+
+
+def _id_ok(v):
+    return isinstance(v, str) and bool(v)
+
+
+def _fill_missing(cfg, path, raw):
+    """Fill missing fields (an ID only when it is still missing) and save; returns the content used."""
+    merged = dict(raw)
+    missing = [k for k in DEFAULTS if k not in raw]
+    for k in ("owner_id", "local_id"):
+        if not _id_ok(raw.get(k)):
+            merged[k] = str(uuid.uuid4())
+            if k not in missing:
+                missing.append(k)
+    if not missing:
+        return raw
+    for k in missing:
+        if k not in ("owner_id", "local_id"):
+            merged[k] = DEFAULTS[k]
+    text = json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
+    try:
+        _atomic_write(path, text)
+        cfg["_config_bytes"] = text.encode("utf-8")
+    except OSError as exc:
+        print("N3MC Lite: could not update %s (%s)" % (path, exc), file=sys.stderr)
+    return merged
 
 
 def _unreadable(cfg, path, exc):
@@ -272,8 +374,14 @@ _CODE_FILES = ("app.py", "tools.py", "tooldefs.py", "instructions.py", "context.
                "processor.py", "config.py", "paths.py", "cli.py")
 
 
-def code_version() -> str:
-    """First 16 hex chars of SHA-256 over the code files followed by config.json (spec section 3.15)."""
+_FROM_DISK = object()
+
+
+def code_version(config_bytes=_FROM_DISK) -> str:
+    """First 16 hex chars of SHA-256 over the code files followed by config.json (spec section 3.15).
+
+    config_bytes: the config.json content to hash -- the server passes cfg["_config_bytes"] of the
+    load_config() it runs with (None: no file; review #9); by default the file is read (the client side)."""
     h = hashlib.sha256()
     here = os.path.dirname(os.path.abspath(__file__))
     for name in _CODE_FILES:
@@ -282,9 +390,14 @@ def code_version() -> str:
                 h.update(f.read())
         except OSError:
             pass
-    try:
-        with open(paths.config_path(), "rb") as f:
-            raw = f.read()
+    raw = config_bytes
+    if raw is _FROM_DISK:
+        try:
+            with open(paths.config_path(), "rb") as f:
+                raw = f.read()
+        except OSError:
+            raw = None
+    if raw is not None:
         try:
             obj = json.loads(raw.decode("utf-8-sig"))
             if isinstance(obj, dict):
@@ -292,6 +405,4 @@ def code_version() -> str:
         except ValueError:
             pass
         h.update(raw)
-    except OSError:
-        pass
     return h.hexdigest()[:16]

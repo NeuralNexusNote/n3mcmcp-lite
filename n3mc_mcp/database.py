@@ -56,6 +56,16 @@ end
 return 0
 """
 
+DELETE_WITH_GUARD = """
+-- KEYS[1] = record key, KEYS[2] = its guard key; ARGV[1] = the record's bare id
+-- The guard is deleted only when it points at this record (2026-11-22, review #6).
+local n = redis.call('DEL', KEYS[1])
+if redis.call('GET', KEYS[2]) == ARGV[1] then
+  redis.call('DEL', KEYS[2])
+end
+return n
+"""
+
 _SEARCH_FIELDS = ["content", "timestamp", "timestamp_epoch", "owner_id", "agent_name", "session_id",
                   "turn_id", "importance", "access_count", "parent_id"]
 
@@ -88,7 +98,8 @@ def redis_display(redis_url: str) -> str:
         db = (u.path or "/0").lstrip("/") or "0"
         return "%s:%s/%s" % (u.hostname or "localhost", u.port or 6379, db)
     except Exception:  # noqa: BLE001
-        return redis_url
+        # never any part of the input: it may hold a password (2026-11-22, review #1)
+        return "<unparseable redis_url>"
 
 
 def _text(v):
@@ -155,6 +166,7 @@ class Database:
             "save": self.r.register_script(SAVE_WITH_GUARD),
             "incr": self.r.register_script(INCR_IF_EXISTS),
             "hset": self.r.register_script(HSET_IF_EXISTS),
+            "delete": self.r.register_script(DELETE_WITH_GUARD),
         }
         return self.r
 
@@ -762,13 +774,14 @@ class Database:
             pipe.execute()
             return {"status": "deleted", "id": ident, "chunks_deleted": len(ids)}
         if r.exists(MEM + ident):
-            f = r.hmget(MEM + ident, "owner_id", "content", "turn_id")
+            f = r.hmget(MEM + ident, "owner_id", "content", "turn_id", "parent_id")
             if _text(f[0]) != owner:
                 return {"status": "not_found", "id": ident}
-            pipe = r.pipeline(transaction=True)
-            pipe.delete(MEM + ident)
-            pipe.delete(guard_key_for(MEM, _text(f[1]), _text(f[2])))
-            pipe.execute()
+            if _text(f[3]):
+                r.delete(MEM + ident)  # a child chunk owns no guard (review #6)
+            else:
+                self._scripts["delete"](keys=[MEM + ident, guard_key_for(MEM, _text(f[1]), _text(f[2]))],
+                                        args=[ident])
             return {"status": "deleted", "id": ident}
         return {"status": "not_found", "id": ident}
 
@@ -802,11 +815,13 @@ class Database:
             f = r.hmget(k, "owner_id", "session_id", "content", "turn_id", "parent_id")
             if f[0] is None or _text(f[0]) != owner or _text(f[1]) != session_id:
                 continue
-            pipe.delete(k)
             if _text(f[4]):
-                chunks += 1          # an orphan chunk (its parent is gone)
+                pipe.delete(k)
+                chunks += 1          # an orphan chunk (its parent is gone); it owns no guard
             else:
-                pipe.delete(guard_key_for(MEM, _text(f[2]), _text(f[3])))
+                # the guard only when it points at this record (review #6)
+                self._scripts["delete"](keys=[MEM + bare, guard_key_for(MEM, _text(f[2]), _text(f[3]))],
+                                        args=[bare], client=pipe)
                 singles += 1
         pipe.execute()
         total = docs + chunks + singles

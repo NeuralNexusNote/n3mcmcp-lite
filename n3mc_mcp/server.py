@@ -98,14 +98,13 @@ def handle_call(name, arguments, client_name=None, state=None):
                     break
             else:
                 args.pop("agent_name", None)
-        reason = None
         if cli.ensure_server(cfg):
             try:
                 return cli._post(cfg["server_port"], "/tools/%s?nudge=1" % name, args, timeout=300)["text"]
             except Exception as exc:  # noqa: BLE001
-                reason = "%s: %s" % (type(exc).__name__, exc)
-        else:
-            reason = cli.unavailable_reason(cfg)
+                # a delete that was sent but got no answer is "unknown", not "Nothing was deleted" (review #7)
+                return cli.tool_failed_text(cfg, name, args, exc, nudge=True)
+        reason = cli.unavailable_reason(cfg)
         if name == "save_memory":
             return cli.direct_save_text(cfg, args, reason, nudge=True)
         return cli._unavailable_text(name, reason, nudge=True)

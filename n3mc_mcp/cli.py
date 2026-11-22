@@ -574,8 +574,9 @@ def unavailable_reason(cfg):
 def run_server():
     """Run the resident server in this process."""
     cfg = config_mod.load_config()
-    # Right after reading config.json, so the hash matches the settings this server runs with (L4, 2026-11-22).
-    version = config_mod.code_version()
+    # Right after reading config.json, so the hash matches the settings this server runs with (L4, 2026-11-22),
+    # and from the content load_config() used, never a second read of the file (review #9).
+    version = config_mod.code_version(cfg.get("_config_bytes"))
     if cfg["bind_host"] != "127.0.0.1":
         print("N3MC Lite WARNING: bind_host is %s; the server has no authentication, so your memories "
               "are exposed to the network." % cfg["bind_host"], file=sys.stderr)
@@ -1365,6 +1366,38 @@ def _unavailable_text(name, reason, nudge=False):
     return text
 
 
+DELETE_TOOLS = ("delete_memory", "delete_memories_by_session")
+
+
+def request_not_sent(exc):
+    """True only when the request never reached the server (connection refused; 2026-11-22, review #7)."""
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    if isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError):
+        return isinstance(getattr(exc, "reason", None), ConnectionRefusedError)
+    return False
+
+
+def _delete_unknown_text(reason, nudge=False):
+    text = json.dumps({"status": "unknown", "reason": "The request reached the N3MC Lite memory server but no "
+                       "answer came back (%s). The delete may have completed; check with list_memories or "
+                       "search_memory before deleting again." % reason}, ensure_ascii=False)
+    if nudge:
+        from .tools import _NUDGE_GENERIC
+        text += _NUDGE_GENERIC
+    return text
+
+
+def tool_failed_text(cfg, name, args, exc, nudge=False):
+    """The text for a tool call whose POST to the server raised exc (CLI and MCP thin client)."""
+    reason = "%s: %s" % (type(exc).__name__, exc)
+    if name in DELETE_TOOLS and not request_not_sent(exc):
+        return _delete_unknown_text(reason, nudge=nudge)
+    if name == "save_memory":
+        return direct_save_text(cfg, args, reason, nudge=nudge)
+    return _unavailable_text(name, reason, nudge=nudge)
+
+
 def direct_save_text(cfg, args, reason, nudge=False):
     """Direct save for MCP/CLI when the server is not available (spec 4.6): JSON text."""
     res = direct_save(cfg, dict(args))
@@ -1390,9 +1423,8 @@ def run_tool(cfg, name, args):
         try:
             return _post(cfg["server_port"], "/tools/%s?nudge=0" % name, args, timeout=300)["text"]
         except Exception as exc:  # noqa: BLE001
-            reason = "%s: %s" % (type(exc).__name__, exc)
-    else:
-        reason = unavailable_reason(cfg)
+            return tool_failed_text(cfg, name, args, exc)
+    reason = unavailable_reason(cfg)
     if name == "save_memory":
         return direct_save_text(cfg, args, reason)
     return _unavailable_text(name, reason)
@@ -1403,11 +1435,20 @@ def cmd_stop_server():
     h = _health(cfg["server_port"])
     if h and h.get("root") and _norm(h["root"]) == _norm(_own_root()):
         pid = h.get("pid")
+        failed = None
         try:
             _request_shutdown(cfg["server_port"])
-        except Exception:  # noqa: BLE001
-            pass
-        _wait_port_free(cfg["server_port"], 15)
+        except Exception as exc:  # noqa: BLE001
+            failed = "%s: %s" % (type(exc).__name__, exc)
+        if not _wait_port_free(cfg["server_port"], 15):
+            # Not confirmed: never report success (2026-11-22, review #8).
+            if failed:
+                reason = "the shutdown request failed (%s) and port %s is still in use" % (failed, cfg["server_port"])
+            else:
+                reason = "port %s was still in use after 15 s" % cfg["server_port"]
+            print("Could not stop the N3MC Lite server (pid %s): %s. End the process whose command line "
+                  "contains n3mc_mcp.cli and --run-server." % (pid, reason), file=sys.stderr)
+            return 1
         print("Stopped the N3MC Lite server (pid %s)." % pid)
     else:
         print("No N3MC Lite server of this data folder is running.")

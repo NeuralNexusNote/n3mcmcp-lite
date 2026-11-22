@@ -186,6 +186,63 @@ class TestThinNoServer:
         out = server.handle_call("list_memories", {}, state=server.ThinState())
         assert "memory server is not available (TimeoutError: slow)" in out
 
+    # ---- 2026-11-22, review #7: "Nothing was deleted" only when no request was sent
+    UNKNOWN = ("The request reached the N3MC Lite memory server but no answer came back (%s). The delete may "
+               "have completed; check with list_memories or search_memory before deleting again.")
+
+    @pytest.mark.parametrize("exc", [ConnectionRefusedError("refused"),
+                                     __import__("urllib.error").error.URLError(ConnectionRefusedError("refused"))])
+    @pytest.mark.parametrize("name,args", [("delete_memory", {"id": "x"}),
+                                           ("delete_memories_by_session", {"session_id": "s"})])
+    def test_delete_not_sent_says_nothing_deleted(self, isolate, monkeypatch, capsys, exc, name, args):
+        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
+        monkeypatch.setattr(cli, "_post", lambda *a, **k: (_ for _ in ()).throw(exc))
+        out = server.handle_call(name, args, state=server.ThinState())
+        res = json.loads(out.partition("\n\n---\n")[0])
+        assert res["status"] == "error" and "Nothing was deleted; retry in a minute." in res["reason"]
+        assert out.endswith(_NUDGE_GENERIC)
+        flag = "--delete" if name == "delete_memory" else "--delete-session"
+        assert cli.main([flag, list(args.values())[0]]) == 0
+        assert "Nothing was deleted" in json.loads(capsys.readouterr().out)["reason"]
+
+    @pytest.mark.parametrize("exc", [TimeoutError("timed out"), ConnectionResetError("reset"),
+                                     cli.HttpStatusError(500, "boom")])
+    def test_delete_without_answer_is_unknown(self, isolate, monkeypatch, capsys, exc):
+        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
+        monkeypatch.setattr(cli, "_post", lambda *a, **k: (_ for _ in ()).throw(exc))
+        for name, args in (("delete_memory", {"id": "x"}), ("delete_memories_by_session", {"session_id": "s"})):
+            out = server.handle_call(name, args, state=server.ThinState())
+            reason = "%s: %s" % (type(exc).__name__, exc)
+            assert out == json.dumps({"status": "unknown", "reason": self.UNKNOWN % reason}) + _NUDGE_GENERIC
+        assert cli.main(["--delete", "x"]) == 0
+        assert json.loads(capsys.readouterr().out) == {"status": "unknown", "reason": self.UNKNOWN % reason}
+        assert cli.main(["--delete-session", "s"]) == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "unknown"
+
+    def test_delete_completed_and_answer_lost(self, wired, db, monkeypatch, capsys):
+        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
+        a = db.save_memory("delete me through the server", session_id="s-del")["id"]
+        out = server.handle_call("delete_memory", {"id": a}, state=server.ThinState())
+        assert json.loads(out.partition("\n\n---\n")[0]) == {"status": "deleted", "id": a}   # the normal answer
+        b = db.save_memory("delete me too", session_id="s-del")["id"]
+        assert cli.main(["--delete", b]) == 0
+        assert json.loads(capsys.readouterr().out) == {"status": "deleted", "id": b}
+        routed = cli._post
+
+        def lost(port, path, body, timeout=30):
+            routed(port, path, body, timeout)        # the server deletes ...
+            raise TimeoutError("timed out")          # ... but the answer never arrives
+
+        monkeypatch.setattr(cli, "_post", lost)
+        c = db.save_memory("lost answer", session_id="s-lost")["id"]
+        out = server.handle_call("delete_memory", {"id": c}, state=server.ThinState())
+        assert json.loads(out.partition("\n\n---\n")[0])["status"] == "unknown" and out.endswith(_NUDGE_GENERIC)
+        assert not db.r.exists("mem:" + c)
+        d = db.save_memory("lost answer two", session_id="s-lost")["id"]
+        assert cli.main(["--delete-session", "s-lost"]) == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "unknown"
+        assert not db.r.exists("mem:" + d)
+
 
 class TestThinStart:
     def test_ensure_runs_in_background_and_before_each_call(self, isolate, monkeypatch, sent):
