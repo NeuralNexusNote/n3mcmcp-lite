@@ -7,7 +7,7 @@
 >
 > **Who is this for?** Claude Code users (through **hooks** — every message and reply is saved and searched automatically) and users of other MCP-compatible applications such as the Claude desktop app (through **MCP**), who want searchable, short-lived memory shared across sessions within a 7-day window. (v2.0.0)
 >
-> **Transport**: Claude Code: hooks and a CLI that talk to a resident server on `127.0.0.1` over HTTP. Other applications: Model Context Protocol over stdio (JSON-RPC) to a thin MCP entry, which forwards to the same resident server (v2.0.0). v1.12.2 was tested on Windows 11 and Ubuntu with Python 3.12 and Redis Stack 7.x; v2.0.0 has not been generated and run yet. macOS is not a target.
+> **Transport**: Claude Code: hooks and a CLI that talk to a resident server on `127.0.0.1` over HTTP. Other applications: Model Context Protocol over stdio (JSON-RPC) to a thin MCP entry, which forwards to the same resident server (v2.0.0). v1.12.2 was tested on Windows 11 and Ubuntu with Python 3.12 and Redis Stack 7.x; the code of v2.0.0 and later runs on Windows 11 with Python 3.12 (2.0.0 and 2.0.1 are published on PyPI); generating it from this document alone has not been tried yet. macOS is not a target.
 
 ## ⚠️ Disclaimer & Distribution Terms
 
