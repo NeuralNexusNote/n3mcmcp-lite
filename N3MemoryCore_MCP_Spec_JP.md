@@ -1,4 +1,4 @@
-# N3MemoryCore MCP-Lite v2.0.0 [Volatile Memory — hooks for Claude Code, MCP for other apps]
+# N3MemoryCore MCP-Lite v2.0.1 [Volatile Memory — hooks for Claude Code, MCP for other apps]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版** との差別化を明確化しています。

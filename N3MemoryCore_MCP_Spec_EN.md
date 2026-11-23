@@ -1,4 +1,4 @@
-# N3MemoryCore MCP-Lite v2.0.0 [Volatile Memory — hooks for Claude Code, MCP for other apps]
+# N3MemoryCore MCP-Lite v2.0.1 [Volatile Memory — hooks for Claude Code, MCP for other apps]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build** uses SQLite + sqlite-vec to store memories permanently.
