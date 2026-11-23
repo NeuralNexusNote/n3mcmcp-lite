@@ -7,7 +7,7 @@
 >
 > **想定ユーザー**：Claude Code の利用者（**フック**経由。すべてのメッセージと応答を自動で保存し、検索する）と、Claude デスクトップアプリなど、ほかの MCP 対応アプリの利用者（**MCP** 経由）で、7 日の窓内で会話をまたいで検索可能な短期メモリを欲しい人。（v2.0.0）
 >
-> **通信**：Claude Code は、フックと CLI が `127.0.0.1` の常駐サーバーと HTTP で通信する。ほかのアプリは、Model Context Protocol over stdio (JSON-RPC) で薄い MCP の入口と通信し、入口が同じ常駐サーバーに転送する（v2.0.0）。v1.12.2 は Windows 11・Ubuntu + Python 3.12 + Redis Stack 7.x で検証した。v2.0.0 はまだ生成も実行もしていない。macOS は対象外である。
+> **通信**：Claude Code は、フックと CLI が `127.0.0.1` の常駐サーバーと HTTP で通信する。ほかのアプリは、Model Context Protocol over stdio (JSON-RPC) で薄い MCP の入口と通信し、入口が同じ常駐サーバーに転送する（v2.0.0）。v1.12.2 は Windows 11・Ubuntu + Python 3.12 + Redis Stack 7.x で検証した。v2.0.0 以降のコードは Windows 11 + Python 3.12 で動かしている（2.0.0・2.0.1 は PyPI に公開済み）。この文書だけからの生成は、まだ試していない。macOS は対象外である。
 
 ## ⚠️ 免責・配布条件
 
