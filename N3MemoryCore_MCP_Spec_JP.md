@@ -2145,7 +2145,7 @@ pip install n3memorycore-mcp-lite
 n3mc-lite --init
 ```
 
-`n3mc-lite --init` は、`n3mc-lite-hook` / `n3mc-lite-stop-hook` の絶対パスで 2 つのフックを `~/.claude/settings.json` に登録し、下の許可ルールを足す（§12「`--init`」）。Claude Code を再起動する。記憶は次のセッションから始まる。
+`n3mc-lite --init` は、`n3mc-lite-hook` / `n3mc-lite-stop-hook` の絶対パスで 2 つのフックを `~/.claude/settings.json` に登録し、下の許可ルールを足す（§12「`--init`」）。Claude Code を再起動する（ウィンドウを閉じるだけでは足りないことがある。タスクバーの右端の「^」から Claude のアイコンを右クリックして終了するか、Windows から一度サインアウトする）。記憶は次のセッションから始まる。
 
 **古い MCP の登録（v1.12.2 以前）**：Claude Code にある `n3mc-workingmemory` の項目（`~/.claude.json` の user スコープ、またはプロジェクトの `.mcp.json`）は、もう使われない。`n3mc-lite --init` は `~/.claude.json` — 一番上の `mcpServers` と、`projects` の各項目の `mcpServers` — と、今のフォルダの `.mcp.json` を読み（読むだけ）、見つけたら `An MCP registration of n3mc-workingmemory was found in Claude Code (<file>). Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s user` を出力する（`.mcp.json` なら `remove the "n3mc-workingmemory" entry from <file>`。`projects` の項目は local スコープの登録で、`-s user` では消えないので、`An MCP registration of n3mc-workingmemory was found in Claude Code (<file>, project <project path>). Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s local (run it in that project)`）。これらのファイルは直さない。残っていると、Claude Code はフックと並んでツールをまた表示する。そのとき指示は、毎ターン保存しないようモデルに伝える（§5）。
 
@@ -2165,7 +2165,7 @@ n3mc-lite --init
    - `n3mc-workingmemory` を自分で一度起動し、stdio で MCP の `initialize` を送ってから `tools/list` を送り、§4.3 の 7 つのツールがそろうことを確かめてから(応答は 2 秒以内に来る、§4.6)、その stdin を閉じよ。
    - `claude` が使えるなら、`claude mcp get n3mc-workingmemory` がそのようなサーバーはないと答えること。
    - どれかが失敗したら、直してやり直せ。動かないセットアップのまま渡してはならない。
-6. **最後にメッセージを 1 つだけ出す**:「セットアップが終わりました。Claude Code(と Claude Desktop)を完全に終了して、開き直してください。次のセッションから記憶が始まります。」。付録 B の「フェーズ 1 → フェーズ 2 の間に Claude Code を完全再起動してください」にある、Windows で完全に終了する手順を添えよ。
+6. **最後にメッセージを 1 つだけ出す**:利用者が再起動を見落とさないように、メッセージのいちばん最初に見出し `## ⚠️ Claude Code の再起動が必要です` を置き、続けて「セットアップが終わりました。Claude Code(と Claude Desktop)を完全に終了して、開き直してください。次のセッションから記憶が始まります。」と書く。そのすぐ下に、付録 B の「フェーズ 1 → フェーズ 2 の間に Claude Code を完全再起動してください」にある、Windows で完全に終了する手順を、1 つの手順に 1 つの操作で、やさしい言葉で添えよ。ほかに伝えることがあれば、そのあとに書き、メッセージのいちばん最後にも `> ⚠️ **Claude Code を再起動するまで、記憶は働きません。**` の 1 行を置く。「Claude Code を再起動してください」の一言だけで済ませてはならない。再起動のあとは、この同じセッションを開いて「再起動しました」と送るよう伝えよ。そう送られてきたら、その発言が保存されたこと（`python -m n3mc_mcp.cli --list` に `[user]` の行が出る）と、そのターンに `# Recalled Memory Context` が入ったことを確かめ、記憶が働いているかを短く伝え、次にすること（付録 B のフェーズ 2 に進み、そこにあるプロンプトを順に貼る）を案内せよ。
 
 > **⚠️ 理由**:コード生成によるセットアップは、パッケージは入ったのに登録が動かない状態で終わることがある。たとえば、別の PC から写したフォルダの `.mcp.json` が `C:\Users\<別の PC のユーザー>\…\Python312\Scripts\n3mc-workingmemory.exe` を指していて、この PC には存在しないときや、`PATH` に頼るコマンド名だけで登録したときである。Lite の主なインストール方法はコード生成なので、手作業の設定なしで、動くセットアップで終わらなければならない。絶対パスの決まりは、フックのコマンドとデスクトップの項目に当てる。
 
@@ -3006,7 +3006,14 @@ Sonnet がコード生成・フック設定・サーバー起動まで自動で�
 >
 > フェーズ 1 で Claude Code が起動した時点ではフックはまだ存在しないため、このセッションは何も保存せず、`# Recalled Memory Context` も得ません。フェーズ 2 のデバッグプロンプトを貼る前に、**Claude Code を完全終了して再起動**してください — そうすると `n3mc-lite --init` が登録したフックとルールファイルが効くようになります。
 >
-> **Windows で完全終了する手順**：右上 × ボタンや `/exit` だけではバックグラウンドプロセスが残ることがあるため、**タスクマネージャ**を開き、`Claude` および `claude` 関連のプロセスをすべて終了させてから Claude Code を再起動してください。再起動後、メッセージを 1 つ送り、それが保存されたことを確認してください（`python -m n3mc_mcp.cli --list` がその `[user]` のレコードを表示する）。
+> **Windows で完全終了する手順**：右上 × ボタンや `/exit` だけでは、アプリが裏で動き続けていることがあります。
+>
+> 1. 開いている Claude Code をすべて閉じます（デスクトップアプリ、ターミナル、VS Code などの Claude Code の画面）。
+> 2. タスクバーの右端（時計の近く）の「^」を開き、Claude のアイコンがあれば右クリックして終了します。
+> 3. よくわからないときは、Windows から一度サインアウトして、サインインし直します。スタートメニュー → 左下の自分のアカウントのアイコン → **サインアウト**。PC の再起動でもかまいません。
+> 4. Claude Code を開き直します。
+>
+> 再起動後、メッセージを 1 つ送り、それが保存されたことを確認してください（`python -m n3mc_mcp.cli --list` がその `[user]` のレコードを表示する）。
 
 ---
 

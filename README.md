@@ -16,7 +16,9 @@ saved.
 
 2. Put only the specification `N3MemoryCore_MCP_Spec_EN.md` into an empty folder and open Claude Code in that folder
 3. Ask: "implement n3mcmcp-lite per this spec."
-4. When it is done, restart Claude Code
+4. When it is done, restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once)
+
+After the restart, open the same session and send "I restarted". Claude Code checks that memory works and tells you what to do next.
 
 Memory works from the next session. The steps are in
 [Quickstart](#step-1--start-redis-stack). To install with pip or the plugin
@@ -128,7 +130,7 @@ saved by v1.12.2 stay readable (same index, same fields).
 
 - **Plugin users**: the plugin registers the hooks instead of the MCP
   server. `uv` must still be on `PATH`.
-- **pip users**: run `n3mc-lite --init` once, then restart Claude Code.
+- **pip users**: run `n3mc-lite --init` once, then restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once).
   Remove the old MCP registration from Claude Code:
   `claude mcp remove n3mc-workingmemory -s user`, or remove the
   `n3mc-workingmemory` entry from a project's `.mcp.json`. `--init` reports
@@ -219,7 +221,7 @@ Open the config file from the app (Settings → Developer → Edit Config; the
 usual place on Windows is `%APPDATA%\Claude\claude_desktop_config.json`, and
 the Microsoft Store version of the app may keep it in another folder). Add
 the entry under `mcpServers`, keep the entries already there, save, and
-**quit the app completely and start it again**.
+**quit the app completely and start it again**. To quit completely, right-click the Claude icon under the "^" at the right end of the taskbar and quit; if unsure, sign out of Windows once.
 
 pip installation:
 
@@ -269,7 +271,7 @@ Plugin users (no pip installation):
 
 #### Step 4 — Restart
 
-Restart Claude Code (and the desktop app). Memory starts with the next
+Restart Claude Code (and the desktop app). Closing the window is not always enough: the app can keep running in the background. On Windows, open the "^" at the right end of the taskbar (near the clock); if a Claude icon is there, right-click it and quit. If unsure, sign out of Windows once and sign in again (Start menu → your account icon at the bottom left → **Sign out**), or restart the PC. Memory starts with the next
 session. On the first start the resident server downloads and loads the
 embedding model, about 1.1 GB (later starts use the cache). The hooks do not wait
 for it: until the model is ready, the memory search uses keywords only and
