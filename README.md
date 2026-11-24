@@ -1,6 +1,6 @@
-# N3MemoryCore MCP — Lite (Ephemeral)
+# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.0
 
-**A working memory for Claude that forgets by itself after 7 days.**
+**Give Claude Code a working memory that clears itself after 7 days — and the same memory in the Claude desktop app.**
 
 In Claude Code, hooks save every message and reply and bring the related ones
 back on every turn; no tool call is needed. The Claude desktop app and other
@@ -14,9 +14,11 @@ saved.
    docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
    ```
 
-2. Put only the specification `N3MemoryCore_MCP_Spec_EN.md` into an empty folder and open Claude Code in that folder
-3. Ask: "implement n3mcmcp-lite per this spec."
-4. When it is done, restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once)
+2. Make a folder: in File Explorer, create one empty folder (for example `C:\Users\<you>\n3mcmcp-lite`)
+3. Put the specification `N3MemoryCore_MCP_Spec_EN.md` in that folder, and nothing else
+4. Open Claude Code in that folder: in the Claude desktop app, open the **Code** tab, start a new session with **+ New**, choose **Local**, then **Open folder…** and pick the folder (in a terminal, change to that folder and run `claude`)
+5. Ask: "Please implement n3mcmcp-lite according to the specification `N3MemoryCore_MCP_Spec_EN.md`."
+6. When it is done, restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once)
 
 After the restart, open the same session and send "I restarted". Claude Code checks that memory works and tells you what to do next.
 
@@ -168,12 +170,26 @@ Re-running the `docker run` command after the container exists fails with
 ### Method A: Generate from the spec (primary, recommended)
 
 The N3MC series is specification first: the specification is written so that
-an AI can generate the implementation from it. To do that, open Claude Code
-in an **empty folder** (for example `~/n3mcmcp-lite`) that holds only
-`N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`), start Redis Stack, and ask
-"implement n3mcmcp-lite per this spec." The AI first checks the folder,
-Python and Redis, then generates the package, runs `pip install -e .`,
-registers the hooks with `n3mc-lite --init`, writes the MCP entry into the
+an AI can generate the implementation from it. To do that:
+
+1. **Start Redis Stack** ([Step 1](#step-1--start-redis-stack) above).
+2. **Make a folder**: in File Explorer, create one empty folder (for example
+   `C:\Users\<you>\n3mcmcp-lite`). The code is generated in this folder and
+   stays in use after setup; do not delete or move it later.
+3. **Put the specification in it**: copy the downloaded specification
+   `N3MemoryCore_MCP_Spec_EN.md` into that folder (put nothing else in it).
+4. **Open Claude Code in that folder**: in the Claude desktop app, open the
+   **Code** tab at the top of the sidebar and start a new session with
+   **+ New**. In the row under the prompt box, choose **Local** as the
+   environment, then click the folder control beside it, choose
+   **Open folder…** and pick the folder from step 2. (In a terminal, change
+   to that folder and run `claude`.)
+5. **Ask**: in the prompt box, send "Please implement n3mcmcp-lite according
+   to the specification `N3MemoryCore_MCP_Spec_EN.md`."
+
+The AI first checks the folder, Python and Redis, then generates the package,
+runs `pip install -e .`, registers the hooks with `n3mc-lite --init`, writes
+the MCP entry into the
 Claude desktop app's configuration file if the app is installed (after a
 backup, replacing only that entry), and checks that everything starts. The
 desktop app reads the entry after it is quit completely and started again.

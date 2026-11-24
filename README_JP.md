@@ -1,6 +1,6 @@
-# N3MemoryCore MCP — Lite（揮発型）
+# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.0
 
-**7 日たつと自分で忘れる、Claude の作業メモリ。**
+**Claude Code に、7 日で消える作業メモリを。同じ記憶を、Claude のデスクトップアプリでも。**
 
 Claude Code では、フックがすべてのメッセージと応答を保存し、関係のあるものを毎ターン呼び出します。ツールの呼び出しは要りません。
 Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP で同じ記憶を使います。
@@ -12,9 +12,11 @@ Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP �
    docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
    ```
 
-2. 空のフォルダに指示書 `N3MemoryCore_MCP_Spec_JP.md` だけを入れ、そのフォルダで Claude Code を開く
-3. 「この指示書に従って n3mcmcp-lite を実装してください」と頼む
-4. 終わったら、Claude Code を再起動する（ウィンドウを閉じるだけでは足りないことがあります。タスクバーの右端の「^」から Claude のアイコンを右クリックして終了するか、Windows から一度サインアウトしてください）
+2. エクスプローラーで、空のフォルダを 1 つ作る（例：`C:\Users\<あなたの名前>\n3mcmcp-lite`）
+3. 指示書 `N3MemoryCore_MCP_Spec_JP.md` をそのフォルダに入れる（ほかには何も入れない）
+4. そのフォルダで Claude Code を開く：Claude のデスクトップアプリで **Code** タブを開き、**+ New** で新しいセッションを始め、**Local** を選び、**Open folder…** でそのフォルダを選ぶ（ターミナルでは、そのフォルダに移って `claude` を起動する）
+5. 「この指示書 `N3MemoryCore_MCP_Spec_JP.md` に従って n3mcmcp-lite を実装してください」と頼む
+6. 終わったら、Claude Code を再起動する（ウィンドウを閉じるだけでは足りないことがあります。タスクバーの右端の「^」から Claude のアイコンを右クリックして終了するか、Windows から一度サインアウトしてください）
 
 再起動のあとは、同じセッションを開いて「再起動しました」と送ってください。記憶が働いているかを Claude Code が確かめ、次にすることを案内します。
 
@@ -166,9 +168,14 @@ docker start redis-stack
 
 N3MC シリーズは「指示書が先」です。
 指示書は、AI が実装を生成できるように書かれています。
-生成するときは、**空のフォルダ**（たとえば `~/n3mcmcp-lite`）に `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）だけを入れます。
-Redis Stack を起動し、そのフォルダで Claude Code を開きます。
-「この指示書に従って n3mcmcp-lite を実装してください」と頼みます。
+生成するときは、次のようにします。
+
+1. **Redis Stack を起動する**（上の [Step 1](#step-1--redis-stack-を起動)）。
+2. **フォルダを作る**:エクスプローラーで、空のフォルダを 1 つ作ります(例:`C:\Users\<あなたの名前>\n3mcmcp-lite`)。コードはこのフォルダに作られ、セットアップのあとも使い続けます。あとで消したり動かしたりしないでください。
+3. **指示書を入れる**:ダウンロードした指示書 `N3MemoryCore_MCP_Spec_JP.md` を、そのフォルダに入れます(このフォルダには、指示書のほかに何も入れません)。
+4. **そのフォルダで Claude Code を開く**:Claude のデスクトップアプリで、サイドバー上部の **Code** タブを開き、**+ New** で新しいセッションを始めます。プロンプト欄の下の行で、環境は **Local** を選び、その横のフォルダの欄で **Open folder…** を選んで、2 のフォルダを選びます。(ターミナルで使うときは、そのフォルダに移って `claude` を起動します。)
+5. **頼む**:プロンプト欄に「この指示書 `N3MemoryCore_MCP_Spec_JP.md` に従って n3mcmcp-lite を実装してください」と書いて送ります。
+
 AI は、最初にフォルダ・Python・Redis を確かめます。
 そのあと、パッケージを生成し、`pip install -e .` を実行します。
 `n3mc-lite --init` でフックを登録します。
