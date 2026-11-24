@@ -27,6 +27,12 @@ Memory works from the next session. The steps are in
 instead (bonus), and for the Claude desktop app, see
 [Method B: Install the package (bonus)](#method-b-install-the-package-bonus).
 
+> **⚠️ Disclaimer**
+>
+> - **No support, no claims**: This project is provided as-is with no support. Questions, bug reports, and feature requests are not guaranteed a response. Use entirely at your own discretion.
+> - **Use at your own risk**: This system runs on AI-generated code. The author is not responsible for any data changes or issues caused by its use.
+> - **Backup first**: Always back up your current environment before running this on important projects.
+
 > Upgrading from v1.12.2? What changes for existing users is in
 > `CHANGELOG.md` (version 2.0.0).
 
