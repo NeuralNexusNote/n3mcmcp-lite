@@ -1,6 +1,6 @@
-# N3MemoryCore MCP — Lite（揮発型）
+# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.0
 
-**7 日たつと自分で忘れる、Claude の作業メモリ。**
+**Claude Code に、7 日で消える作業メモリを。同じ記憶を、Claude のデスクトップアプリでも。**
 
 Claude Code では、フックがすべてのメッセージと応答を保存し、関係のあるものを毎ターン呼び出します。ツールの呼び出しは要りません。
 Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP で同じ記憶を使います。
@@ -12,9 +12,11 @@ Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP �
    docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
    ```
 
-2. 空のフォルダに指示書 `N3MemoryCore_MCP_Spec_JP.md` だけを入れ、そのフォルダで Claude Code を開く
-3. 「この指示書に従って n3mcmcp-lite を実装してください」と頼む
-4. 終わったら、Claude Code を再起動する（ウィンドウを閉じるだけでは足りないことがあります。タスクバーの右端の「^」から Claude のアイコンを右クリックして終了するか、Windows から一度サインアウトしてください）
+2. エクスプローラーで、空のフォルダを 1 つ作る（例：`C:\Users\<あなたの名前>\n3mcmcp-lite`）
+3. 指示書 `N3MemoryCore_MCP_Spec_JP.md` をそのフォルダに入れる（ほかには何も入れない）
+4. そのフォルダで Claude Code を開く：Claude のデスクトップアプリで **Code** タブを開き、**+ New** で新しいセッションを始め、**Local** を選び、**Open folder…** でそのフォルダを選ぶ（ターミナルでは、そのフォルダに移って `claude` を起動する）
+5. 「この指示書 `N3MemoryCore_MCP_Spec_JP.md` に従って n3mcmcp-lite を実装してください」と頼む
+6. 終わったら、Claude Code を再起動する（ウィンドウを閉じるだけでは足りないことがあります。タスクバーの右端の「^」から Claude のアイコンを右クリックして終了するか、Windows から一度サインアウトしてください）
 
 再起動のあとは、同じセッションを開いて「再起動しました」と送ってください。記憶が働いているかを Claude Code が確かめ、次にすることを案内します。
 
@@ -22,7 +24,7 @@ Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP �
 手順の詳細は、[クイックスタート](#step-1--redis-stack-を起動) にあります。
 pip やプラグインで入れる方法（おまけ）と Claude デスクトップアプリの設定は、[方法 B：パッケージ導入（おまけ）](#方法-bパッケージ導入おまけ) にあります。
 
-> v1.12.2 から上げる方へ：既存の利用者にとって何が変わるかは、[v2.0.0 で変わったこと](#v200-で変わったこと) にあります。
+> v1.12.2 から上げる方へ：既存の利用者にとって何が変わるかは、`CHANGELOG.md` の 2.0.0 にあります。
 
 > NeuralNexusNote™ プロダクト — **無償 Lite** 版。
 > Redis Stack を使う、揮発性のハイブリッド（ベクトル + BM25）メモリです。
@@ -36,10 +38,10 @@ pip やプラグインで入れる方法（おまけ）と Claude デスクト�
 | あなたは | 読む場所 |
 |---|---|
 | 初めて使う | [クイックスタート](#step-1--redis-stack-を起動)、そのあと [実際に Claude に届くもの](#実際に-claude-に届くもの) |
-| v1.x から来た | [v2.0.0 で変わったこと](#v200-で変わったこと) |
+| v1.x から来た | `CHANGELOG.md` の 2.0.0 |
 | 無償の 2 つで迷っている | [Lite と Free、どちらを使うか](#lite-と-freeどちらを使うか) |
 | データの置き場所を知りたい | [記憶はあなたが管理するマシンに残ります](#記憶はあなたが管理するマシンに残ります)、[データ保存先](#データ保存先) |
-| 設定を変えたい | [設定](#設定)、[ランキング式](#ランキング式) |
+| 設定を変えたい | [詳しい仕様](#詳しい仕様) |
 | 困っている | [トラブルシューティング](#トラブルシューティング)、[制限](#制限) |
 
 ## 概要
@@ -91,59 +93,6 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 
 ---
 
-## v2.0.0 で変わったこと
-
-v2.0.0 はメジャーバージョンです。
-Lite と Claude Code のつながり方が変わりました。
-v1.12.2 までの Lite は MCP サーバーだけで、何を保存するかはモデルが決めていました。
-
-| 以前（v1.12.2） | 以後（v2.0.0） |
-|---|---|
-| Claude Code に 7 つの `mcp__…n3mc-workingmemory__*` ツールが見えていた | **Claude Code に MCP のツールは見えなくなる。** プラグインはもう MCP サーバーを登録しない |
-| モデルが `save_memory` に渡すと決めたものだけが保存された | **空でないすべてのメッセージと応答を、フックが保存する**（コードブロックは `[code omitted]` にする）。保存は `[user]` / `[claude]` のレコードになる |
-| モデルがターンの最初に `search_memory` を呼んでいた | `UserPromptSubmit` フックが、メッセージのたびに検索する。結果は `# Recalled Memory Context` の見出しで Claude のコンテキストに入る |
-| 検索・一覧・取り出し・削除は MCP のツールだった | Claude Code では CLI が同じことをする：`n3mc-lite --search`、`--list`、`--recall-thread`、`--delete`、`--delete-session`、`--buffer`、`--repair`。表示する文はツールの文と同じ |
-| アプリごとに自分の MCP サーバーを起動し、モデル（約 1.1 GB）を読み込んでいた | 1 つの常駐サーバーが、モデルを 1 回だけ読み込む。MCP の入口は薄いクライアントで、モデルを読み込まない |
-| セッションの合間に動くプロセスはなかった | 常駐サーバーは、一度起動するとバックグラウンドで動き続ける |
-| pip の利用者は MCP サーバーを登録した | pip の利用者は `n3mc-lite --init` を 1 回実行して、フックを登録する。Claude Code に残った古い `n3mc-workingmemory` の登録はもう使われないので、消す |
-| Redis のコマンドは `docker run … -p 6379:6379 …` だった | `docker run … -p 127.0.0.1:6379:6379 …` になる。記憶がネットワークから届かなくなる。すでに作ったコンテナは、その設定のまま。作り直す（`docker rm -f redis-stack`、そのあと新しいコマンド）と、Redis のほかの再起動と同じく、その記憶は消える |
-| MCP の指示は、永続の記憶として `n3mc-longtermmemory` を挙げていた | `n3mc-pro`、`n3mc-pg`、`n3mc-longtermmemory`（N3MC MCP Pro、その PostgreSQL 版、以前の MCP Pro）を挙げる |
-| 古いプラグインや `.mcp.json` が、版の指定のない `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` を起動していた | プラグインを更新する。それまでは、その登録が v2.0.0 の MCP の入口を、フックなしで Claude Code に起動する |
-| `N3MC_SESSION_ID` で、Claude Code のセッションの保存をまとめられた | フックのレコードは Claude Code 自身のセッション ID を持つ。`N3MC_SESSION_ID` は今も MCP に効く |
-| MCP クライアントの `env` の `N3MC_REDIS_URL` で Redis を選べた | `redis_url` を `config.json` に書く。共用のサーバーは、それを起動したプロセスの環境を使う |
-| `skip_code_blocks: true` は、コード付きの保存を断った | フックのメッセージや応答も、コードブロックを含めば保存しない |
-| — | `search_memory` の検索結果は `context_max_chars`（既定 9,500 文字）に収まる |
-
-**変わらないもの**：
-PyPI の名前 `n3memorycore-mcp-lite`。
-Python パッケージ `n3mc_mcp`。
-MCP のコマンドとサーバー名 `n3mc-workingmemory`（別名 `n3mc-mcp-lite`）。
-7 つのツールの名前・引数・出力の文（ただし `search_memory` の文は `context_max_chars` に収まるようになった）。
-Redis のレイアウトと設定（`redis_url`、`N3MC_REDIS_URL`）。
-7 日の TTL。
-データフォルダ `~/.n3mc-workingmemory`（`N3MC_DATA_DIR`）。
-プラグイン名 `n3mc-workingmemory`。
-検索と保存のすべての決まり。
-v1.12.2 が保存したレコードは、そのまま読めます（同じ索引、同じフィールド）。
-
-**v2.0.0 に更新した後に、既存の利用者がすること**
-
-- **プラグインの利用者**：プラグインは、MCP サーバーの代わりにフックを登録します。`uv` は今までどおり `PATH` に必要です。
-- **pip の利用者**：`n3mc-lite --init` を 1 回実行し、Claude Code を再起動します（ウィンドウを閉じるだけでは足りないことがあります。タスクバーの右端の「^」から Claude のアイコンを右クリックして終了するか、Windows から一度サインアウトしてください）。
-  Claude Code から古い MCP の登録を消します。
-  `claude mcp remove n3mc-workingmemory -s user` を実行します。
-  プロジェクトの `.mcp.json` にあるときは、`n3mc-workingmemory` の項目を消します。
-  `--init` はこの登録を知らせますが、これらのファイルは書き換えません。
-  登録が残ると、Claude Code にフックと並んでツールがまた見えます。
-- **Claude デスクトップアプリの利用者**：項目の名前は `n3mc-workingmemory` のままです。
-  v2.0.0 では、コマンドを絶対パスで書き、`env` の項目を足します
-  （[Claude デスクトップアプリ](#step-3--claude-デスクトップアプリ任意) を見てください）。
-  方法 A のセットアップは、この項目をアプリの設定ファイルに書き込みます（書く前に控えを取ります）。pip やプラグインで入れた場合は、自分で書き換えます。
-- **データフォルダに新しいファイルが増えます**：`audit.log`（フックの入力の原文。TTL なし）、`server.log`、`notices.json` と、小さなプロセス用のファイルです。
-  [データ保存先](#データ保存先) を見てください。
-
----
-
 ## 🚀 クイックスタート
 
 導入の方法は 2 通りです。指示書から作成する方法 A がメインで、パッケージを入れる方法 B はおまけです。どちらも、最初に Step 1 で Redis Stack を起動します。
@@ -166,9 +115,14 @@ docker start redis-stack
 
 N3MC シリーズは「指示書が先」です。
 指示書は、AI が実装を生成できるように書かれています。
-生成するときは、**空のフォルダ**（たとえば `~/n3mcmcp-lite`）に `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）だけを入れます。
-Redis Stack を起動し、そのフォルダで Claude Code を開きます。
-「この指示書に従って n3mcmcp-lite を実装してください」と頼みます。
+生成するときは、次のようにします。
+
+1. **Redis Stack を起動する**（上の [Step 1](#step-1--redis-stack-を起動)）。
+2. **フォルダを作る**:エクスプローラーで、空のフォルダを 1 つ作ります(例:`C:\Users\<あなたの名前>\n3mcmcp-lite`)。コードはこのフォルダに作られ、セットアップのあとも使い続けます。あとで消したり動かしたりしないでください。
+3. **指示書を入れる**:ダウンロードした指示書 `N3MemoryCore_MCP_Spec_JP.md` を、そのフォルダに入れます(このフォルダには、指示書のほかに何も入れません)。
+4. **そのフォルダで Claude Code を開く**:Claude のデスクトップアプリで、サイドバー上部の **Code** タブを開き、**+ New** で新しいセッションを始めます。プロンプト欄の下の行で、環境は **Local** を選び、その横のフォルダの欄で **Open folder…** を選んで、2 のフォルダを選びます。(ターミナルで使うときは、そのフォルダに移って `claude` を起動します。)
+5. **頼む**:プロンプト欄に「この指示書 `N3MemoryCore_MCP_Spec_JP.md` に従って n3mcmcp-lite を実装してください」と書いて送ります。
+
 AI は、最初にフォルダ・Python・Redis を確かめます。
 そのあと、パッケージを生成し、`pip install -e .` を実行します。
 `n3mc-lite --init` でフックを登録します。
@@ -397,7 +351,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 [claude] 承知しました。データベースは PostgreSQL にします。理由は、同時に編集する人がいることと、SQLite は書き込みが 1 つずつになることです。次は、記事のテーブルの定義を書きます。
 ```
 
-各ヒットは `### [<id>]` で始まり、`turn=`、`score=`、`saved=` の時刻が付きます。関連度の下限を通らなかった記録は、`Possibly related` という見出しの下に出ます（[設定](#設定) の `min_results`）。
+各ヒットは `### [<id>]` で始まり、`turn=`、`score=`、`saved=` の時刻が付きます。関連度の下限を通らなかった記録は、`Possibly related` という見出しの下に出ます。
 
 ### Claude 標準の auto-memory との違い
 
@@ -517,115 +471,6 @@ Microsoft Store 版の Claude デスクトップアプリは、自分が起動�
 バックアップは想定していません。エントリは 7 日の窓で消えていきます。
 ID にかかわるのは `config.json`（`owner_id` / `local_id`）だけです。
 
-## 設定
-
-最初の起動で、`config.json` を自動で作ります。`owner_id` と `local_id` にはランダムな UUID が入ります。
-変えられる既定値：
-
-```json
-{
-  "owner_id":                 "<uuid>",
-  "local_id":                 "<uuid>",
-  "redis_url":                "redis://localhost:6379/0",
-  "ttl_seconds":              604800,
-  "half_life_days":           3,
-  "bm25_min_threshold":       0.1,
-  "search_result_limit":      20,
-  "min_score":                0.2,
-  "vector_min_cos":           0.85,
-  "relative_min_score_ratio": 0.6,
-  "min_results":              3,
-  "version_order_enabled":    true,
-  "version_sim_threshold":    0.98,
-  "version_min_chars":        100,
-  "search_query_max_chars":   2000,
-  "chunk_threshold":          400,
-  "chunk_overlap":            100,
-  "access_count_enabled":     false,
-  "access_count_weight":      0.02,
-  "access_count_max_boost":   0.5,
-  "ttl_refresh_top_k":        5,
-  "lexical_rerank_enabled":   true,
-  "rerank_weight":            0.3,
-  "rerank_phrase_weight":     0.2,
-  "b_session_match":          1.0,
-  "b_session_mismatch":       0.6,
-  "skip_code_blocks":         false,
-  "embedding_model":          "intfloat/multilingual-e5-base",
-  "embedding_dim":            768,
-  "server_port":              18524,
-  "bind_host":                "127.0.0.1",
-  "context_max_chars":        9500
-}
-```
-
-- `redis_url` — 接続先の URL。環境変数 `N3MC_REDIS_URL` が優先します。
-- `ttl_seconds` — 新しい記憶とその重複防止の印に付ける TTL（既定 7 日）。
-- `vector_min_cos` — ベクトルの候補になるための、問い合わせとの近さ（コサイン）。既定は `0.85` です。目安は 0.80–0.88 です。下げると、より多く拾い、関係の薄い行も増えます。上げると、結果が短くなります。0.85 は `multilingual-e5-base` で測った値です。`embedding_model` を変えたら、測り直してください。
-- `relative_min_score_ratio` — 最高点に対してこの比より低い結果を外します（既定 `0.6`。`0.0` で無効）。
-- `min_results` — しきいを通った結果がこれより少ないときは、外した行のうち近いものを、別の見出し `#### Possibly related (weak matches — may be unrelated)` の下に足します（既定 `3`。`0` で無効）。弱い一致の行は、`access_count` に数えません。
-- `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 中身が 0.98 以上似ている結果は、同じものの版として扱い、新しい順に並べます。各ヒットには `saved=` の時刻が付きます。
-- `chunk_threshold` / `chunk_overlap` — 区切りの大きさと重なり（文字数）。これより長い本文は、親文書とチャンクで保存します。ヒットすると全文が返ります。
-- `access_count_*` — よく使われる記憶の加点。**2026-11-17 から既定は無効**です（`access_count_enabled: false`）。ヒットの回数は数えます。
-- `ttl_refresh_top_k` — 検索のたびに `access_count` を増やす、上位の件数です。名前は以前の版のままですが、検索で TTL は戻しません。（`ttl_refresh_on_search` は 2026-11-22 になくしました。`config.json` に残っていても使いません。）
-- `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — 合算の後の、軽い語彙での並べ替え（CPU だけ）。
-- `b_session_match` / `b_session_mismatch` — 保存された `session_id` が合う行（既定 `1.0`）と合わない行（`0.6`）に掛ける値。両方を `1.0` にすると、補正はなくなります。
-- `skip_code_blocks` — `true` にすると、3 つのバッククォートの囲みを含む内容を保存しません（`status: "skipped_code"`）。フックの保存にも効きます。既定の `false` では、コードブロックを `[code omitted]` に置き換えて保存します。
-- `embedding_model` / `embedding_dim` — 埋め込みモデルと、そのベクトルの次元。2 つは合っている必要があります。どちらかを変えたら、再起動と索引の消去が要ります。
-- `server_port`（v2.0.0）— 常駐サーバーのポート（既定 `18524`）。N3MC-Free は 18520、Pro は 18521、PostgreSQL 版は 18522、Ollama 版は 18523 を使います。1 台の PC では、N3MC の製品ごとに別のポートにします。
-- `bind_host`（v2.0.0）— 既定の `127.0.0.1` のままにします。
-- `context_max_chars`（v2.0.0）— フックの `# Recalled Memory Context` の塊と、MCP の `search_memory` の結果の最大の大きさ（既定 `9500`。2000–10000）。Claude Code は、10,000 文字を超えるフックの出力をファイルに移し、2,000 文字の抜粋だけを見せます。塊が長すぎるときは、まず順位の低い行を外し、それでも長ければ文を切ります。手で実行する `--search` は全部を見せます。
-- **変更が効くとき**：`config.json` を書き換えると、次のフック・CLI・MCP の呼び出しで常駐サーバーが起動し直します。`config.json` に書き間違いがあって読めないときは、ファイルには触らず、既定値で動きます。最初の検索の結果がそのことを知らせます。数値は引用符なしで書きます。
-
-全項目は、指示書の §6 にあります。
-
-## 多言語対応
-
-はじめから入っています。CPU だけで動き、LLM も GPU も要りません。
-同じ言葉をどう打っても、検索と重複の判定は同じように動きます。
-
-| 層 | すること | 例 |
-|---|---|---|
-| **NFKC 正規化** | SHA・埋め込み・BM25 の前に、互換文字をそろえる | `ｱﾙﾌｧ` ↔ `アルファ`、`１２３` ↔ `123`、`ﬁ` ↔ `fi` |
-| **バイグラムの BM25 補助** | 空白のない文字に、重なる 2 文字の組を作る | `記憶装置` → `記憶 憶装 装置`。韓国語（`안녕하세요`）、タイ語（`สวัสดี`）、ラオ語、ミャンマー語、クメール語も同じ |
-| **ダイアクリティカルマークの同一視** | ラテン・ギリシャ・キリル文字の語を、結合記号なしでも索引に入れる | `café` が `cafe` に、`Ångström` が `Angstrom` に一致 |
-| **multilingual-e5-base の埋め込み** | 100 以上の言語にまたがる意味の空間 | 言語をまたぐ言い換えの検索 |
-
-これらは、保存と検索のたびに動きます。
-保存する `content` は書き換えません。長い本文は、保存したとおりに全文が返ります。
-
-## エンコーディング安全策
-
-1. **UTF-8 への切り替え** — MCP の入口、フックの入口、CLI は、起動したときに `sys.stdin` / `sys.stdout` / `sys.stderr` を UTF-8 にします。日本語の Windows では、コンソールの既定のコードページが cp932 です。そのままだと、ASCII 以外のバイトがすべて壊れます。POSIX の環境はもともと UTF-8 なので、何も変わりません。
-2. **孤立サロゲートの除去** — 保存するすべての文章、すべての問い合わせ、フックの入力の全体を `sanitize_surrogates()` に通します。Windows のパイプが、Python で読めないバイトを渡すと、UTF-16 の孤立サロゲート（`U+D800`–`U+DFFF`）が出ることがあります。この対策がないと、書き込みが失敗します。
-
-空になった内容や、見える文字のない内容は、`empty content` / `empty content (no visible characters)` で断ります。
-
-保存するすべてのものに、2 つの決まりがあります。
-
-- **外側の空白を 1 回だけ取ります** — `' \nAAA\n '` は `AAA` として保存します。
-- **コードブロックは `[code omitted]` にします** — 囲まれたブロック（```` ``` ```` … ```` ``` ````、または閉じていない囲みから最後まで）を、保存の前に置き換えます。行内のバッククォートは残します。N3MemoryCore が覚えるのは、話したことと決めたことです。コードは、プロジェクトのファイルにあるべきものです。
-
-フックのレコードは、役割の印で始まります：`[user] ` または `[claude] `（長い文章のチャンクは `[user 2/5] ` など）。
-
-## ランキング式
-
-```
-final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay * b_local * b_session
-
-time_decay   = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 3 days)
-b_local      = clamp(0.5, 2.0, stored_importance + access_boost)
-access_boost = min(0.5, access_count * 0.02)               (only when access_count_enabled)
-b_session    = b_session_match (default 1.0)   if row.session_id == effective_session
-             = b_session_mismatch (default 0.6) otherwise
-```
-
-半減期は 3 日で、7 日の TTL より短いです。だから Lite では `time_decay` がよく効きます。
-保存したばかりの記憶は 1.0、3 日前のものは 0.5、7 日前のものは約 0.20 です。
-
-よく使われる記憶の加点は、2026-11-17 から既定で無効です。
-N3MC-Pro で測ったところ、recall@3 が下がったためです（よく返る記憶が、より関係のある記憶より上に来ました）。
-
 ## ほかの N3MC 製品との共存
 
 Lite は、N3MC-Free、N3MC-Pro、MCP Pro / PostgreSQL / Ollama 版と同じ PC に入れられます。
@@ -677,6 +522,10 @@ Lite は 3 つとも使います。ツールの応答の最後には、いつも
 - **Claude Code を使う** — フックが、すべてのやりとりを保存します。
 - **自分のアプリから Anthropic の Messages API を呼ぶ** — `tool_use` を自分で動かし、毎ターン `save_memory` を呼びます。そのアプリは自分で書く必要があります。
 
+## 詳しい仕様
+
+設定（`config.json`）、検索の並べ方、多言語の扱い、文字コードの安全策、開発と改造の方法は、指示書 `N3MemoryCore_MCP_Spec_JP.md` に書いてあります。版ごとの変更は `CHANGELOG.md` を見てください。
+
 ## アンインストール
 
 フックの登録も消えるように、AI に「N3MC Lite を削除してください」と頼みます。
@@ -691,45 +540,6 @@ Lite は 3 つとも使います。ツールの応答の最後には、いつも
 6. Claude デスクトップアプリの設定ファイルから、`n3mc-workingmemory` の項目を消します。
 
 プロジェクトのフォルダにある `.claude/rules/n3mc-lite-behavior.md` は、手で消してかまいません。
-
-## 開発
-
-```bash
-# テストは使う Redis を FLUSHDB する。記憶用の Redis ではなく、テスト専用のコンテナを使う
-docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
-```
-
-Windows の PowerShell:
-
-```powershell
-docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
-python -m venv .venv; .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-$env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
-```
-
-RediSearch は DB 0 にしか索引を作れません。だから、別の DB 番号でテストすることはできません。
-テストは、**専用の** Redis コンテナで実行してください。
-v2.0.0 のテストの層（フック、サーバーの API、CLI、MCP クライアント、大きさの制限、共存）は、指示書の §9 にあります。テストは `tests/` にあります。
-
-CI は、`main` への push と、`main` 向けの PR のたびにテストを実行します。
-[`.github/workflows/test.yml`](./.github/workflows/test.yml) を見てください。
-開発者向けの案内（英語 + 日本語）は [`CONTRIBUTING.md`](./CONTRIBUTING.md) にあります。
-
-## Lite 版の拡張・改造
-
-このリポジトリは**公開されていて、Apache-2.0 ライセンス**です。
-自由にフォークし、変え、動かしてかまいません。
-動きを変えたいとき（順位の式、クロスエンコーダの並べ替え、日本語の形態素解析など）は、指示書から始めてください。
-
-- [`N3MemoryCore_MCP_Spec_EN.md`](./N3MemoryCore_MCP_Spec_EN.md) — 設計の全文（英語）
-- [`N3MemoryCore_MCP_Spec_JP.md`](./N3MemoryCore_MCP_Spec_JP.md) — 日本語版
-
-指示書の付録 A に、追加できる機能と、その差し込み口があります。
-フォークを別のパッケージ名で公開するときは、`pyproject.toml` の `name`、`[project.urls]`、コンソールスクリプトの名前も変えてください。
 
 ## トラブルシューティング
 

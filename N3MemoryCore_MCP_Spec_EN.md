@@ -157,7 +157,13 @@ Re-running the `docker run` command after the container exists fails with `Confl
 #### Method A: Generate from the spec (primary, recommended)
 
 1. **Start Redis Stack** (above).
-2. **Hand the spec to an AI and ask it to implement**: open Claude Code in an **empty folder** (for example `~/n3mcmcp-lite`) with only this spec in it — the AI first checks the folder, Python and Redis ([§1](#1-vision), "Setup checks") and stops with instructions if something is missing. Then give `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`) to Claude and ask "implement n3mcmcp-lite per this spec." The AI generates the package layout, RediSearch index, the resident server, the hooks, the CLI and the MCP thin client. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
+2. **Hand the spec to an AI and ask it to implement**:
+   1. **Make a folder**: in File Explorer, create one empty folder (for example `C:\Users\<you>\n3mcmcp-lite`). The code is generated in this folder and stays in use after setup; do not delete or move it later.
+   2. **Put the specification in it**: copy the downloaded specification `N3MemoryCore_MCP_Spec_EN.md` into that folder (put nothing else in it).
+   3. **Open Claude Code in that folder**: in the Claude desktop app, open the **Code** tab at the top of the sidebar and start a new session with **+ New**. In the row under the prompt box, choose **Local** as the environment, then click the folder control beside it, choose **Open folder…** and pick the folder from step 1. (In a terminal, change to that folder and run `claude`.)
+   4. **Ask**: in the prompt box, send "Please implement n3mcmcp-lite according to the specification `N3MemoryCore_MCP_Spec_EN.md`."
+
+   The AI first checks the folder, Python and Redis ([§1](#1-vision), "Setup checks") and stops with instructions if something is missing. The AI generates the package layout, RediSearch index, the resident server, the hooks, the CLI and the MCP thin client. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
 3. **Install and register (done by the AI)**: the AI runs `pip install -e .` in the project root, registers the **hooks** in Claude Code with `n3mc-lite --init`, writes the MCP entry (with absolute paths) into the Claude desktop app's configuration file if the app is installed (after a backup, replacing only that entry), and checks that everything starts ([§8 "Automatic registration after code generation"](#automatic-registration-after-code-generation-method-a--required)). You do not edit any Claude Code config file.
 4. **Restart the client.** The first memory search after the restart may take 30–60 seconds as the ~1.1 GB embedding model is downloaded and loaded by the resident server.
 

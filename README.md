@@ -1,6 +1,6 @@
-# N3MemoryCore MCP — Lite (Ephemeral)
+# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.0
 
-**A working memory for Claude that forgets by itself after 7 days.**
+**Give Claude Code a working memory that clears itself after 7 days — and the same memory in the Claude desktop app.**
 
 In Claude Code, hooks save every message and reply and bring the related ones
 back on every turn; no tool call is needed. The Claude desktop app and other
@@ -14,9 +14,11 @@ saved.
    docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
    ```
 
-2. Put only the specification `N3MemoryCore_MCP_Spec_EN.md` into an empty folder and open Claude Code in that folder
-3. Ask: "implement n3mcmcp-lite per this spec."
-4. When it is done, restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once)
+2. Make a folder: in File Explorer, create one empty folder (for example `C:\Users\<you>\n3mcmcp-lite`)
+3. Put the specification `N3MemoryCore_MCP_Spec_EN.md` in that folder, and nothing else
+4. Open Claude Code in that folder: in the Claude desktop app, open the **Code** tab, start a new session with **+ New**, choose **Local**, then **Open folder…** and pick the folder (in a terminal, change to that folder and run `claude`)
+5. Ask: "Please implement n3mcmcp-lite according to the specification `N3MemoryCore_MCP_Spec_EN.md`."
+6. When it is done, restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once)
 
 After the restart, open the same session and send "I restarted". Claude Code checks that memory works and tells you what to do next.
 
@@ -26,7 +28,7 @@ instead (bonus), and for the Claude desktop app, see
 [Method B: Install the package (bonus)](#method-b-install-the-package-bonus).
 
 > Upgrading from v1.12.2? What changes for existing users is in
-> [What changed in v2.0.0](#what-changed-in-v200).
+> `CHANGELOG.md` (version 2.0.0).
 
 > A NeuralNexusNote™ product — **free Lite** build: ephemeral hybrid
 > (vector + BM25) memory backed by Redis Stack, with a 7-day TTL per entry.
@@ -39,10 +41,10 @@ instead (bonus), and for the Claude desktop app, see
 | You are… | Read |
 |---|---|
 | new here | [Quickstart](#step-1--start-redis-stack), then [What Claude receives](#what-claude-receives) |
-| coming from v1.x | [What changed in v2.0.0](#what-changed-in-v200) |
+| coming from v1.x | `CHANGELOG.md` (version 2.0.0) |
 | choosing between the two free builds | [Lite or Free?](#lite-or-free-which-one-to-use) |
 | asking where your data is | [Your Memory Stays on Machines You Control](#your-memory-stays-on-machines-you-control), [Data location](#data-location) |
-| changing settings | [Configuration](#configuration), [Ranking formula](#ranking-formula) |
+| changing settings | [Details](#details) |
 | stuck | [Troubleshooting](#troubleshooting), [Limits](#limits) |
 
 ## What is this?
@@ -95,58 +97,6 @@ is easier: it needs no Docker.**
 
 ---
 
-## What changed in v2.0.0
-
-v2.0.0 is a major version: the way Lite connects to Claude Code changed. Up
-to v1.12.2 Lite was an MCP server only, and the model decided what to save.
-
-| Before (v1.12.2) | After (v2.0.0) |
-|---|---|
-| Claude Code showed the seven `mcp__…n3mc-workingmemory__*` tools | **Claude Code no longer shows the MCP tools.** The plugin does not register the MCP server any more |
-| Only what the model chose to pass to `save_memory` was saved | **Every non-empty message and reply is saved by the hooks** (fenced code blocks as `[code omitted]`), as `[user]` / `[claude]` records |
-| The model called `search_memory` at the start of a turn | The `UserPromptSubmit` hook searches with every message and puts the result into Claude's context under `# Recalled Memory Context` |
-| Search, list, recall and delete were MCP tools | In Claude Code the CLI gives the same: `n3mc-lite --search`, `--list`, `--recall-thread`, `--delete`, `--delete-session`, `--buffer`, `--repair`. The text they print is the tool's text |
-| Each application started its own MCP server and loaded the model (about 1.1 GB) | One resident server loads the model once; the MCP entry is a thin client that never loads it |
-| No process ran between sessions | The resident server keeps running in the background after it was started |
-| pip users: register the MCP server | pip users: run `n3mc-lite --init` once to register the hooks. An old `n3mc-workingmemory` registration in Claude Code is no longer used and should be removed |
-| The Redis command was `docker run … -p 6379:6379 …` | It is `docker run … -p 127.0.0.1:6379:6379 …`, so the memory is not reachable from the network. A container you already created keeps its setting; recreating it (`docker rm -f redis-stack`, then the new command) loses its memories, like any Redis restart |
-| The MCP instructions named `n3mc-longtermmemory` as the persistent memory | They name `n3mc-pro`, `n3mc-pg` and `n3mc-longtermmemory` (N3MC MCP Pro, its PostgreSQL edition and the earlier MCP Pro) |
-| An old plugin or `.mcp.json` started `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` without a version | Update the plugin. Until then such a registration starts the v2.0.0 MCP entry in Claude Code without hooks |
-| `N3MC_SESSION_ID` grouped a Claude Code session's saves | Hook records carry Claude Code's own session id; `N3MC_SESSION_ID` still applies to MCP |
-| `N3MC_REDIS_URL` in an MCP client's `env` chose the Redis | Put `redis_url` into `config.json`: the shared server uses the environment of the process that started it |
-| `skip_code_blocks: true` rejected saves with code | It also skips every hook message or reply that contains a code block |
-| — | The search result of `search_memory` is kept within `context_max_chars` (9,500 characters by default) |
-
-**What did not change**: the PyPI name `n3memorycore-mcp-lite`, the Python
-package `n3mc_mcp`, the MCP command and server name `n3mc-workingmemory`
-(alias `n3mc-mcp-lite`), the seven tools with the same names, arguments and
-output texts (the `search_memory` text is now kept within `context_max_chars`),
-the Redis layout and settings (`redis_url`, `N3MC_REDIS_URL`), the 7-day TTL,
-the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the
-plugin name `n3mc-workingmemory`, and every search and save rule. Records
-saved by v1.12.2 stay readable (same index, same fields).
-
-**What existing users do after updating to v2.0.0**
-
-- **Plugin users**: the plugin registers the hooks instead of the MCP
-  server. `uv` must still be on `PATH`.
-- **pip users**: run `n3mc-lite --init` once, then restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once).
-  Remove the old MCP registration from Claude Code:
-  `claude mcp remove n3mc-workingmemory -s user`, or remove the
-  `n3mc-workingmemory` entry from a project's `.mcp.json`. `--init` reports
-  such a registration but does not edit those files. If it stays, Claude
-  Code shows the tools again next to the hooks.
-- **Claude desktop app users**: the entry stays `n3mc-workingmemory`. v2.0.0
-  asks for the absolute path of the command and an `env` block (see
-  [Claude desktop app](#step-3--claude-desktop-app-optional)). The Method A
-  setup writes the entry into the app's configuration file (after a backup);
-  after a pip or plugin installation you edit the file yourself.
-- **New files in the data folder**: `audit.log` (the raw text of every hook
-  call, with no TTL), `server.log`, `notices.json` and a few small process
-  files. See [Data location](#data-location).
-
----
-
 ## 🚀 Quickstart
 
 There are two ways to set it up. Method A, generating the code from the specification, is the primary one; Method B, installing the package, is a bonus. Both start with Step 1, starting Redis Stack.
@@ -168,12 +118,26 @@ Re-running the `docker run` command after the container exists fails with
 ### Method A: Generate from the spec (primary, recommended)
 
 The N3MC series is specification first: the specification is written so that
-an AI can generate the implementation from it. To do that, open Claude Code
-in an **empty folder** (for example `~/n3mcmcp-lite`) that holds only
-`N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`), start Redis Stack, and ask
-"implement n3mcmcp-lite per this spec." The AI first checks the folder,
-Python and Redis, then generates the package, runs `pip install -e .`,
-registers the hooks with `n3mc-lite --init`, writes the MCP entry into the
+an AI can generate the implementation from it. To do that:
+
+1. **Start Redis Stack** ([Step 1](#step-1--start-redis-stack) above).
+2. **Make a folder**: in File Explorer, create one empty folder (for example
+   `C:\Users\<you>\n3mcmcp-lite`). The code is generated in this folder and
+   stays in use after setup; do not delete or move it later.
+3. **Put the specification in it**: copy the downloaded specification
+   `N3MemoryCore_MCP_Spec_EN.md` into that folder (put nothing else in it).
+4. **Open Claude Code in that folder**: in the Claude desktop app, open the
+   **Code** tab at the top of the sidebar and start a new session with
+   **+ New**. In the row under the prompt box, choose **Local** as the
+   environment, then click the folder control beside it, choose
+   **Open folder…** and pick the folder from step 2. (In a terminal, change
+   to that folder and run `claude`.)
+5. **Ask**: in the prompt box, send "Please implement n3mcmcp-lite according
+   to the specification `N3MemoryCore_MCP_Spec_EN.md`."
+
+The AI first checks the folder, Python and Redis, then generates the package,
+runs `pip install -e .`, registers the hooks with `n3mc-lite --init`, writes
+the MCP entry into the
 Claude desktop app's configuration file if the app is installed (after a
 backup, replacing only that entry), and checks that everything starts. The
 desktop app reads the entry after it is quit completely and started again.
@@ -396,7 +360,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 [claude] Agreed, PostgreSQL it is. The reason, for the record: several editors at the same time, and SQLite allows one writer at a time. Next step: write the schema for the articles table.
 ```
 
-Each hit starts with `### [<id>]` and shows its `turn=`, `score=` and `saved=` time. Hits under `Possibly related` did not pass the relevance floors (see `min_results` in [Configuration](#configuration)).
+Each hit starts with `### [<id>]` and shows its `turn=`, `score=` and `saved=` time. Hits under `Possibly related` did not pass the relevance floors.
 
 ### Relationship with Claude's built-in auto-memory
 
@@ -538,130 +502,6 @@ Not designed to be backed up: entries vanish on a 7-day rolling window.
 `config.json` (the `owner_id` / `local_id`) is the only file that matters
 for identity.
 
-## Configuration
-
-On first run, `config.json` is auto-generated with random UUIDs for
-`owner_id` and `local_id`. Editable defaults:
-
-```json
-{
-  "owner_id":                 "<uuid>",
-  "local_id":                 "<uuid>",
-  "redis_url":                "redis://localhost:6379/0",
-  "ttl_seconds":              604800,
-  "half_life_days":           3,
-  "bm25_min_threshold":       0.1,
-  "search_result_limit":      20,
-  "min_score":                0.2,
-  "vector_min_cos":           0.85,
-  "relative_min_score_ratio": 0.6,
-  "min_results":              3,
-  "version_order_enabled":    true,
-  "version_sim_threshold":    0.98,
-  "version_min_chars":        100,
-  "search_query_max_chars":   2000,
-  "chunk_threshold":          400,
-  "chunk_overlap":            100,
-  "access_count_enabled":     false,
-  "access_count_weight":      0.02,
-  "access_count_max_boost":   0.5,
-  "ttl_refresh_top_k":        5,
-  "lexical_rerank_enabled":   true,
-  "rerank_weight":            0.3,
-  "rerank_phrase_weight":     0.2,
-  "b_session_match":          1.0,
-  "b_session_mismatch":       0.6,
-  "skip_code_blocks":         false,
-  "embedding_model":          "intfloat/multilingual-e5-base",
-  "embedding_dim":            768,
-  "server_port":              18524,
-  "bind_host":                "127.0.0.1",
-  "context_max_chars":        9500
-}
-```
-
-- `redis_url` — connection URL; `N3MC_REDIS_URL` env var takes precedence.
-- `ttl_seconds` — TTL on every new memory and sha-guard (default 7 d).
-- `vector_min_cos` — how close (cosine) a record must be to the query to become a vector candidate (default `0.85`). A sensible range is 0.80–0.88 (lower: more recall, more loosely related rows; higher: shorter results). 0.85 was measured with `multilingual-e5-base`, so re-measure it if you change `embedding_model`.
-- `relative_min_score_ratio` — drop results scoring below this ratio × the top score (default `0.6`; `0.0` disables).
-- `min_results` — when fewer results than this pass the floors, the search adds the closest of the rows it dropped under a separate heading `#### Possibly related (weak matches — may be unrelated)` (default `3`; `0` turns it off). Weak rows are not counted in `access_count`.
-- `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — results whose content is ≥ 0.98 similar are treated as versions and listed newest first. Each hit shows its `saved=` time.
-- `chunk_threshold` / `chunk_overlap` — sliding-window size and overlap (chars). Bodies longer than the threshold are stored as a parent document plus chunks, and a hit returns the whole text.
-- `access_count_*` — access-frequency boost; **off by default since 2026-11-17** (`access_count_enabled: false`); the hits are still counted.
-- `ttl_refresh_top_k` — the number of top hits whose `access_count` goes up on each search. The name is kept from earlier versions: a search never resets a TTL. (`ttl_refresh_on_search` was removed on 2026-11-22; a value left in your `config.json` is ignored.)
-- `lexical_rerank_*` / `rerank_weight` / `rerank_phrase_weight` — lightweight post-fusion lexical reranker (CPU-only).
-- `b_session_match` / `b_session_mismatch` — ranking factor for rows whose stored `session_id` matches (default `1.0`) or not (`0.6`). Set both to `1.0` to disable the bias.
-- `skip_code_blocks` — when `true`, content containing a triple-backtick fence is not saved (`status: "skipped_code"`), also for hook saves. Default `false`: the body is saved with each code block replaced by `[code omitted]`.
-- `embedding_model` / `embedding_dim` — the embedding model and its vector dimension; they must match. Changing either requires a restart and an index flush.
-- `server_port` (v2.0.0) — the port of the resident server (default `18524`). N3MC-Free uses 18520, Pro 18521, the PostgreSQL edition 18522 and the Ollama edition 18523; keep a port of its own for each N3MC product on one PC.
-- `bind_host` (v2.0.0) — keep the default `127.0.0.1`.
-- `context_max_chars` (v2.0.0) — the largest size of the hook's `# Recalled Memory Context` block and of the MCP `search_memory` result (default `9500`, allowed 2000–10000). Claude Code moves hook output over 10,000 characters to a file and shows only a 2,000-character preview. When the block is too long, lower-ranked rows are left out first, then the text is cut; a manual `--search` shows everything.
-- **When a change takes effect**: editing `config.json` restarts the resident server on the next hook, CLI or MCP call. If `config.json` has a typo and cannot be read, it is left untouched and defaults are used; the first search result says so. Write numbers without quotes.
-
-See §6 of the specification for the complete reference.
-
-## Multilingual support
-
-Built-in, CPU-only, no LLM and no GPU required. Search and dedup behave
-the same regardless of how the user types the same word:
-
-| Layer | What it does | Real-world example |
-|---|---|---|
-| **NFKC normalization** | Folds compatibility forms before SHA / embedding / BM25 | `ｱﾙﾌｧ` ↔ `アルファ`, `１２３` ↔ `123`, `ﬁ` ↔ `fi` |
-| **Bigram BM25 side channel** | Overlapping bigrams emitted for space-less scripts | `記憶装置` → `記憶 憶装 装置`; same for Korean (`안녕하세요`), Thai (`สวัสดี`), Lao, Myanmar, Khmer |
-| **Diacritic fold** | Latin/Greek/Cyrillic words also indexed without combining marks | `café` matches `cafe`, `Ångström` matches `Angstrom` |
-| **multilingual-e5-base embedding** | Multilingual semantic space across 100+ languages | Cross-language paraphrase retrieval |
-
-These run on every save and search. None of them rewrites the stored
-`content`: a long body comes back whole, as it was saved.
-
-## Encoding safety
-
-1. **UTF-8 reconfigure** — the MCP entry, the hook entries and the CLI
-   switch `sys.stdin` / `sys.stdout` / `sys.stderr` to UTF-8 at start. On
-   Windows-Japanese hosts the default console code page is cp932, which
-   would otherwise mangle every non-ASCII byte. POSIX systems are already
-   UTF-8, so the call is a safe no-op.
-2. **Lone-surrogate sanitization** — every saved text, every query and the
-   whole hook input are passed through `sanitize_surrogates()`. Lone UTF-16
-   surrogate halves (`U+D800`–`U+DFFF`) can appear when Windows pipes
-   deliver bytes Python cannot decode; without the guard the write would
-   fail.
-
-Content that becomes empty, or has no visible character, is rejected with
-`empty content` / `empty content (no visible characters)`.
-
-Two rules apply to everything that is saved:
-
-- **Outer whitespace is trimmed once** — `' \nAAA\n '` is saved as `AAA`.
-- **Code blocks are stored as `[code omitted]`** — each fenced block
-  (```` ``` ```` … ```` ``` ````, or an unclosed fence to the end) is
-  replaced before saving; inline backticks stay. N3MemoryCore remembers what
-  was said and decided; the code belongs in your project's files.
-
-Hook records start with a role prefix: `[user] ` or `[claude] ` (chunks of a
-long text: `[user 2/5] ` and so on).
-
-## Ranking formula
-
-```
-final_score = (0.7 * cosine_similarity + 0.3 * keyword_relevance) * time_decay * b_local * b_session
-
-time_decay   = 2 ^ (-days_elapsed / half_life_days)       (default half-life: 3 days)
-b_local      = clamp(0.5, 2.0, stored_importance + access_boost)
-access_boost = min(0.5, access_count * 0.02)               (only when access_count_enabled)
-b_session    = b_session_match (default 1.0)   if row.session_id == effective_session
-             = b_session_mismatch (default 0.6) otherwise
-```
-
-With a 3-day half-life (shorter than the 7-day TTL), `time_decay` matters
-in Lite: a fresh memory scores 1.0, a 3-day-old one 0.5, and a 7-day-old
-one ≈ 0.20.
-
-The access-frequency boost is off by default since 2026-11-17: measured in
-N3MC-Pro, it lowered recall@3 (often-returned memories rose above more
-relevant ones).
-
 ## Coexistence with other N3MC products
 
 Lite can be installed on the same PC as N3MC-Free, N3MC-Pro and the MCP Pro
@@ -738,6 +578,10 @@ When a save must happen:
   `tool_use` yourself so that `save_memory` runs every turn. You then have to
   write that application.
 
+## Details
+
+Settings (`config.json`), how search results are ranked, multilingual handling, encoding safety, and how to develop and extend Lite are described in the specification `N3MemoryCore_MCP_Spec_EN.md`. For the changes in each version, see `CHANGELOG.md`.
+
 ## Uninstall
 
 Ask the AI "Please remove N3MC Lite" so that the hook entries are removed
@@ -758,49 +602,6 @@ too, or do it yourself:
 
 `.claude/rules/n3mc-lite-behavior.md` in your project folders can be deleted
 by hand.
-
-## Development
-
-```bash
-# Tests FLUSHDB their Redis: use a DEDICATED test container, never your memory Redis
-docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
-python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-N3MC_REDIS_TEST_URL=redis://localhost:6390/0 pytest tests/ -q
-```
-
-Windows PowerShell:
-
-```powershell
-docker run -d --name redis-stack-test --restart=no -p 127.0.0.1:6390:6379 redis/redis-stack-server:latest
-python -m venv .venv; .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-$env:N3MC_REDIS_TEST_URL = "redis://localhost:6390/0"; pytest tests/ -q
-```
-
-RediSearch refuses to create indexes outside DB 0, so a separate test DB is
-not an option — run the tests against a **dedicated** Redis container. The
-v2.0.0 test layers (hooks, server API, CLI, MCP client, context limit,
-coexistence) are described in §9 of the specification; they are in
-`tests/`.
-
-CI runs the tests on every push to `main` and every PR to `main` — see
-[`.github/workflows/test.yml`](./.github/workflows/test.yml). Read
-[`CONTRIBUTING.md`](./CONTRIBUTING.md) for the developer guide (EN + JP).
-
-## Extending the Lite build
-
-This repository is **public and Apache-2.0 licensed** — fork, modify and
-run it freely. If you want to change behavior (the ranking formula, a
-cross-encoder reranker, a Japanese morphological tokenizer, …), start from
-the specification:
-
-- [`N3MemoryCore_MCP_Spec_EN.md`](./N3MemoryCore_MCP_Spec_EN.md) — full design document (English)
-- [`N3MemoryCore_MCP_Spec_JP.md`](./N3MemoryCore_MCP_Spec_JP.md) — 日本語版
-
-Appendix A of the specification lists optional extensions with drop-in
-points. If you publish a fork under a new package name, also change the
-`name`, `[project.urls]` and console-script names in `pyproject.toml`.
 
 ## Troubleshooting
 
