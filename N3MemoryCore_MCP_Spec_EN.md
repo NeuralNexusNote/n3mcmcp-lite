@@ -2185,7 +2185,24 @@ Restart the client after editing any config. Ensure Redis Stack is running befor
    - Start `n3mc-workingmemory` once yourself, send an MCP `initialize` followed by `tools/list` over stdio, check that the seven tools of §4.3 are listed (the answer comes within 2 seconds, §4.6), then close its stdin.
    - If `claude` is available, `claude mcp get n3mc-workingmemory` must report that no such server exists.
    - If any check fails, fix it and repeat; do not hand over a setup that does not work.
-6. **Finish with one message**: so that the user does not miss the restart, start the message with the heading `## ⚠️ Claude Code must be restarted`, followed by "Setup is complete. Fully exit Claude Code (and Claude Desktop) and open it again — memory starts with the next session." Right below it, add the Windows full-exit steps from Appendix B ("Fully restart Claude Code between Phase 1 and Phase 2"), one action per step, in plain words. Anything else you need to tell comes after that, and the message ends with the line `> ⚠️ **Memory does not work until Claude Code is restarted.**` Never reduce it to the single sentence "Restart Claude Code". Tell the user to reopen this same session after the restart and send "I restarted". When they do (in any language), check that the message was saved (`python -m n3mc_mcp.cli --list` shows its `[user]` line) and that `# Recalled Memory Context` arrived in that turn, tell them briefly whether memory works, and tell them what to do next: go to Phase 2 of Appendix B and paste its prompts in order.
+6. **Finish with one message**: so that the user does not miss the restart, follow this template. **The first line of the message must be the heading `## ⚠️ Claude Code must be restarted`.** Put nothing such as "Registration is complete" before it; what was registered and any notes come after the restart steps.
+
+   ```text
+   ## ⚠️ Claude Code must be restarted
+
+   Setup is complete. Fully exit Claude Code (and Claude Desktop) and open it again — memory starts with the next session.
+
+   1. Close every open Claude Code (the desktop app, terminals, Claude Code in VS Code and other editors).
+   2. Open the "^" at the right end of the taskbar (near the clock); if a Claude icon is there, right-click it and quit.
+   3. If unsure, sign out of Windows once and sign in again (restarting the PC also works).
+   4. Open Claude Code again, open this same session, and send "I restarted".
+
+   (Here: what was registered, which files were written and where the backups are, anything else to tell.)
+
+   > ⚠️ **Memory does not work until Claude Code is restarted.**
+   ```
+
+   Never reduce it to the single sentence "Restart Claude Code". When the user sends "I restarted" (in any language), check that the message was saved (`python -m n3mc_mcp.cli --list` shows its `[user]` line) and that `# Recalled Memory Context` arrived in that turn, tell them briefly whether memory works, and tell them what to do next: go to Phase 2 of Appendix B and paste its prompts in order.
 
 > **⚠️ Why**: a code-generation setup can end with a package installed but no working registration — for example a folder's `.mcp.json` copied from another PC that points at `C:\Users\<other PC user>\…\Python312\Scripts\n3mc-workingmemory.exe`, which does not exist on this PC, or a bare command name, which depends on `PATH`. Code generation is the primary install path for Lite, so it must end in a working setup without manual configuration. The absolute-path rule applies to the hook commands and the desktop entry.
 
