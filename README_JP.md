@@ -6,14 +6,19 @@ Claude Code では、フックがすべてのメッセージと応答を保存�
 Claude デスクトップアプリと、ほかの MCP 対応アプリは、MCP で同じ記憶を使います。
 記憶は、あなたが動かす Redis Stack に置きます。各エントリは、保存から 7 日で消えます。
 
-```bash
-docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
-pip install n3memorycore-mcp-lite
-n3mc-lite --init
-```
+1. Redis Stack を起動する
 
-そのあと、Claude Code を再起動します。次のセッションから記憶が働きます。
-手順の詳細、プラグインの経路、Claude デスクトップアプリの設定は、[クイックスタート](#step-1--redis-stack-を起動) にあります。
+   ```bash
+   docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
+   ```
+
+2. 空のフォルダに指示書 `N3MemoryCore_MCP_Spec_JP.md` だけを入れ、そのフォルダで Claude Code を開く
+3. 「この指示書に従って n3mcmcp-lite を実装してください」と頼む
+4. 終わったら、Claude Code を再起動する
+
+次のセッションから記憶が働きます。
+手順の詳細は、[クイックスタート](#step-1--redis-stack-を起動) にあります。
+pip やプラグインで入れる方法（おまけ）と Claude デスクトップアプリの設定は、[方法 B：パッケージ導入（おまけ）](#方法-bパッケージ導入おまけ) にあります。
 
 > v1.12.2 から上げる方へ：既存の利用者にとって何が変わるかは、[v2.0.0 で変わったこと](#v200-で変わったこと) にあります。
 
@@ -139,6 +144,8 @@ v1.12.2 が保存したレコードは、そのまま読めます（同じ索引
 
 ## 🚀 クイックスタート
 
+導入の方法は 2 通りです。指示書から作成する方法 A がメインで、パッケージを入れる方法 B はおまけです。どちらも、最初に Step 1 で Redis Stack を起動します。
+
 ### Step 1 — Redis Stack を起動
 
 ```bash
@@ -153,7 +160,26 @@ docker start redis-stack
 `Conflict. The container name "/redis-stack" is already in use` で失敗します。
 2 回目からは `docker start redis-stack` を使います。
 
-### Step 2 — Claude Code（フック）
+### 方法 A：指示書から作成（メイン・推奨）
+
+N3MC シリーズは「指示書が先」です。
+指示書は、AI が実装を生成できるように書かれています。
+生成するときは、**空のフォルダ**（たとえば `~/n3mcmcp-lite`）に `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）だけを入れます。
+Redis Stack を起動し、そのフォルダで Claude Code を開きます。
+「この指示書に従って n3mcmcp-lite を実装してください」と頼みます。
+AI は、最初にフォルダ・Python・Redis を確かめます。
+そのあと、パッケージを生成し、`pip install -e .` を実行します。
+`n3mc-lite --init` でフックを登録します。
+Claude デスクトップアプリが入っていれば、MCP の入口に書く項目を表示します（アプリのファイルへの追加は、自分で行います）。
+最後に、すべてが起動することを確かめます。
+フォルダはその後も使われます。消したり動かしたりすると、記憶が止まります。
+4 段階の作業の流れは、指示書の付録 B にあります。
+
+終わったら、[Step 4 — 再起動](#step-4--再起動) のとおり Claude Code を再起動します。
+
+### 方法 B：パッケージ導入（おまけ）
+
+#### Step 2 — Claude Code（フック）
 
 どちらか 1 つを選びます。
 **Claude Code に MCP サーバーを登録しないでください**
@@ -189,7 +215,7 @@ CLI のための許可のルールも足します。
 
 (a) と (b) は、どちらか 1 つだけにします。両方だと、メッセージのたびに検索が 2 回走ります。
 
-### Step 3 — Claude デスクトップアプリ（任意）
+#### Step 3 — Claude デスクトップアプリ（任意）
 
 設定ファイルは、アプリから開きます（Settings → Developer → Edit Config）。
 Windows でのふつうの場所は `%APPDATA%\Claude\claude_desktop_config.json` です。
@@ -238,7 +264,7 @@ pip で入れた場合：
 - `N3MC_SESSION_ID` を足すと、このアプリの既定の `session_id` を固定できます。
 - Windows と Linux のほかの MCP クライアントも、同じように登録します（command、args、env）。
 
-### Step 4 — 再起動
+#### Step 4 — 再起動
 
 Claude Code（とデスクトップアプリ）を再起動します。
 記憶は、次のセッションから始まります。
@@ -246,21 +272,6 @@ Claude Code（とデスクトップアプリ）を再起動します。
 フックはこれを待ちません。モデルの準備ができるまで、記憶の検索はキーワードだけで行い、そのことを通知で知らせます。
 メッセージはベクトルなしで保存し、ベクトルはあとで自動で足します。
 MCP のツールと CLI は、モデルを最大 20 秒待ちます。
-
-### 指示書からコードを作る
-
-N3MC シリーズは「指示書が先」です。
-指示書は、AI が実装を生成できるように書かれています。
-生成するときは、**空のフォルダ**（たとえば `~/n3mcmcp-lite`）に `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）だけを入れます。
-Redis Stack を起動し、そのフォルダで Claude Code を開きます。
-「この指示書に従って n3mcmcp-lite を実装してください」と頼みます。
-AI は、最初にフォルダ・Python・Redis を確かめます。
-そのあと、パッケージを生成し、`pip install -e .` を実行します。
-`n3mc-lite --init` でフックを登録します。
-Claude デスクトップアプリが入っていれば、MCP の入口に書く項目を表示します（アプリのファイルへの追加は、自分で行います）。
-最後に、すべてが起動することを確かめます。
-フォルダはその後も使われます。消したり動かしたりすると、記憶が止まります。
-4 段階の作業の流れは、指示書の付録 B にあります。
 
 ---
 

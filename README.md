@@ -8,15 +8,20 @@ MCP applications reach the same memory through MCP. Everything is kept in a
 Redis Stack that you run, and every entry is deleted 7 days after it was
 saved.
 
-```bash
-docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
-pip install n3memorycore-mcp-lite
-n3mc-lite --init
-```
+1. Start Redis Stack
 
-Then restart Claude Code. Memory works from the next session. The steps, the
-plugin route and the Claude desktop app are in
-[Quickstart](#step-1--start-redis-stack).
+   ```bash
+   docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest
+   ```
+
+2. Put only the specification `N3MemoryCore_MCP_Spec_EN.md` into an empty folder and open Claude Code in that folder
+3. Ask: "implement n3mcmcp-lite per this spec."
+4. When it is done, restart Claude Code
+
+Memory works from the next session. The steps are in
+[Quickstart](#step-1--start-redis-stack). To install with pip or the plugin
+instead (bonus), and for the Claude desktop app, see
+[Method B: Install the package (bonus)](#method-b-install-the-package-bonus).
 
 > Upgrading from v1.12.2? What changes for existing users is in
 > [What changed in v2.0.0](#what-changed-in-v200).
@@ -141,6 +146,8 @@ saved by v1.12.2 stay readable (same index, same fields).
 
 ## 🚀 Quickstart
 
+There are two ways to set it up. Method A, generating the code from the specification, is the primary one; Method B, installing the package, is a bonus. Both start with Step 1, starting Redis Stack.
+
 ### Step 1 — Start Redis Stack
 
 ```bash
@@ -155,7 +162,25 @@ Re-running the `docker run` command after the container exists fails with
 `Conflict. The container name "/redis-stack" is already in use`. Use
 `docker start redis-stack` from the second session onward.
 
-### Step 2 — Claude Code (hooks)
+### Method A: Generate from the spec (primary, recommended)
+
+The N3MC series is specification first: the specification is written so that
+an AI can generate the implementation from it. To do that, open Claude Code
+in an **empty folder** (for example `~/n3mcmcp-lite`) that holds only
+`N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`), start Redis Stack, and ask
+"implement n3mcmcp-lite per this spec." The AI first checks the folder,
+Python and Redis, then generates the package, runs `pip install -e .`,
+registers the hooks with `n3mc-lite --init`, shows the MCP entry for the
+Claude desktop app if it is installed (you add it to the app's file
+yourself), and checks that everything starts.
+The folder stays in use afterwards: deleting or moving it stops the memory.
+The four-phase workflow is in Appendix B of the specification.
+
+Then restart Claude Code, as in [Step 4 — Restart](#step-4--restart).
+
+### Method B: Install the package (bonus)
+
+#### Step 2 — Claude Code (hooks)
 
 Choose one. **Do not register the MCP server in Claude Code**
 (`claude mcp add`, `~/.claude.json`, `.mcp.json`).
@@ -188,7 +213,7 @@ adds no hooks (the plugin's hooks are used).
 
 Use only one of (a) and (b): with both, every message is searched twice.
 
-### Step 3 — Claude desktop app (optional)
+#### Step 3 — Claude desktop app (optional)
 
 Open the config file from the app (Settings → Developer → Edit Config; the
 usual place on Windows is `%APPDATA%\Claude\claude_desktop_config.json`, and
@@ -242,7 +267,7 @@ Plugin users (no pip installation):
 - Other MCP clients on Windows or Linux are registered the same way
   (command, args, env).
 
-### Step 4 — Restart
+#### Step 4 — Restart
 
 Restart Claude Code (and the desktop app). Memory starts with the next
 session. On the first start the resident server downloads and loads the
@@ -251,20 +276,6 @@ for it: until the model is ready, the memory search uses keywords only and
 says so in a notice, and messages are saved without vectors, which are added
 later automatically. The MCP tools and the CLI wait up to 20 seconds for the
 model.
-
-### Generating the code from the specification
-
-The N3MC series is specification first: the specification is written so that
-an AI can generate the implementation from it. To do that, open Claude Code
-in an **empty folder** (for example `~/n3mcmcp-lite`) that holds only
-`N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`), start Redis Stack, and ask
-"implement n3mcmcp-lite per this spec." The AI first checks the folder,
-Python and Redis, then generates the package, runs `pip install -e .`,
-registers the hooks with `n3mc-lite --init`, shows the MCP entry for the
-Claude desktop app if it is installed (you add it to the app's file
-yourself), and checks that everything starts.
-The folder stays in use afterwards: deleting or moving it stops the memory.
-The four-phase workflow is in Appendix B of the specification.
 
 ---
 
