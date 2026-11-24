@@ -138,8 +138,9 @@ saved by v1.12.2 stay readable (same index, same fields).
   Code shows the tools again next to the hooks.
 - **Claude desktop app users**: the entry stays `n3mc-workingmemory`. v2.0.0
   asks for the absolute path of the command and an `env` block (see
-  [Claude desktop app](#step-3--claude-desktop-app-optional)). Setup shows
-  the entry; you add it yourself (setup does not edit the app's file).
+  [Claude desktop app](#step-3--claude-desktop-app-optional)). The Method A
+  setup writes the entry into the app's configuration file (after a backup);
+  after a pip or plugin installation you edit the file yourself.
 - **New files in the data folder**: `audit.log` (the raw text of every hook
   call, with no TTL), `server.log`, `notices.json` and a few small process
   files. See [Data location](#data-location).
@@ -172,9 +173,10 @@ in an **empty folder** (for example `~/n3mcmcp-lite`) that holds only
 `N3MemoryCore_MCP_Spec_EN.md` (or `_JP.md`), start Redis Stack, and ask
 "implement n3mcmcp-lite per this spec." The AI first checks the folder,
 Python and Redis, then generates the package, runs `pip install -e .`,
-registers the hooks with `n3mc-lite --init`, shows the MCP entry for the
-Claude desktop app if it is installed (you add it to the app's file
-yourself), and checks that everything starts.
+registers the hooks with `n3mc-lite --init`, writes the MCP entry into the
+Claude desktop app's configuration file if the app is installed (after a
+backup, replacing only that entry), and checks that everything starts. The
+desktop app reads the entry after it is quit completely and started again.
 The folder stays in use afterwards: deleting or moving it stops the memory.
 The four-phase workflow is in Appendix B of the specification.
 
@@ -216,6 +218,8 @@ adds no hooks (the plugin's hooks are used).
 Use only one of (a) and (b): with both, every message is searched twice.
 
 #### Step 3 — Claude desktop app (optional)
+
+With Method A, setup has already written this entry; skip this step.
 
 Open the config file from the app (Settings → Developer → Edit Config; the
 usual place on Windows is `%APPDATA%\Claude\claude_desktop_config.json`, and

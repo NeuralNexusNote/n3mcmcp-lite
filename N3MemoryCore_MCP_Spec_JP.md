@@ -74,7 +74,7 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 | アプリ | つながる経路 | 登録するもの |
 |---|---|---|
 | Claude Code | **フックだけ**（`UserPromptSubmit`、`Stop`）と CLI `n3mc-lite`（§12、§13） | プラグイン、または `n3mc-lite --init` |
-| Claude デスクトップアプリと、フックのないほかのアプリ | **MCP だけ**（薄いクライアント `n3mc-workingmemory`、§4.6） | 利用者が、そのアプリの設定ファイルに書く（§8） |
+| Claude デスクトップアプリと、フックのないほかのアプリ | **MCP だけ**（薄いクライアント `n3mc-workingmemory`、§4.6） | Claude デスクトップアプリは、方法 A のセットアップで AI がその設定ファイルに書く。ほかのアプリは利用者が書く（§8） |
 
 - **Claude Code はもう MCP を使わない。** プラグインはフックを登録し、Claude Code に MCP サーバーを登録しなくなった。`n3mc-lite --init` も MCP サーバーを登録しない。Claude Code に MCP サーバーを登録してはならない。
 - どちらの経路も**同じ常駐サーバーと同じ Redis** に届く。Claude Code で話したことはデスクトップアプリから見つかり、デスクトップアプリが保存したことは Claude Code で見つかる。
@@ -100,7 +100,7 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 | `examples/claude_code_mcp.json` が Claude Code への MCP の登録を示していた | 消した。Claude Code はフックを使う |
 | Redis の案内と README は `docker run … -p 6379:6379 …`（すべてのインターフェース）と書いていた | **（表示の変更）** `-p 127.0.0.1:6379:6379` と書く。記憶がネットワークから届かなくなる。すでに作ったコンテナは、自分の設定のままである。変えるには作り直す（`docker rm -f redis-stack`、そのあと新しい `docker run`）。そのとき、そのコンテナの記憶は、ほかの再起動と同じく消える（§3.4） |
 | 規則 0 と検索のリマインダは、永続の記憶として `n3mc-longtermmemory` を挙げていた | **（表示の変更）** `n3mc-pro`、`n3mc-pg`、`n3mc-longtermmemory`（N3MC MCP Pro、その PostgreSQL 版、以前の MCP Pro の MCP の登録名）を挙げる（§5 (1)、(2)） |
-| 方法 A は `claude_desktop_config.json` を書き換えていた | AI はデスクトップアプリのファイルを書き換えない。絶対パスを入れた項目を示し、利用者が足す（§8） |
+| 方法 A は `claude_desktop_config.json` を書き換えていた | AI は、控えを取ってから `n3mc-workingmemory` の項目だけを置き換える（§8「自動の登録」） |
 
 **変わらないもの**：PyPI の名前 `n3memorycore-mcp-lite`、Python パッケージ `n3mc_mcp`、MCP のコマンドとサーバー名 `n3mc-workingmemory`（別名 `n3mc-mcp-lite`）、同じ名前・引数・出力の文を持つ 7 つのツール（ただし `search_memory` の文は `context_max_chars` に収まるようになった、§3.17）、Redis のレイアウトと設定（`redis_url`、`N3MC_REDIS_URL`）、7 日の TTL、データフォルダ `~/.n3mc-workingmemory`（`N3MC_DATA_DIR`）、プラグイン名 `n3mc-workingmemory`、§3 の検索と保存のすべての決まり。v1.12.2 が保存したレコードはそのまま読める（同じ索引、同じフィールド）。
 
@@ -155,7 +155,7 @@ docker start redis-stack
 
 1. **Redis Stack を起動**（上記）。
 2. **本仕様書を AI に読み込ませて実装を依頼**：この指示書だけを入れた**空のフォルダ**(たとえば `~/n3mcmcp-lite`)で Claude Code を開きます。AI は最初にフォルダ・Python・Redis を確かめ([§1](#1-ビジョン) の「セットアップ前の確認」)、足りないものがあれば手順を示して止まります。そのうえで `N3MemoryCore_MCP_Spec_JP.md`（または `_EN.md`）を Claude 等に渡し、「この指示書に従って n3mcmcp-lite を実装してください」と依頼します。AI がパッケージ構成・RediSearch インデックス作成・常駐サーバー・フック・CLI・MCP の薄いクライアントまで生成します。段階的な **実装 → デバッグ → 自律評価 → 品質レビュー** の 4 フェーズ・ワークフローは [付録 B](#付録-b推奨-ai-支援ワークフロー) を参照。
-3. **導入と登録(AI が行う)**：AI がプロジェクトルートで `pip install -e .` を実行し、`n3mc-lite --init` で Claude Code に**フック**を登録し、Claude デスクトップアプリが入っていれば、その設定に足す MCP の入口の項目(絶対パス入り)を示し(そのアプリの設定ファイルは AI が書き換えず、利用者が足す)、すべてが起動することを確かめます([§8「コード生成の後の自動登録」](#コード生成の後の自動登録方法-a--必須))。Claude Code の設定ファイルを自分で編集する必要はありません。
+3. **導入と登録(AI が行う)**：AI がプロジェクトルートで `pip install -e .` を実行し、`n3mc-lite --init` で Claude Code に**フック**を登録し、Claude デスクトップアプリが入っていれば、その設定ファイルに MCP の入口の項目(絶対パス入り)を書き込み(控えを取り、この項目だけを置き換える)、すべてが起動することを確かめます([§8「コード生成の後の自動登録」](#コード生成の後の自動登録方法-a--必須))。Claude Code の設定ファイルを自分で編集する必要はありません。
 4. **クライアントを再起動**。再起動の後の最初の記憶の検索は、常駐サーバーが ~1.1 GB の埋め込みモデルをダウンロードしてロードするので 30–60 秒かかります。
 
 #### 方法 B：パッケージ導入（おまけ）
@@ -2041,7 +2041,7 @@ Redis 状態は Redis コンテナが置く場所（既定では無名 Docker �
 
 ### Claude Desktop
 
-デスクトップアプリは、`claude_desktop_config.json` に並べた MCP サーバーを起動する。このファイルはアプリから開く（設定 → 開発者 → 構成を編集）。Windows での普通の場所は `%APPDATA%\Claude\claude_desktop_config.json` だが、Microsoft Store 版のアプリは別のフォルダに置くことがあるので、アプリから開くほうがよい。`mcpServers` の下に項目を足し（すでにある項目は残す）、保存して、**アプリを完全に終了してから起動し直す**。
+デスクトップアプリは、`claude_desktop_config.json` に並べた MCP サーバーを起動する。このファイルはアプリから開く（設定 → 開発者 → 構成を編集）。Windows での普通の場所は `%APPDATA%\Claude\claude_desktop_config.json` だが、Microsoft Store 版のアプリは別のフォルダに置くことがあるので、アプリから開くほうがよい。`mcpServers` の下に項目を足し（すでにある項目は残す）、保存して、**アプリを完全に終了してから起動し直す**。方法 A のセットアップでは、AI が下の「自動の登録」でこの項目を書き込むので、利用者が手で足すのは、プラグインの利用者とほかの MCP クライアントのときだけである。
 
 pip でのインストール（絶対パスと `env`）：
 
@@ -2080,6 +2080,14 @@ pip でのインストール（絶対パスと `env`）：
 - フックが別のデータフォルダ（`N3MC_DATA_DIR`）を使うときは、同じ `N3MC_DATA_DIR` を `env` に足す。そうしないと、デスクトップアプリは `~/.n3mc-workingmemory` と、別の `config.json`、別の `server_port` を使ってしまう。
 - このアプリの既定の `session_id` を固定するために、`N3MC_SESSION_ID` を足してもよい（§3.1）。
 - Windows や Linux のほかの MCP クライアントも、同じように登録する（command、args、env）。
+- **デスクトップアプリの Code タブ**：デスクトップアプリは、この登録を Code タブ（Claude Code）のセッションにも渡す。そのままでは Code タブでフックと MCP の両方が同じ記憶につながり、モデルが頼まれずに `save_memory` を呼ぶと、Code タブの保存が `claude-desktop` の名前で入る。Claude Code をフックだけにするには、`~/.claude/settings.json` の `permissions.deny` に `"mcp__n3mc-workingmemory"` を足す（Claude Code の設定なので、チャットには効かない）。こうすると、Code タブのモデルからこの登録のツールが見えなくなる。方法 A のセットアップでは、AI がこの行を足す（下の「自動の登録」の 5）。
+- **自動の登録（方法 A のセットアップの手順 4）**：AI が次の順で行う。利用者に手で登録させない。
+  1. 設定ファイルを探す。候補は、Windows では `%APPDATA%\Claude\claude_desktop_config.json`、`%LOCALAPPDATA%\Claude-Data\*\claude_desktop_config.json`（Microsoft Store 版。アプリはこのファイルを読む）、`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`。Linux では `~/.config/Claude/claude_desktop_config.json`。あるものの中で、更新日時がいちばん新しいものを使う。アプリは動くたびにこのファイルを書き直し、読まれていない古いファイルが別の場所に残っていることがある。1 つもなければ、デスクトップアプリは入っていないとみて登録を飛ばし、そう報告する。
+  2. 書き込む前に、同じフォルダに控え `claude_desktop_config.json.bak-n3mc-<YYYYMMDDHHMMSS>` を取る。
+  3. JSON として読み、`mcpServers` の下の `n3mc-workingmemory` の項目だけを上の pip の項目にする（`command` は `n3mc-workingmemory` の絶対パス）。フックが `N3MC_DATA_DIR` を使っているときは、同じ値を `env` に入れる。ほかの項目とキーは変えない。同じ名前の項目があれば置き換える。JSON として読めない、または一番外がオブジェクトでないときは、書き換えずに報告する。
+  4. 同じフォルダの一時ファイルに書いてから置き換える。書いたあと読み直し、項目が入っていることを確かめる。
+  5. `~/.claude/settings.json` の `permissions.deny` に `"mcp__n3mc-workingmemory"` を足す（上の「デスクトップアプリの Code タブ」）。ほかのキーと項目は残し、同じ行を 2 つにしない。
+  6. 書いたファイルと控えの場所を、最後のメッセージで利用者に伝える。アプリを完全に終了して起動し直すまで、新しい登録は効かない。
 
 ### Claude Code（フック）
 
@@ -2158,7 +2166,7 @@ n3mc-lite --init
 1. **この PC の入口を見つける。**`pip install -e .` を実行した Python の scripts フォルダ(`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`、venv なら `Scripts\` / `bin/`)に、`n3mc-lite`、`n3mc-lite-hook`、`n3mc-lite-stop-hook`、`n3mc-workingmemory`(Windows では `.exe`)があることを確かめよ。コマンド名ではなく**絶対パス**を使え。Claude Code は、scripts フォルダを含まない `PATH` でコマンドを動かすことがある。
 2. **Claude Code から古い MCP の登録を消す。**`claude mcp remove n3mc-workingmemory -s user` を実行せよ(「見つからない」というエラーは問題ない)。インストール先のフォルダの `.mcp.json` に `n3mc-workingmemory` の項目があれば、その項目を消し、ほかのサーバーは残せ。`claude` コマンドが `PATH` に無いときは、代わりに `~/.claude.json` の最上位の `mcpServers` から `n3mc-workingmemory` の項目を消せ。その前にファイルをバックアップし、ほかのキーはすべて残し、同じフォルダの一時ファイルに書いてから置き換える形で書け。**理由**：Claude Code はフックを使う。1.x の版から残った登録があると、ツールがまた表示され、モデルがフックと並んで自分でも保存してしまう。
 3. **フックを登録する**:`<n3mc-lite の絶対パス> --init` を実行せよ(§12)。これはフックと許可ルールを `~/.claude/settings.json` に書き、ほかの項目(ほかの N3MC 製品のフックを含む、§14)はすべて残す。**プラグインが有効だと知らせてきたら、止めて利用者に選ばせよ**：プラグインは PyPI のコードを `uvx` で動かし、生成したコードとは `code_version` が違う（§3.15）。そのため、プラグインのフックと、このインストールの CLI と MCP の入口が、呼び出しのたびに互いのサーバーを止めて起動し直す。次を示せ：`The n3mc-workingmemory plugin is enabled. Choose one: (a) keep the plugin and remove this generated installation (pip uninstall n3memorycore-mcp-lite), or (b) disable the plugin (/plugin disable n3mc-workingmemory@neuralnexusnote), then run this setup step again.` 答えを待て。(b) なら、利用者がプラグインを無効にしたあとで手順 3 をもう一度行え。
-4. **Claude Desktop**:上の「Claude Desktop」の pip の項目を、手順 1 の絶対パスを入れた形で利用者に示し、足す場所(Settings → Developer → Edit Config。そのあとアプリを完全に終了して起動し直す)を伝えよ。**`claude_desktop_config.json` を自分で書き換えてはならない**:ほかのアプリのファイルであり、Microsoft Store 版は別のフォルダに置き、アプリが動いている間に書き換えることがある。
+4. **Claude Desktop**:上の「Claude Desktop」の「自動の登録」の 1〜6 を行い、手順 1 の絶対パスを入れた pip の項目を、デスクトップアプリの設定ファイルに書き込め。利用者に項目を示して手で足させてはならない。デスクトップアプリが入っていなければ、この手順を飛ばし、最後のメッセージでそう伝えよ。
 5. **再起動を頼む前に確かめる。**
    - §10 項目 7.1 のフックの関門が `OK` を出力する。
    - `<n3mc-lite の絶対パス> --search "setup check"` が `# Recalled Memory Context` で始まる塊を出力する(これで常駐サーバーが起動する。初回の起動はモデルのダウンロードで数分かかることがある — 「まだ起動中」の代わりの出力でよい。その後、本当の結果か `_No memories found._` が出るまで繰り返せ)。
