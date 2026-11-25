@@ -600,7 +600,7 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
 **索引用の文**（`fts_text`）：`content_fts` と `content_ngram` は、`content` そのものではなく、§3.16 の役割の前置き（`[user] `、`[claude] `、`[user i/N] `、`[claude i/N] `）を付ける前の本文（チャンクならそのチャンク）から、`[code omitted]` をすべて空白に置き換えた文で作る。`content_fts` はその文、`content_ngram` はそれを今までどおり NFKC 正規化・句読点除去・バイグラム展開した形（§5 (5)）である。前置きのない MCP の `save_memory` でも、`[code omitted]` は同じく除く。保存する `content` は変えない（表示、重複の確認、削除は今までどおり `content` を使う）。**理由**：前置きと `[code omitted]` が索引に入ると、`user`、`claude`、`code`、`omitted` を含むクエリが、BM25 でフックのすべての記録や、コードを含んでいたすべての記録に当たり、関係のない記録が上がる。
 
-**古い形の索引**：既存の `n3mc_idx` に `content_fts` の属性がなく（`FT.INFO` の `attributes`）、ベクトルの `DIM` が `embedding_dim` と同じときだけ、`ensure_index()` は `FT.DROPINDEX n3mc_idx`（`DD` を付けない。ハッシュは消さない）のあと `FT.CREATE` をやり直す。`FT.DROPINDEX` が `Unknown index` で失敗したとき（ほかのプロセスが先に消した）は、そのまま `FT.CREATE` に進み、`already exists` は成功として扱う。`DIM` が違うときは作り直さず、今までどおり `index_dim_mismatch` を出す（作り直すと、次元の違うベクトルを持つ既存の記録が索引に入らなくなる）。作り直す前に保存した記録は `content_fts` を持たないので、失効するまで（保存から最長 7 日）BM25 では `content_ngram`（前置きを含んだまま）だけで当たる。これらの記録は書き直さない。
+**古い形の索引**：既存の `n3mc_idx` に `content_fts` の属性がなく（`FT.INFO` の `attributes`）、ベクトルの `DIM` が `embedding_dim` と同じときだけ、`ensure_index()` は `FT.DROPINDEX n3mc_idx`（`DD` を付けない。ハッシュは消さない）のあと `FT.CREATE` をやり直す。`FT.DROPINDEX` が、メッセージに `unknown index` を含むエラーで失敗したとき（小文字にして比べる。ほかのプロセスが先に消した）は、そのまま `FT.CREATE` に進み、`already exists` は成功として扱う。`DIM` が違うときは作り直さず、今までどおり `index_dim_mismatch` を出す（作り直すと、次元の違うベクトルを持つ既存の記録が索引に入らなくなる）。作り直す前に保存した記録は `content_fts` を持たないので、失効するまで（保存から `ttl_seconds` の後。既定は 7 日）BM25 では `content_ngram`（前置きを含んだまま）だけで当たる。これらの記録は書き直さない。前の版のサーバーは、作り直した索引をあるもの（`already exists`）として扱い、作り直さない。そのため、前の版に戻すときは、先に `FT.DROPINDEX n3mc_idx`（`DD` を付けない）を実行する。
 
 **クエリ整形**（`prepare_query`） — ユーザー入力クエリは RediSearch へ送る前に、NFKC 正規化 → 制御文字を空白に置換 → `strip_fts_punctuation`（ASCII **および** CJK・全角の句読点）→ CJK バイグラム展開 → 空白の連続を 1 つに畳む、の順で整形する。RediSearch の特殊文字はすべて除去されるため、エスケープは不要。`content` はハッシュにそのまま（verbatim）保存する（索引は `content` を使わない：上の索引用の文 `content_fts` を RediSearch が動的にトークナイズし、`content_ngram` はそれを同じ句読点除去を通して事前展開した形を持つ）。
 
@@ -1002,7 +1002,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 <content>
 ```
 
-- `saved=` は保存された UTC タイムスタンプを**サーバーのローカル時刻**に変換し、オフセットを付けたもの（`_fmt_saved`）。**ローカル時刻に直せない値は UTC のまま出す**：`astimezone()` が `OverflowError`、`OSError`、`ValueError` を投げたら、UTC の時刻に `(UTC+0000)` を付ける。Windows の `astimezone()` は 1970 年より前の時刻（と、ローカル時刻にすると 9999 年を超える時刻）で `OSError` を投げる。捕まえないと、その記録に当たる検索が例外で終わり、記憶が差し込まれない。
+- `saved=` は保存された UTC タイムスタンプを**サーバーのローカル時刻**に変換し、オフセットを付けたもの（`_fmt_saved`）。
 - 版についての一文は、ヒットが 1 件以上あれば最初のヒットの上に 1 回だけ出す。
 - `turn=` は行に `turn_id` が無ければ省略。`[doc×N]` は親ドキュメントのみ。
 - **弱い候補**：`_weak` の行は、普通の行のすべての後に、`#### Possibly related (weak matches — may be unrelated)` の見出しの下に、同じ `### …` の形で出す。見出しは弱い候補が 1 件以上あるときだけ出す。
@@ -1054,7 +1054,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 #### サーバーの起動（`_start_server`）
 
-1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さないもの）では、サーバーは入口と一緒に終わることがある。クライアントとその `mcp` の版によって、サーバーは入口と一緒に終わるか、入口を閉じた後も動き続ける（`mcp` 1.27.0・Windows 11 では動き続ける）。どちらも正しい動作である。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。**作業フォルダはデータフォルダにする**（`cwd=<データフォルダ>`：`N3MC_DATA_DIR` か `~/.n3mc-workingmemory`）。サーバーは何日も動き、Windows ではプロセスの作業フォルダを消すことも名前を変えることもできないので、たまたまサーバーを起動したフックや MCP の入口のフォルダ（利用者の作業ツリーなど）にしない。例外は、ソースのフォルダでそのまま動かすとき（このパッケージの親フォルダが今のフォルダなので、`python_cmd()` は `-P` を付けない。下の「安全なインポートパス」）で、子はそこからしかパッケージを見つけられないので、そのフォルダにする。サーバーの中の処理は作業フォルダに頼らない。
+1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さないもの）では、サーバーは入口と一緒に終わることがある。クライアントとその `mcp` の版によって、サーバーは入口と一緒に終わるか、入口を閉じた後も動き続ける（`mcp` 1.27.0・Windows 11 では動き続ける）。どちらも正しい動作である。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。**作業フォルダはデータフォルダにする**（`cwd=<データフォルダ>`：`N3MC_DATA_DIR` か `~/.n3mc-workingmemory`）。サーバーは何日も動き、Windows ではプロセスの作業フォルダを消すことも名前を変えることもできないので、たまたまサーバーを起動したフックや MCP の入口のフォルダ（利用者の作業ツリーなど）にしない。例外は、ソースのフォルダでそのまま動かすとき（このパッケージの親フォルダが今のフォルダなので、`python_cmd()` は `-P` を付けない。下の「安全なインポートパス」）で、子はそこからしかパッケージを見つけられないので、そのフォルダにする。サーバーの中の処理は作業フォルダに頼らない。子の環境の `N3MC_DATA_DIR` には、データフォルダを絶対パスで渡す（利用者が相対パスを設定していると、新しい作業フォルダから見て別のフォルダを指すため）。
 2. 0.5 秒ごとに最大 60 秒、`/health` を確かめる。その間に子プロセスが終わったら（`proc.poll() is not None`）、すぐに待つのをやめる。
 3. その早い終了のとき：`server_start_failed`（"The N3MC Lite memory server could not start (exit code <n>). See <server.log path> for the reason."）を出し、データフォルダの目印のファイル `server_start_failed` に時刻を書き、PID ファイルが子プロセスの PID を持っていれば消し、サーバーなしで続ける。`Popen` 自体が例外を出したときは、サーバーなしで続ける（stderr に 1 行）。
    - **サーバーのプロセス自身も起動の失敗を記録する**：`run_server` が例外で終わるとき、または 0 / `None` 以外のコードの `SystemExit` で終わるとき（uvicorn はポートを bind できないとき、こう終わる）は、終わる前に自分で `server_start_failed`（"The N3MC Lite memory server could not start (<exit code n \| ErrorType: message>). See <server.log path> for the reason."）を出し、目印のファイルを書く。例外は握りつぶさない。**理由**：フックは `ensure_server(cfg, max_wait=0)` で呼ぶので子プロセスの終了を見ない。これがないと、起動できないサーバーをフックのたびに起動し直し、通知も 5 分の待ちも働かず、表示は「still starting」のままになる。
@@ -1239,7 +1239,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 | 名前 | 入力 | 振る舞い |
 | --- | --- | --- |
-| `recall_thread` | `turn_id: string, before?: int (既定 2), after?: int (既定 2)` | 指定 `turn_id` のエントリと、それ以前 `before` 件・それ以後 `after` 件を時系列で並べた markdown を返す。並び替えは保存時刻の昇順。Lite では Redis に保存された全エントリの中で「同一 turn_id を持つ親ドキュメント／単独メモリ／チャンク」をスキャンして返す。**前後のエントリは同じ会話から取る**：起点の turn の最初のエントリに `session_id` があれば、同じ `session_id` のエントリだけを並べる（Python 側で比べる、§3.12）。`session_id` が空なら、起点の turn のエントリだけを返す。別のセッション（並行して動く別の Claude Code のセッション、ほかの MCP クライアントの保存）のエントリは混ぜない（混ぜると、起点の直前の発言の代わりに、別の会話の発言が周辺会話として出る）。**親ドキュメントがまだあるチャンクは飛ばす**（全文は `[doc×N]` 付きの親が持つ）。**親を失ったチャンク（§3.11 の孤立チャンク）は、そのチャンクの本文で 1 件として出す** — `search_memory` と同じ退避（チャンクをすべて飛ばすと、親が失効した turn は、`search_memory` にはチャンクが出るのに `not_found` になる）。ヒットゼロの場合 `{"status":"not_found","turn_id":...}` を JSON 文字列で返す。 |
+| `recall_thread` | `turn_id: string, before?: int (既定 2), after?: int (既定 2)` | 指定 `turn_id` のエントリと、それ以前 `before` 件・それ以後 `after` 件を時系列で並べた markdown を返す。並び替えは保存時刻の昇順。Lite では Redis に保存された全エントリの中で「同一 turn_id を持つ親ドキュメント／単独メモリ／チャンク」をスキャンして返す。**親ドキュメントがまだあるチャンクは飛ばす**（全文は `[doc×N]` 付きの親が持つ）。**親を失ったチャンク（§3.11 の孤立チャンク）は、そのチャンクの本文で 1 件として出す** — `search_memory` と同じ退避（チャンクをすべて飛ばすと、親が失効した turn は、`search_memory` にはチャンクが出るのに `not_found` になる）。ヒットゼロの場合 `{"status":"not_found","turn_id":...}` を JSON 文字列で返す。 |
 
 **運用**: 接続中の LLM は `search_memory` のスニペットで文脈不足と判断したとき、ヒットの `turn_id` を `recall_thread` に渡して周辺会話を取得すること。ユーザーがこのツールを直接指定する必要はない。
 
@@ -1878,7 +1878,7 @@ async def list_tools() -> list[Tool]:
 **(4) 一覧を返すツールの文の形。**
 
 - `list_memories`: 何も保存されていなければ `_No memories stored._`。そうでなければ、項目ごとに 1 つの塊 `**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<tag> ` は、項目にタグがあるときだけ付く（親文書は `[doc×N]`）。塊は `\n\n---\n\n` でつなぐ。親文書の本文は、先頭 200 文字にする。200 文字より長かったときだけ、あとに `…` を付ける。単独のメモリ（`limit` 件まで）とすべての親文書を合わせ、timestamp の文字列の降順に並べ、`limit` 件に切る。`limit` がない、空、または 0 のときは 20。1 未満の値は 1。
-- `recall_thread`: `turn_id` が空なら `{"status": "error", "reason": "turn_id required"}`。行がなければ `{"status": "not_found", "turn_id": "<turn_id>"}`。そうでなければ、行ごとに 1 つの塊 `<印>**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<印>` は、求められたターンの行では `▶ `、ほかの行では空白 2 つである。塊は `\n\n---\n\n` でつなぐ。範囲は、同じ `session_id` の行（§4.3.1）の中で、そのターンの最初の行から `before` 行前まで、最後の行から `after` 行後までで、間にあるほかのターンの行も含む。ここでは、親文書は全文を出す（200 文字に切らない）。
+- `recall_thread`: `turn_id` が空なら `{"status": "error", "reason": "turn_id required"}`。行がなければ `{"status": "not_found", "turn_id": "<turn_id>"}`。そうでなければ、行ごとに 1 つの塊 `<印>**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<印>` は、求められたターンの行では `▶ `、ほかの行では空白 2 つである。塊は `\n\n---\n\n` でつなぐ。範囲は、そのターンの最初の行から `before` 行前まで、最後の行から `after` 行後までで、間にあるほかのターンの行も含む。ここでは、親文書は全文を出す（200 文字に切らない）。
 - `search_memory`: ヒットどうしは `\n\n---\n\n` でつなぐ。知らせ、版の文、ヒット、弱い候補の見出し、弱い候補は、空行 1 つ（`\n\n`）でつなぐ。その後に §3.17 の大きさの上限を当てる。
 
 **(5) バイグラムに展開する文字（§3.7）— `n3mc_mcp/processor.py`。** `_is_cjk(ch)` は、コードポイントが次の範囲のどれかに入るときに真である。§3.7 の「CJK の連続」は、この文字の連続のことである。1 文字だけの連続は、その 1 文字のまま残す。
@@ -2378,7 +2378,6 @@ n3mcmcp-lite/
 | `TestTimeWindow` | クエリにより近い新しい行が `limit × 5` 件より多くあっても、`since` / `until` が範囲内の行を返す（*Redis*） |
 | `TestShaping` | `vector_min_cos` が低コサインのベクトル候補を落とす。相対カット。最新版が先頭に移り、その位置のスコアを引き継ぐ。`_version_group` の行は相対カットで残る。短い行（< `version_min_chars`）はグループ化されない |
 | `TestRender` | ローカル時刻の `saved=`、版についての一文、各通知が 1 回だけ出る。最初の検索のあとで加わった通知は次の検索で出る。弱い候補が普通の行のすべての後に `#### Possibly related (weak matches — may be unrelated)` の下に出る、普通の行が 0 件なら `_No memories found._` の後に弱い候補の見出しが出て版の一文は出ない、弱い候補がなければその見出しは出ない |
-| `TestFmtSavedFallback` | `astimezone()` が `OSError`（Windows の 1970 年より前の時刻）、`OverflowError`、`ValueError` を投げる値（差し替えて起こす）で、`saved=` は UTC の時刻に `(UTC+0000)` を付けて出し、検索は例外で終わらない |
 | `TestConfig` | 読めない `config.json` が変更されない。型の誤った項目が無視され報告される。bool は数値として受け付けない |
 | `TestTestSafety` | `conftest` がライブの `redis_url` と同じテスト URL を拒否する。ライブの `config.json` を BOM 付きでも読める。データがあって目印のない DB はフラッシュしない |
 | `TestFilterScore` | 現セッションの新しい記録が cos 0.86 で先頭にあるとき、cos 0.95〜0.99 の同じセッションの 3 日前の記録と別セッションの 1 日前の記録が、相対カットと `min_score` を生き残る。並び順は引き続き最終スコアによる |
@@ -2402,7 +2401,6 @@ n3mcmcp-lite/
 | `TestGuardNx`（*Redis*） | 同じ内容を同時に 2 回保存してもレコードは 1 つ。ガードを取ったあとの書き込みが失敗するとガードを解放する |
 | `TestAccessCountNoGhost`（*Redis*） | 検索と `access_count` の加算の間に失効したか削除されたレコードは、`HINCRBY` で作り直されない：キーが 1 つも残らない（`access_count` だけのハッシュも、`mem:sha:` / `docsha:` ガードも残らない） |
 | `TestRecallOrphanChunks`（*Redis*） | 親があるとき、`recall_thread` は親を 1 回だけ出し（`[doc×N]`、全文）、チャンクは出さない。`doc:<id>` を消したあとは、`not_found` ではなく、その turn の各チャンクをチャンクの本文で出す |
-| `TestRecallThreadSameSession`（*Redis*） | 2 つの `session_id` の往復を交互に保存すると、`recall_thread` の前後には起点と同じ `session_id` の往復だけが出る。`session_id` が空の記録では、起点の turn だけを返す |
 | `TestDeleteIdPrefix`（*Redis*） | `doc:<uuid>` を渡した `delete_memory` は、前置きのない親の ID と同じく連鎖削除する。`mem:<uuid>` は単独レコードとそのガードを消す。応答の `id` は前置きのない UUID。`doc:doc:<uuid>`（前置き 2 つ）は `not_found` |
 | `TestNudgeOnErrors` | 数値でない `importance` の JSON、読めない `since` の `Error:`、予期しない例外、`search_memory` のバックエンドエラーが、どれもエラーの文で始まり、リマインダで終わる |
 | `TestConditionalWrites`（*Redis*） | `INCR_IF_EXISTS`・`HSET_IF_EXISTS` は、レコードがあれば書き込んで TTL を保ち、なければ何も作らない。`SCAN` のあとに消えたレコードに対する `repair_memory` はキーを作らず、`reembedded` に数えない。保存・検索・修復のあと、テスト DB のすべてのキー（テスト用の印を除く）に TTL がある |
@@ -2495,7 +2493,7 @@ n3mcmcp-lite/
 
 | テストクラス | テスト内容 |
 |---|---|
-| `TestInit` | `--init` は、2 つのフックを絶対パス（スラッシュ区切り、空白があるときだけ引用符）で書き、`PERMISSION_RULES` を書く。もう一度実行しても何も書かない。変える前にバックアップを作る。不正な `settings.json` は変えず、終了コード 1。自分の入口・`-m`・パッケージのスクリプトの形は置き換え、重複させない（バックスラッシュで書かれていても同じ） |
+| `TestInit` | `--init` は、2 つのフックを絶対パス（スラッシュ区切り、`shell_path` が要るとしたときだけ引用符）で書き、`PERMISSION_RULES` を書く。`shell_path` は、ふつうのパスと 8.3 形式の短い名前（`PROGRA~1`）はそのままにし、空白・`'`・`&` を含むパスは二重引用符で囲み、`$` と `` ` `` をエスケープする。scripts フォルダが `O'Brien` という名前のフォルダの下にあるとき、フックは引用符付きで書かれ、自分のものと分かる。もう一度実行しても何も書かない。変える前にバックアップを作る。不正な `settings.json` は変えず、終了コード 1。自分の入口・`-m`・パッケージのスクリプトの形は置き換え、重複させない（バックスラッシュで書かれていても同じ） |
 | `TestInitNonStringCommand` | `command` が null や数のフックの項目は残り、`--init` は例外で終わらずに自分の項目を足す |
 | `TestKeepsOtherProducts` | Free の `n3mc-hook` / `n3mc-stop-hook` の項目、Pro の `python ".../n3mc_hook.py"` の項目、ほかのどのフックも残し、知らせる。Free 自身の見分け方 — その規則をここに書く：実行ファイル `n3mc-hook` / `n3mc-stop-hook`（`.exe` の有無を問わず）、`-m n3memorycore.n3mc_hook` / `-m n3memorycore.n3mc_stop_hook`、または Free のパッケージのフォルダの中のスクリプト `n3mc_hook.py` / `n3mc_stop_hook.py` — は Lite の項目に当たらない |
 | `TestPluginEnabled` | `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` が true のとき、`--init` はフックを登録せず、許可ルールを足し、§12 のメッセージを出力する。プラグインの許可スクリプトは、`settings.json` に見つけた `--init` のフックを知らせる |
@@ -2821,13 +2819,24 @@ def is_own_hook(command: str, event: str) -> bool:
                 return True
     return False
 
+# Characters that make bash (Git Bash on Windows) split or reinterpret an unquoted word. "~" counts only at
+# the start of a path (the only place bash expands it); 8.3 short names (PROGRA~1) contain it mid-word.
+SHELL_SPECIAL = frozenset(" \t'\"&|;<>()$`\\!#*?[]{}")
+
+def _needs_quotes(s: str) -> bool:
+    return s.startswith("~") or any(c in SHELL_SPECIAL for c in s)
+
 def shell_path(p) -> str:
     s = pathlib.Path(p).as_posix()                     # forward slashes: bash reads "\" as an escape
-    if " " in s and os.name == "nt":                   # a command that starts with a quote
+    if _needs_quotes(s) and os.name == "nt":           # a command that starts with a quote
         short = _short_path(p)                         #       does not run as a hook on Windows:
-        if short and " " not in short:               #       use the 8.3 short name, which has no space
-            s = pathlib.Path(short).as_posix()
-    return f'"{s}"' if " " in s else s                 # quote only when a space is left
+        if short and not _needs_quotes(pathlib.Path(short).as_posix()):
+            s = pathlib.Path(short).as_posix()         #       use the 8.3 short name when it needs no quotes
+    if not _needs_quotes(s):
+        return s
+    for ch in ("\\", '"', "$", "`"):                   # still special inside double quotes
+        s = s.replace(ch, "\\" + ch)
+    return f'"{s}"'                                    # an unquoted ' or & is a bash syntax error
 
 def _short_path(p) -> str:
     """Windows 8.3 short path of an existing file, or "" (8.3 names may be disabled on the volume)."""
@@ -2857,13 +2866,13 @@ def resolve_cmd(script_name: str) -> str:
 
 - `lite_hook.py` と `lite_stop_hook.py` は `main()` を持ち、`python -m` でも動く（フォールバックの形）。
 - **この正確な照合にする理由**（Free と同じ）：フックの名前を*含む*だけのコマンドをすべて当てると、ほかの N3MC 製品のフックを消してしまう。1 つの形だけを当てると、重複が残る。Lite の名前（`n3mc-lite-hook`、`n3mc_mcp.lite_hook`）は、Free のもの（`n3mc-hook`、`n3memorycore.n3mc_hook`）とも Pro のものとも違うので、どちらの `--init` も相手の項目を消さない（§14）。
-- **scripts フォルダを先に見て、引用符を付けない理由**（Free と同じ）：Python を入れた直後は、Claude Code の `PATH` に scripts フォルダがない。また、引用符で始まるフックのコマンドは、Windows で動かないことがある。空白を含むパスには、それでも引用符が要る。そこで Windows では、`shell_path` がファイルの 8.3 形式の短い名前（`GetShortPathNameW`）を使う。これには空白がない。そのドライブで 8.3 の名前が切ってあるときだけ引用符を付け、`--init` は `The hook command for <event> starts with a quote because <path> contains a space; if the hook does not run, install Python into a folder without spaces.` を出す。Linux のパスは引用符で囲む（そこで失敗するとは分かっていない）。
+- **scripts フォルダを先に見て、引用符を付けない理由**（Free と同じ）：Python を入れた直後は、Claude Code の `PATH` に scripts フォルダがない。また、引用符で始まるフックのコマンドは、Windows で動かないことがある。空白や、`SHELL_SPECIAL` のほかの文字を含むパスには、それでも引用符が要る。引用符がないと、`'` や `&`（`C:/Users/O'Brien/...`）は bash の構文エラーになり、フックが毎回失敗する。そこで Windows では、`shell_path` がファイルの 8.3 形式の短い名前（`GetShortPathNameW`）を、それが引用符なしで済むときに使う。そうでなければパスを二重引用符で囲み、その中の `\`、`"`、`$`、`` ` `` をエスケープする（引用符の中でも特別な意味を持つ）。このとき `--init` は `The hook command for <event> starts with a quote because <path> contains a space or another character the shell treats specially; if the hook does not run, install Python into a folder without such characters.` を出す。Linux のパスも同じように引用符で囲む（そこで失敗するとは分かっていない）。`is_own_hook` は引用符で囲んだ形を `shlex` で読むので、`--init` をもう一度実行しても自分のものと分かり、2 つ目を足さない。
 
 ### 12.9 ルールファイル `.claude/rules/n3mc-lite-behavior.md`
 
 Claude Code は、セッションの始まりにプロジェクトの `.claude/rules/*.md` を読み込む。`--stop` は `<project>/.claude/rules/n3mc-lite-behavior.md` を最新に保つ（`_ensure_rules_md`。`<project>` は §12.4 の手順 1 のプロジェクトのフォルダで、ホームフォルダにはしない）。Free は `n3mc-behavior.md` を書く。両方の製品を入れられるように、名前を変えてある（§14）。
 
-**テンプレート**（`_RULES_MD_TEMPLATE`。この文そのままで、最後の行の後に改行を 1 つ付ける。言い換えない）。`{cli}` は、このインストールのコマンドの形に置き換える：`<python> -m n3mc_mcp.cli`（pip。`<python>` は `--stop` を動かすプロセスの `shell_path(sys.executable)` — パッケージを持つ Python の絶対パスを、スラッシュで、空白を含むときだけ引用符で囲んだもの、§12.8）、または `--stop` が `--uvx` 付きで呼ばれたときは `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite`（プラグイン）。（パッケージを venv に入れたとき、ただの `python` は別の Python である。）
+**テンプレート**（`_RULES_MD_TEMPLATE`。この文そのままで、最後の行の後に改行を 1 つ付ける。言い換えない）。`{cli}` は、このインストールのコマンドの形に置き換える：`<python> -m n3mc_mcp.cli`（pip。`<python>` は `--stop` を動かすプロセスの `shell_path(sys.executable)` — パッケージを持つ Python の絶対パスを、スラッシュで、`shell_path` が引用符を要るとしたときだけ引用符で囲んだもの、§12.8）、または `--stop` が `--uvx` 付きで呼ばれたときは `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite`（プラグイン）。（パッケージを venv に入れたとき、ただの `python` は別の Python である。）
 
 ````markdown
 <!-- n3mc-lite-behavior v1 -->

@@ -82,6 +82,30 @@ class TestInit:
         c = cmds(load(isolate), "UserPromptSubmit")
         assert len(c) == 1 and c[0] != old
 
+    def test_shell_path_quotes_shell_characters(self):
+        assert cli.shell_path("C:/Users/me/Scripts/n3mc-lite-hook.exe") == "C:/Users/me/Scripts/n3mc-lite-hook.exe"
+        assert cli.shell_path("C:/PROGRA~1/Py/python.exe") == "C:/PROGRA~1/Py/python.exe"
+        assert cli.shell_path("C:/No Such Dir/n3mc-lite-hook.exe") == '"C:/No Such Dir/n3mc-lite-hook.exe"'
+        assert cli.shell_path("C:/NoSuch/O'Brien/x.exe") == "\"C:/NoSuch/O'Brien/x.exe\""
+        assert cli.shell_path("C:/NoSuch/A&B/x.exe") == '"C:/NoSuch/A&B/x.exe"'
+        assert cli.shell_path("C:/NoSuch/a$b`c/x.exe") == '"C:/NoSuch/a\\$b\\`c/x.exe"'
+
+    def test_quoted_hook_path_is_recognised_on_rerun(self, isolate, monkeypatch, tmp_path):
+        folder = tmp_path / "O'Brien" / "Scripts"
+        folder.mkdir(parents=True)
+        (folder / "n3mc-lite-hook.exe").write_bytes(b"")
+        (folder / "n3mc-lite-stop-hook.exe").write_bytes(b"")
+        monkeypatch.setattr(cli.sysconfig, "get_path", lambda *a, **k: str(folder))
+        cli.cmd_init()
+        up = cmds(load(isolate), "UserPromptSubmit")
+        assert len(up) == 1 and up[0].startswith('"') and "O'Brien" in up[0]
+        assert cli.is_own_hook(up[0], "UserPromptSubmit")
+        assert cli.is_own_hook('"C:/a\\$b\\`c/Scripts/n3mc-lite-hook.exe"', "UserPromptSubmit")
+        before = open(settings_path(isolate), "rb").read()
+        cli.cmd_init()
+        assert open(settings_path(isolate), "rb").read() == before
+        assert len(cmds(load(isolate), "UserPromptSubmit")) == 1 and len(cmds(load(isolate), "Stop")) == 1
+
     def test_no_mcp_files_touched(self, isolate, monkeypatch, tmp_path, capsys):
         claude_json = os.path.join(isolate["home"], ".claude.json")
         body = json.dumps({"mcpServers": {"n3mc-workingmemory": {"command": "x"}},
