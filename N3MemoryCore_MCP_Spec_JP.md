@@ -2493,7 +2493,7 @@ n3mcmcp-lite/
 
 | テストクラス | テスト内容 |
 |---|---|
-| `TestInit` | `--init` は、2 つのフックを絶対パス（スラッシュ区切り、空白があるときだけ引用符）で書き、`PERMISSION_RULES` を書く。もう一度実行しても何も書かない。変える前にバックアップを作る。不正な `settings.json` は変えず、終了コード 1。自分の入口・`-m`・パッケージのスクリプトの形は置き換え、重複させない（バックスラッシュで書かれていても同じ） |
+| `TestInit` | `--init` は、2 つのフックを絶対パス（スラッシュ区切り、`shell_path` が要るとしたときだけ引用符）で書き、`PERMISSION_RULES` を書く。`shell_path` は、ふつうのパスと 8.3 形式の短い名前（`PROGRA~1`）はそのままにし、空白・`'`・`&` を含むパスは二重引用符で囲み、`$` と `` ` `` をエスケープする。scripts フォルダが `O'Brien` という名前のフォルダの下にあるとき、フックは引用符付きで書かれ、自分のものと分かる。もう一度実行しても何も書かない。変える前にバックアップを作る。不正な `settings.json` は変えず、終了コード 1。自分の入口・`-m`・パッケージのスクリプトの形は置き換え、重複させない（バックスラッシュで書かれていても同じ） |
 | `TestInitNonStringCommand` | `command` が null や数のフックの項目は残り、`--init` は例外で終わらずに自分の項目を足す |
 | `TestKeepsOtherProducts` | Free の `n3mc-hook` / `n3mc-stop-hook` の項目、Pro の `python ".../n3mc_hook.py"` の項目、ほかのどのフックも残し、知らせる。Free 自身の見分け方 — その規則をここに書く：実行ファイル `n3mc-hook` / `n3mc-stop-hook`（`.exe` の有無を問わず）、`-m n3memorycore.n3mc_hook` / `-m n3memorycore.n3mc_stop_hook`、または Free のパッケージのフォルダの中のスクリプト `n3mc_hook.py` / `n3mc_stop_hook.py` — は Lite の項目に当たらない |
 | `TestPluginEnabled` | `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` が true のとき、`--init` はフックを登録せず、許可ルールを足し、§12 のメッセージを出力する。プラグインの許可スクリプトは、`settings.json` に見つけた `--init` のフックを知らせる |
@@ -2819,13 +2819,24 @@ def is_own_hook(command: str, event: str) -> bool:
                 return True
     return False
 
+# Characters that make bash (Git Bash on Windows) split or reinterpret an unquoted word. "~" counts only at
+# the start of a path (the only place bash expands it); 8.3 short names (PROGRA~1) contain it mid-word.
+SHELL_SPECIAL = frozenset(" \t'\"&|;<>()$`\\!#*?[]{}")
+
+def _needs_quotes(s: str) -> bool:
+    return s.startswith("~") or any(c in SHELL_SPECIAL for c in s)
+
 def shell_path(p) -> str:
     s = pathlib.Path(p).as_posix()                     # forward slashes: bash reads "\" as an escape
-    if " " in s and os.name == "nt":                   # a command that starts with a quote
+    if _needs_quotes(s) and os.name == "nt":           # a command that starts with a quote
         short = _short_path(p)                         #       does not run as a hook on Windows:
-        if short and " " not in short:               #       use the 8.3 short name, which has no space
-            s = pathlib.Path(short).as_posix()
-    return f'"{s}"' if " " in s else s                 # quote only when a space is left
+        if short and not _needs_quotes(pathlib.Path(short).as_posix()):
+            s = pathlib.Path(short).as_posix()         #       use the 8.3 short name when it needs no quotes
+    if not _needs_quotes(s):
+        return s
+    for ch in ("\\", '"', "$", "`"):                   # still special inside double quotes
+        s = s.replace(ch, "\\" + ch)
+    return f'"{s}"'                                    # an unquoted ' or & is a bash syntax error
 
 def _short_path(p) -> str:
     """Windows 8.3 short path of an existing file, or "" (8.3 names may be disabled on the volume)."""
@@ -2855,13 +2866,13 @@ def resolve_cmd(script_name: str) -> str:
 
 - `lite_hook.py` と `lite_stop_hook.py` は `main()` を持ち、`python -m` でも動く（フォールバックの形）。
 - **この正確な照合にする理由**（Free と同じ）：フックの名前を*含む*だけのコマンドをすべて当てると、ほかの N3MC 製品のフックを消してしまう。1 つの形だけを当てると、重複が残る。Lite の名前（`n3mc-lite-hook`、`n3mc_mcp.lite_hook`）は、Free のもの（`n3mc-hook`、`n3memorycore.n3mc_hook`）とも Pro のものとも違うので、どちらの `--init` も相手の項目を消さない（§14）。
-- **scripts フォルダを先に見て、引用符を付けない理由**（Free と同じ）：Python を入れた直後は、Claude Code の `PATH` に scripts フォルダがない。また、引用符で始まるフックのコマンドは、Windows で動かないことがある。空白を含むパスには、それでも引用符が要る。そこで Windows では、`shell_path` がファイルの 8.3 形式の短い名前（`GetShortPathNameW`）を使う。これには空白がない。そのドライブで 8.3 の名前が切ってあるときだけ引用符を付け、`--init` は `The hook command for <event> starts with a quote because <path> contains a space; if the hook does not run, install Python into a folder without spaces.` を出す。Linux のパスは引用符で囲む（そこで失敗するとは分かっていない）。
+- **scripts フォルダを先に見て、引用符を付けない理由**（Free と同じ）：Python を入れた直後は、Claude Code の `PATH` に scripts フォルダがない。また、引用符で始まるフックのコマンドは、Windows で動かないことがある。空白や、`SHELL_SPECIAL` のほかの文字を含むパスには、それでも引用符が要る。引用符がないと、`'` や `&`（`C:/Users/O'Brien/...`）は bash の構文エラーになり、フックが毎回失敗する。そこで Windows では、`shell_path` がファイルの 8.3 形式の短い名前（`GetShortPathNameW`）を、それが引用符なしで済むときに使う。そうでなければパスを二重引用符で囲み、その中の `\`、`"`、`$`、`` ` `` をエスケープする（引用符の中でも特別な意味を持つ）。このとき `--init` は `The hook command for <event> starts with a quote because <path> contains a space or another character the shell treats specially; if the hook does not run, install Python into a folder without such characters.` を出す。Linux のパスも同じように引用符で囲む（そこで失敗するとは分かっていない）。`is_own_hook` は引用符で囲んだ形を `shlex` で読むので、`--init` をもう一度実行しても自分のものと分かり、2 つ目を足さない。
 
 ### 12.9 ルールファイル `.claude/rules/n3mc-lite-behavior.md`
 
 Claude Code は、セッションの始まりにプロジェクトの `.claude/rules/*.md` を読み込む。`--stop` は `<project>/.claude/rules/n3mc-lite-behavior.md` を最新に保つ（`_ensure_rules_md`。`<project>` は §12.4 の手順 1 のプロジェクトのフォルダで、ホームフォルダにはしない）。Free は `n3mc-behavior.md` を書く。両方の製品を入れられるように、名前を変えてある（§14）。
 
-**テンプレート**（`_RULES_MD_TEMPLATE`。この文そのままで、最後の行の後に改行を 1 つ付ける。言い換えない）。`{cli}` は、このインストールのコマンドの形に置き換える：`<python> -m n3mc_mcp.cli`（pip。`<python>` は `--stop` を動かすプロセスの `shell_path(sys.executable)` — パッケージを持つ Python の絶対パスを、スラッシュで、空白を含むときだけ引用符で囲んだもの、§12.8）、または `--stop` が `--uvx` 付きで呼ばれたときは `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite`（プラグイン）。（パッケージを venv に入れたとき、ただの `python` は別の Python である。）
+**テンプレート**（`_RULES_MD_TEMPLATE`。この文そのままで、最後の行の後に改行を 1 つ付ける。言い換えない）。`{cli}` は、このインストールのコマンドの形に置き換える：`<python> -m n3mc_mcp.cli`（pip。`<python>` は `--stop` を動かすプロセスの `shell_path(sys.executable)` — パッケージを持つ Python の絶対パスを、スラッシュで、`shell_path` が引用符を要るとしたときだけ引用符で囲んだもの、§12.8）、または `--stop` が `--uvx` 付きで呼ばれたときは `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite`（プラグイン）。（パッケージを venv に入れたとき、ただの `python` は別の Python である。）
 
 ````markdown
 <!-- n3mc-lite-behavior v1 -->

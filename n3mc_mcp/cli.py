@@ -1054,13 +1054,29 @@ def _is_dir_home(folder):
         return False
 
 
+# Characters that make bash (Git Bash on Windows) split or reinterpret an unquoted word. "~" counts only at
+# the start of a path (the only place bash expands it); 8.3 short names (PROGRA~1) contain it mid-word.
+SHELL_SPECIAL = frozenset(" \t'\"&|;<>()$`\\!#*?[]{}")
+
+
+def _needs_quotes(s):
+    return s.startswith("~") or any(c in SHELL_SPECIAL for c in s)
+
+
 def shell_path(p):
+    """Forward slashes always. A plain path stays bare (a command that starts with a quote fails as a hook on
+    some Windows setups); on Windows a path that needs quotes is replaced by its 8.3 short name when that one
+    does not; otherwise it is double-quoted, with \\, ", $ and ` escaped, so that bash reads it as one word."""
     s = pathlib.Path(p).as_posix()
-    if " " in s and os.name == "nt":
+    if _needs_quotes(s) and os.name == "nt":
         short = _short_path(p)
-        if short and " " not in short:
+        if short and not _needs_quotes(pathlib.Path(short).as_posix()):
             s = pathlib.Path(short).as_posix()
-    return '"%s"' % s if " " in s else s
+    if not _needs_quotes(s):
+        return s
+    for ch in ("\\", '"', "$", "`"):
+        s = s.replace(ch, "\\" + ch)
+    return '"%s"' % s
 
 
 def _short_path(p):
@@ -1331,8 +1347,9 @@ def cmd_init():
     for event in OURS:
         cmd = resolve_cmd(OURS[event][0])
         if cmd.startswith('"'):
-            messages.append("The hook command for %s starts with a quote because %s contains a space; if "
-                            "the hook does not run, install Python into a folder without spaces."
+            messages.append("The hook command for %s starts with a quote because %s contains a space or "
+                            "another character the shell treats specially; if the hook does not run, install "
+                            "Python into a folder without such characters."
                             % (event, cmd.strip('"')))
     messages.extend(_scan_old_mcp())
     for m in messages:

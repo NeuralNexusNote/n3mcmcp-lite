@@ -2505,7 +2505,7 @@ Temporary `HOME` only.
 
 | Test class | What it covers |
 |---|---|
-| `TestInit` | `--init` writes the two hooks with absolute forward-slash paths (quoted only with a space) and the `PERMISSION_RULES`; re-running writes nothing; a backup is made before a change; an invalid `settings.json` is left unchanged with exit status 1; our entry-point, `-m` and package-script forms are replaced, not duplicated (also written with backslashes) |
+| `TestInit` | `--init` writes the two hooks with absolute forward-slash paths (quoted only when `shell_path` has to) and the `PERMISSION_RULES`; `shell_path` leaves a plain path and an 8.3 short name (`PROGRA~1`) bare, and double-quotes a path with a space, `'` or `&`, escaping `$` and `` ` ``; with the scripts folder under a folder named `O'Brien`, the hook is written quoted and recognised as ours; re-running writes nothing; a backup is made before a change; an invalid `settings.json` is left unchanged with exit status 1; our entry-point, `-m` and package-script forms are replaced, not duplicated (also written with backslashes) |
 | `TestInitNonStringCommand` | Hook items whose `command` is null or a number are kept, and `--init` adds its own entries without ending in an exception |
 | `TestKeepsOtherProducts` | Free's `n3mc-hook` / `n3mc-stop-hook` entries, Pro's `python ".../n3mc_hook.py"` entry and any other hook are kept and reported; Free's own matcher — its rules, written down here: the executable `n3mc-hook` / `n3mc-stop-hook` (with or without `.exe`), `-m n3memorycore.n3mc_hook` / `-m n3memorycore.n3mc_stop_hook`, or the script `n3mc_hook.py` / `n3mc_stop_hook.py` inside Free's package folder — does not match Lite's entries |
 | `TestPluginEnabled` | With `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` true, `--init` registers no hooks, adds the permission rules and prints the message of §12; the plugin's permission script reports `--init` hooks found in `settings.json` |
@@ -2831,13 +2831,24 @@ def is_own_hook(command: str, event: str) -> bool:
                 return True
     return False
 
+# Characters that make bash (Git Bash on Windows) split or reinterpret an unquoted word. "~" counts only at
+# the start of a path (the only place bash expands it); 8.3 short names (PROGRA~1) contain it mid-word.
+SHELL_SPECIAL = frozenset(" \t'\"&|;<>()$`\\!#*?[]{}")
+
+def _needs_quotes(s: str) -> bool:
+    return s.startswith("~") or any(c in SHELL_SPECIAL for c in s)
+
 def shell_path(p) -> str:
     s = pathlib.Path(p).as_posix()                     # forward slashes: bash reads "\" as an escape
-    if " " in s and os.name == "nt":                   # a command that starts with a quote
+    if _needs_quotes(s) and os.name == "nt":           # a command that starts with a quote
         short = _short_path(p)                         #       does not run as a hook on Windows:
-        if short and " " not in short:               #       use the 8.3 short name, which has no space
-            s = pathlib.Path(short).as_posix()
-    return f'"{s}"' if " " in s else s                 # quote only when a space is left
+        if short and not _needs_quotes(pathlib.Path(short).as_posix()):
+            s = pathlib.Path(short).as_posix()         #       use the 8.3 short name when it needs no quotes
+    if not _needs_quotes(s):
+        return s
+    for ch in ("\\", '"', "$", "`"):                   # still special inside double quotes
+        s = s.replace(ch, "\\" + ch)
+    return f'"{s}"'                                    # an unquoted ' or & is a bash syntax error
 
 def _short_path(p) -> str:
     """Windows 8.3 short path of an existing file, or "" (8.3 names may be disabled on the volume)."""
@@ -2867,13 +2878,13 @@ def resolve_cmd(script_name: str) -> str:
 
 - `lite_hook.py` and `lite_stop_hook.py` have a `main()` and also run under `python -m` (the fallback form).
 - **Why this exact matching** (as in Free): matching every command that merely *contains* a hook name would delete other N3MC products' hooks; matching only one form would leave duplicates. Lite's names (`n3mc-lite-hook`, `n3mc_mcp.lite_hook`) differ from Free's (`n3mc-hook`, `n3memorycore.n3mc_hook`) and Pro's, so neither `--init` removes the other's entries (§14).
-- **Why the scripts folder first and no quotes** (as in Free): right after installing Python, Claude Code's `PATH` lacks the scripts folder, and a hook command that starts with a quote may not run on Windows. A path with a space would still need the quote, so on Windows `shell_path` uses the 8.3 short name of the file (`GetShortPathNameW`), which has no space. Only when the volume has 8.3 names turned off is the path quoted; `--init` then prints `The hook command for <event> starts with a quote because <path> contains a space; if the hook does not run, install Python into a folder without spaces.` Linux paths are quoted (the quote is not known to fail there).
+- **Why the scripts folder first and no quotes** (as in Free): right after installing Python, Claude Code's `PATH` lacks the scripts folder, and a hook command that starts with a quote may not run on Windows. A path with a space or another character in `SHELL_SPECIAL` still needs the quote: unquoted, a `'` or `&` (`C:/Users/O'Brien/...`) is a bash syntax error and the hook fails on every prompt. So on Windows `shell_path` uses the 8.3 short name of the file (`GetShortPathNameW`) when that name needs no quote. Otherwise the path is double-quoted, with `\`, `"`, `$` and `` ` `` escaped inside the quotes (they are still special there); `--init` then prints `The hook command for <event> starts with a quote because <path> contains a space or another character the shell treats specially; if the hook does not run, install Python into a folder without such characters.` Linux paths are quoted the same way (the quote is not known to fail there). `is_own_hook` reads the quoted form with `shlex`, so a re-run of `--init` recognises it and does not add a second entry.
 
 ### 12.9 The rules file `.claude/rules/n3mc-lite-behavior.md`
 
 Claude Code loads `.claude/rules/*.md` of the project at session start. `--stop` keeps `<project>/.claude/rules/n3mc-lite-behavior.md` up to date (`_ensure_rules_md`; `<project>` is the project folder of §12.4 step 1, never the home folder). Free writes `n3mc-behavior.md`; the names differ so both products can be installed (§14).
 
-**Template** (`_RULES_MD_TEMPLATE`, exactly this text with a line feed after the last line; do not rephrase it). `{cli}` is replaced by the command form of this installation: `<python> -m n3mc_mcp.cli` (pip), where `<python>` is `shell_path(sys.executable)` of the process that runs `--stop` — the absolute path of the Python that has the package, with forward slashes, quoted only when it contains a space (§12.8) — or `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite` when `--stop` was called with `--uvx` (plugin). (A bare `python` is another Python when the package is installed in a venv.)
+**Template** (`_RULES_MD_TEMPLATE`, exactly this text with a line feed after the last line; do not rephrase it). `{cli}` is replaced by the command form of this installation: `<python> -m n3mc_mcp.cli` (pip), where `<python>` is `shell_path(sys.executable)` of the process that runs `--stop` — the absolute path of the Python that has the package, with forward slashes, quoted only when `shell_path` has to quote it (§12.8) — or `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite` when `--stop` was called with `--uvx` (plugin). (A bare `python` is another Python when the package is installed in a venv.)
 
 ````markdown
 <!-- n3mc-lite-behavior v1 -->
