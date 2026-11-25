@@ -41,7 +41,7 @@
 | ディスク使用量         | `config.json`（< 1 KB）。フックの `audit.log`（プロンプトと応答の原文。50 MB でローテーションし、最大約 100 MB）と小さなプロセス用ファイル（§7）も | `n3memory.db` が履歴と共に増加             |
 | 外部依存               | ユーザー実行の Redis Stack コンテナ           | なし（セルフコンテイン）                 |
 | `time_decay` の実効値  | 有意に効く（既定半減期 3 日：新鮮=1.0、7 日経過 ≈ 0.20） | 有意に効く（既定半減期 90 日）         |
-| 再インデックス / 修復  | `FT.CREATE` が冪等・マイグレーションなし       | スキーマ＋モデル移行マーカーあり         |
+| 再インデックス / 修復  | `FT.CREATE` が冪等（古い形の索引は作り直す）・移行マーカーなし | スキーマ＋モデル移行マーカーあり         |
 | 想定用途               | 短期作業・ワーキングメモリ・マーケットプレース | 継続プロジェクト                         |
 
 **揮発性の契約：**
@@ -448,6 +448,7 @@ mem:<uuid>                  HASH（メモリレコード or チャンク）
     id              string      UUIDv7（キーサフィックスと同じ）
     content         string      元テキスト verbatim（チャンクなら部分文）
     content_ngram   string      CJK バイグラム展開（BM25 用のサイドチャネル）
+    content_fts     string      索引用の文（役割の前置きと [code omitted] を除いた本文、§3.7）
     timestamp       string      ISO 8601 UTC
     timestamp_epoch number      unix 秒（SORTABLE）
     owner_id        string      TAG
@@ -485,7 +486,7 @@ docsha:<sha1>               STRING
 
 n3mc_idx                    RediSearch インデックス、ON HASH PREFIX 1 mem:
     SCHEMA:
-        content         TEXT weight 1.0
+        content_fts     TEXT weight 1.0
         content_ngram   TEXT weight 0.8
         timestamp_epoch NUMERIC SORTABLE
         owner_id        TAG
@@ -595,9 +596,13 @@ $$time\_decay = 2^{-\frac{days\_elapsed}{half\_life\_days}}$$
 
 **トークナイザ**：RediSearch 内蔵のトークナイザ（空白＋句読点区切り、大文字小文字統一）。Pro 版で使われる Porter ステマーは本版では利用不可。
 
-**CJK バイグラム展開**：日本語・中国語は単語間スペースがないため、素の RediSearch トークナイザでは 1 文が 1 トークンに潰れ BM25 がほぼ効かない。これを補うため、保存時に `content` 中の連続 CJK ランを **オーバーラップバイグラム**（例：「記憶装置」→「記憶 憶装 装置」）に展開し、並列の `content_ngram` TEXT フィールドに格納する。BM25 検索はクエリ側にも同じ展開を適用した上で `@content:(...) | @content_ngram:(...)` の OR クエリを走らせるため、日本語の部分一致が RediSearch 内で機能する。ベクトル検索側には一切干渉しない（e5 埋め込みは日本語を直接扱える）。
+**CJK バイグラム展開**：日本語・中国語は単語間スペースがないため、素の RediSearch トークナイザでは 1 文が 1 トークンに潰れ BM25 がほぼ効かない。これを補うため、保存時に索引用の文（`content_fts`、下記）中の連続 CJK ランを **オーバーラップバイグラム**（例：「記憶装置」→「記憶 憶装 装置」）に展開し、並列の `content_ngram` TEXT フィールドに格納する。BM25 検索はクエリ側にも同じ展開を適用した上で `@content_fts:(...) | @content_ngram:(...)` の OR クエリを走らせるため、日本語の部分一致が RediSearch 内で機能する。ベクトル検索側には一切干渉しない（e5 埋め込みは日本語を直接扱える）。
 
-**クエリ整形**（`prepare_query`） — ユーザー入力クエリは RediSearch へ送る前に、NFKC 正規化 → 制御文字を空白に置換 → `strip_fts_punctuation`（ASCII **および** CJK・全角の句読点）→ CJK バイグラム展開 → 空白の連続を 1 つに畳む、の順で整形する。RediSearch の特殊文字はすべて除去されるため、エスケープは不要。`content` はハッシュにそのまま（verbatim）保存する（`content` は RediSearch が動的にトークナイズし、`content_ngram` は同じ句読点除去を通して事前展開した形を持つ）。
+**索引用の文**（`fts_text`）：`content_fts` と `content_ngram` は、`content` そのものではなく、§3.16 の役割の前置き（`[user] `、`[claude] `、`[user i/N] `、`[claude i/N] `）を付ける前の本文（チャンクならそのチャンク）から、`[code omitted]` をすべて空白に置き換えた文で作る。`content_fts` はその文、`content_ngram` はそれを今までどおり NFKC 正規化・句読点除去・バイグラム展開した形（§5 (5)）である。前置きのない MCP の `save_memory` でも、`[code omitted]` は同じく除く。保存する `content` は変えない（表示、重複の確認、削除は今までどおり `content` を使う）。**理由**：前置きと `[code omitted]` が索引に入ると、`user`、`claude`、`code`、`omitted` を含むクエリが、BM25 でフックのすべての記録や、コードを含んでいたすべての記録に当たり、関係のない記録が上がる。
+
+**古い形の索引**：既存の `n3mc_idx` に `content_fts` の属性がなく（`FT.INFO` の `attributes`）、ベクトルの `DIM` が `embedding_dim` と同じときだけ、`ensure_index()` は `FT.DROPINDEX n3mc_idx`（`DD` を付けない。ハッシュは消さない）のあと `FT.CREATE` をやり直す。`FT.DROPINDEX` が `Unknown index` で失敗したとき（ほかのプロセスが先に消した）は、そのまま `FT.CREATE` に進み、`already exists` は成功として扱う。`DIM` が違うときは作り直さず、今までどおり `index_dim_mismatch` を出す（作り直すと、次元の違うベクトルを持つ既存の記録が索引に入らなくなる）。作り直す前に保存した記録は `content_fts` を持たないので、失効するまで（保存から最長 7 日）BM25 では `content_ngram`（前置きを含んだまま）だけで当たる。これらの記録は書き直さない。
+
+**クエリ整形**（`prepare_query`） — ユーザー入力クエリは RediSearch へ送る前に、NFKC 正規化 → 制御文字を空白に置換 → `strip_fts_punctuation`（ASCII **および** CJK・全角の句読点）→ CJK バイグラム展開 → 空白の連続を 1 つに畳む、の順で整形する。RediSearch の特殊文字はすべて除去されるため、エスケープは不要。`content` はハッシュにそのまま（verbatim）保存する（索引は `content` を使わない：上の索引用の文 `content_fts` を RediSearch が動的にトークナイズし、`content_ngram` はそれを同じ句読点除去を通して事前展開した形を持つ）。
 
 ```python
 _CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')
@@ -612,7 +617,7 @@ def prepare_query(text: str) -> str:
     text = _PUNCT_STRIP_RE.sub(' ', text)
     tokens = cjk_bigram_expand(text).split()
     # Tokens with no letter or digit (e.g. a lone '_') are not indexed by
-    # RediSearch and leave an empty '@content:()' → syntax error.
+    # RediSearch and leave an empty '@content_fts:()' → syntax error.
     return ' '.join(t for t in tokens if any(ch.isalnum() for ch in t))
 
 def drop_lone_cjk_tokens(q: str) -> str:
@@ -632,7 +637,7 @@ def drop_lone_cjk_tokens(q: str) -> str:
 ```python
 terms = drop_lone_cjk_tokens(prepare_query(query)).split()
 q = "|".join(terms)
-fts_query = f"(@content:({q}) | @content_ngram:({q}))"
+fts_query = f"(@content_fts:({q}) | @content_ngram:({q}))"
 ```
 
 記録は**どれか 1 つ**の語を含めばヒットする。BM25 は多くの語・珍しい語を含む記録ほど高く採点し、語彙リランクがすべての語の coverage を加えるので、すべての語を含む記録はやはり上に来る。バイグラム展開のあとに残る 1 文字の CJK（`「記憶装置」は？` → `記憶 憶装 装置 は`）はたいてい助詞で、OR ではほぼすべての日本語の記録にヒットしてしまうので、引き続き落とす。1 文字の CJK だけのクエリは、そのまま使う。
@@ -641,7 +646,7 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
 
 > **⚠️ OR にする理由**：RediSearch は `@field:(a b c)` の中の語を AND で結ぶ。AND のままだと、`quick fox` では記録が見つかるが、`quick fox elephant`、`what did the quick fox do`、`記憶装置 大阪` では、すべての語を含む記録がなければ何も見つからず、スコアのキーワード部分（30 %）が 0 になる。Free も語を OR で結ぶ。
 
-また `prepare_query` は、文字も数字も含まない語（`str.isalnum` が真の文字がない語。単独の `_` など）を落とす。RediSearch はこれを語として索引しないので、そればかりのクエリは `@content:()` になり、構文エラーになる。
+また `prepare_query` は、文字も数字も含まない語（`str.isalnum` が真の文字がない語。単独の `_` など）を落とす。RediSearch はこれを語として索引しないので、そればかりのクエリは `@content_fts:()` になり、構文エラーになる。
 
 > **⚠️ 制御文字と CJK 句読点を除去する理由**：クエリに `\x00` などの制御文字が残ると `FT.SEARCH` が `Syntax error` で失敗する。このエラーは捕捉されるため、そのクエリでは BM25 側が黙って抜け落ちる。CJK 句読点は ASCII の除去対象に入っていないため、除去しないと `「記憶装置」は？` が `「記` や `は？` のようなバイグラムに展開される。語を AND で結合すると、どの文書にも現れないバイグラムが 1 つあるだけで BM25 側全体が **0 件** になる — そして日本語の質問はほぼ必ず `？` で終わるか `「」` を含む。保存側・クエリ側の両方でこれらを除去することでキーワード一致が回復する。BM25 の失敗で `search_memory` 自体を失敗させてはならない：捕捉してベクトル結果だけで続行する。
 
@@ -716,7 +721,7 @@ fts_query = f"(@content:({q}) | @content_ngram:({q}))"
 
 3. **RediSearch インデックスの確保**（`ensure_index()`）：
    - [§3.5](#35-データレイアウト) の通り `FT.CREATE n3mc_idx ON HASH PREFIX 1 mem: SCHEMA ...`。
-   - `ResponseError` のメッセージに `"already exists"` を含む場合は成功。そのあと、索引のベクトル次元（`FT.INFO n3mc_idx` の `embedding` 属性の `DIM`）を `embedding_dim` と比べ、違えば通知 `index_dim_mismatch` を加える（`index_dim_mismatch: the existing index n3mc_idx was built for <old> dimensions but embedding_dim is <new>; new vectors are not indexed. Drop the index (FT.DROPINDEX n3mc_idx) or flush the test DB, then restart.`）。（古い索引を黙って受け入れると、新しいベクトルは索引に入らない。）
+   - `ResponseError` のメッセージに `"already exists"` を含む場合は成功。そのあと、索引のベクトル次元（`FT.INFO n3mc_idx` の `embedding` 属性の `DIM`）を `embedding_dim` と比べ、違えば通知 `index_dim_mismatch` を加える（`index_dim_mismatch: the existing index n3mc_idx was built for <old> dimensions but embedding_dim is <new>; new vectors are not indexed. Drop the index (FT.DROPINDEX n3mc_idx) or flush the test DB, then restart.`）。（古い索引を黙って受け入れると、新しいベクトルは索引に入らない。）続けて §3.7「古い形の索引」の確認をする。
    - **それ以外の失敗でもプロセスを止めない**。サーバーは「索引なし」の状態で動き続け、`ensure_connected()` がツール呼び出しのたびにその前に `ensure_index()` をやり直す。索引がない間は、どのツールも下の 2 のバックエンドエラーを、次の案内付きで返す：`The Redis at <host>:<port> does not provide RediSearch (FT.CREATE failed: <reason>). N3MC Lite needs Redis Stack, not plain Redis: docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest`。`ensure_index()` の途中の接続エラーは、ほかの接続断と同じに扱う。
    - 冪等：毎起動ごと呼んでも安全。
 
@@ -801,7 +806,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 | メソッド | FT.SEARCH クエリ | Python フィルタリング |
 |---|---|---|
 | `_vector_search` | `*=>[KNN N @embedding $vec AS __dist]`（owner フィルタなし）、RETURN に `owner_id` 追加 | `owner_id` 一致のレコードのみ採用 |
-| `_bm25_search` | `(@content:(...) \| @content_ngram:(...))` のみ（owner フィルタなし）、RETURN に `owner_id` 追加 | `owner_id` 一致のレコードのみ採用 |
+| `_bm25_search` | `(@content_fts:(...) \| @content_ngram:(...))` のみ（owner フィルタなし）、RETURN に `owner_id` 追加 | `owner_id` 一致のレコードのみ採用 |
 | `list_memories` | `*`（全件取得）、RETURN に `owner_id`・`parent_id` 追加 | `owner_id` 一致かつ `parent_id` が空文字列のレコードのみ採用 |
 | `delete_memory`（cascade） | 親に `chunk_ids` があれば不要。それがない古い親に限り、`@parent_id:{<id>}` で FT.SEARCH を試み、パースエラー時は `SCAN mem:*` でフォールバック | 先にレコードのオーナーを確認する。フォールバック時は `parent_id` フィールド値を Python で照合 |
 
@@ -997,7 +1002,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 <content>
 ```
 
-- `saved=` は保存された UTC タイムスタンプを**サーバーのローカル時刻**に変換し、オフセットを付けたもの（`_fmt_saved`）。
+- `saved=` は保存された UTC タイムスタンプを**サーバーのローカル時刻**に変換し、オフセットを付けたもの（`_fmt_saved`）。**ローカル時刻に直せない値は UTC のまま出す**：`astimezone()` が `OverflowError`、`OSError`、`ValueError` を投げたら、UTC の時刻に `(UTC+0000)` を付ける。Windows の `astimezone()` は 1970 年より前の時刻（と、ローカル時刻にすると 9999 年を超える時刻）で `OSError` を投げる。捕まえないと、その記録に当たる検索が例外で終わり、記憶が差し込まれない。
 - 版についての一文は、ヒットが 1 件以上あれば最初のヒットの上に 1 回だけ出す。
 - `turn=` は行に `turn_id` が無ければ省略。`[doc×N]` は親ドキュメントのみ。
 - **弱い候補**：`_weak` の行は、普通の行のすべての後に、`#### Possibly related (weak matches — may be unrelated)` の見出しの下に、同じ `### …` の形で出す。見出しは弱い候補が 1 件以上あるときだけ出す。
@@ -1042,14 +1047,14 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 - 実行するもの：`--hook-submit`、`--save-claude-turn`、`--search`、`--buffer`、`--list`、`--recall-thread`、`--delete`、`--delete-session`、`--repair`、MCP の薄いクライアント（§4.6）。`--init`、`--stop`、`--run-server` は実行しない。
 - **止め方（`_stop_stale_server`）**：`{"root": "<our data folder>"}` を付けて `POST /shutdown` を送る。`/shutdown` を知らないサーバーだけを、psutil で確かめた後に終わらせる。**PID ファイルの番号でプロセスを止めてはならない**（その番号は使い回されているかもしれない）。
-- **psutil での確かめ（`_is_own_server_process`）**：PID は `/health` の `pid` から、またはポートで待ち受けているプロセス（`psutil.net_connections`）から取る。コマンドラインに `n3mc_mcp.cli` と `--run-server` の両方を含み、かつその `N3MC_DATA_DIR` 環境変数から決まるデータフォルダ（既定 `~/.n3mc-workingmemory`）が自分のものと同じときだけ、「自分のサーバー」である。psutil がない、権限で拒否された、または何かが一致しないときは「確かめられない」：止めない。通知 `stale_server`（"Cannot stop the old N3MC Lite server. Another program may be using server_port <port>. Check server_port in config.json and restart manually."）を出す。自分の古いサーバーを止められないときは、それを使い続ける（同じ Redis を使っている）。
+- **psutil での確かめ（`_is_own_server_process`）**：PID は `/health` の `pid` から、またはポートで待ち受けているプロセス（`psutil.net_connections`）から取る。コマンドラインに `n3mc_mcp.cli` と `--run-server` の両方を含み、かつその `N3MC_DATA_DIR` 環境変数から決まるデータフォルダ（既定 `~/.n3mc-workingmemory`）が自分のものと同じときだけ、「自分のサーバー」である。psutil がない、権限で拒否された、または何かが一致しないときは「確かめられない」：止めない。通知 `stale_server`（"Cannot stop the old N3MC Lite server. Another program may be using server_port <port>. Check server_port in config.json and restart manually."）を出す。自分の古いサーバー（`root` が同じで `code_version` が違う）を止められなかったときは、**`/health` をもう一度見る**。`ok` ならそれを使い（ほかのプロセスが入れ替えを済ませた。2 つのプロセスが同時に入れ替えようとすると、遅れた側の `/shutdown` は失敗する）、答えがなければ止まったものとして「サーバーの起動」に進む。まだ古いサーバーが答えるなら、**そのサーバーは使わない**：この呼び出しはサーバーなしで進む（保存は直接保存（§3.16）、検索は `_(memory search unavailable: an old N3MC Lite memory server could not be stopped)_`、ほかのツールは §4.6 のバックエンドエラー）。`code_version` には `config.json` の内容が入るので、古いサーバーは別の `redis_url` を使っていることがある。使い続けると、`redis_url` を変えたあとも記録が古い Redis に入る。
 - **PID ファイルの扱い**：`/health` が応答せず、PID ファイルの番号のプロセスがこのフォルダのサーバー（起動中）だと確かめられたときは、PID ファイルを残し、最大 60 秒（0.5 秒ごと）`/health` を確かめる。60 秒たってもまだ起動中（初回の起動はモデルをダウンロードする）なら、別のサーバーを起動せず、PID ファイルも消さない。この呼び出しはサーバーなしで続ける（下記）。それ以外（プロセスが死んでいる、番号が使い回された）のときは、PID ファイルを消してサーバーを起動する。それでも `import psutil` が失敗したときは、PID ファイルのプロセスを、ファイルの更新時刻から 60 秒の間は「まだ起動中」、その後は死んでいるものとして扱う。
   - **サーバーが別のポートにいるとき**：確かめた PID ファイルのプロセスを待つ前に、それがいまの `server_port` 以外のポートで待ち受けていないかを調べる（psutil で、その PID の `LISTEN` の接続）。サーバーが動いている間に利用者が `server_port` を変えると、こうなる。新しいポートの `/health` はずっと答えないので、この確認がないとサーバーは再起動しない（CLI は呼び出しのたびに 60 秒待ち、フックはずっとベクトルなしで保存する）。そうしたポートのうち `/health` がこのフォルダの `root` を返すものに `POST /shutdown`（`{"root": "<自分のデータフォルダ>"}`）を送り、そのポートが空くまで待ち（上と同じ 15 秒）、PID ファイルがまだその PID を持っていれば消し、待たずに「サーバーの起動」へ進む。`/health` が答えないポートや、別の `root` を返すポートには何もしない。PID ファイルの番号でプロセスを終わらせることはしない。起動中のサーバーはまだどのポートでも待ち受けていないので、上の待ちはそのまま働く。この確認には、PID ファイルにサーバー自身の PID が要る。サーバーは自分でそれを書く（§13「PID ファイル」）。サーバーの `Host` の確認は起動時のポートを使う（§4.5）ので、古いサーバーは自分のポートで答え続ける。
 - 自分が起動したサーバーが応答したら、通知 `stale_server`・`port_conflict`・`server_start_failed` を消す。
 
 #### サーバーの起動（`_start_server`）
 
-1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さないもの）では、サーバーは入口と一緒に終わることがある。クライアントとその `mcp` の版によって、サーバーは入口と一緒に終わるか、入口を閉じた後も動き続ける（`mcp` 1.27.0・Windows 11 では動き続ける）。どちらも正しい動作である。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。
+1. `subprocess.Popen([*python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=DEVNULL, stdout=DEVNULL, stderr=<server.log opened for append>, …)`。`server.log` が 1 MB より大きければ、先に空にする。切り離して起動する：Windows では `creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`、それ以外では `start_new_session=True`。そのためサーバーは、それを起動したフックや MCP の入口より長く生きる。ただし、子プロセスをジョブオブジェクトに入れ、閉じるときに子孫ごと終わらせる MCP クライアント（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` で、ジョブからの離脱を許さないもの）では、サーバーは入口と一緒に終わることがある。クライアントとその `mcp` の版によって、サーバーは入口と一緒に終わるか、入口を閉じた後も動き続ける（`mcp` 1.27.0・Windows 11 では動き続ける）。どちらも正しい動作である。記憶は失われない：次の呼び出しがサーバーを起動し直し、そのあいだの保存はベクトルなしの直接保存になる（§4.6）。`-m` の形が必須である（パッケージ相対の import のため）。ファイルのパスで起動してはならない。サーバーの stdout は、フックや MCP の入口の stdout には決して届かない。**作業フォルダはデータフォルダにする**（`cwd=<データフォルダ>`：`N3MC_DATA_DIR` か `~/.n3mc-workingmemory`）。サーバーは何日も動き、Windows ではプロセスの作業フォルダを消すことも名前を変えることもできないので、たまたまサーバーを起動したフックや MCP の入口のフォルダ（利用者の作業ツリーなど）にしない。例外は、ソースのフォルダでそのまま動かすとき（このパッケージの親フォルダが今のフォルダなので、`python_cmd()` は `-P` を付けない。下の「安全なインポートパス」）で、子はそこからしかパッケージを見つけられないので、そのフォルダにする。サーバーの中の処理は作業フォルダに頼らない。
 2. 0.5 秒ごとに最大 60 秒、`/health` を確かめる。その間に子プロセスが終わったら（`proc.poll() is not None`）、すぐに待つのをやめる。
 3. その早い終了のとき：`server_start_failed`（"The N3MC Lite memory server could not start (exit code <n>). See <server.log path> for the reason."）を出し、データフォルダの目印のファイル `server_start_failed` に時刻を書き、PID ファイルが子プロセスの PID を持っていれば消し、サーバーなしで続ける。`Popen` 自体が例外を出したときは、サーバーなしで続ける（stderr に 1 行）。
    - **サーバーのプロセス自身も起動の失敗を記録する**：`run_server` が例外で終わるとき、または 0 / `None` 以外のコードの `SystemExit` で終わるとき（uvicorn はポートを bind できないとき、こう終わる）は、終わる前に自分で `server_start_failed`（"The N3MC Lite memory server could not start (<exit code n \| ErrorType: message>). See <server.log path> for the reason."）を出し、目印のファイルを書く。例外は握りつぶさない。**理由**：フックは `ensure_server(cfg, max_wait=0)` で呼ぶので子プロセスの終了を見ない。これがないと、起動できないサーバーをフックのたびに起動し直し、通知も 5 分の待ちも働かず、表示は「still starting」のままになる。
@@ -1126,7 +1131,7 @@ def python_cmd():
 
 1. stderr に出す。
 2. `{"ts", "hook": "notice", "key", "message"}` を `audit.log` に追記する（同じキーとメッセージでは 1 回だけ）。
-3. データフォルダの `notices.json` に残す。これは 1 つの JSON オブジェクト `{<key>: {"message": <text>, "last_shown": <epoch seconds or null>}}` で、一時ファイルと `os.replace` で書く。キーごとに **1 日 1 回**表示する（`last_shown` が null か、86,400 秒以上前のとき。表示すると `last_shown` を設定する）。
+3. データフォルダの `notices.json` に残す。これは 1 つの JSON オブジェクト `{<key>: {"message": <text>, "last_shown": <epoch seconds or null>}}` で、一時ファイルと `os.replace` で書く。キーごとに **1 日 1 回**表示する（`last_shown` が null か、86,400 秒以上前のとき。表示すると `last_shown` を設定する）。`last_shown` が数として読めない（文字列、壊れた値）ときは、まだ出していないもの（null）として扱い、出したあと今の時刻を書く。例外にすると、検索とその発言の保存が止まる。
 4. 原因がなくなったら、`_clear_notice(key)` が消す。
 
 **通知を表示する場所**（サーバーの `_take_notices()`）：どちらの種類でも最初に成功した検索 — フックか CLI の `/search`、または MCP の `search_memory` — に、§6 の Lite のプロセス内の通知（`config_unreadable`、`config_type`、`shared_redis`、`config_refused`、`index_dim_mismatch`。§6 と同じくサーバープロセスごとに 1 回）を出し、続けて表示の時期が来た `notices.json` の通知（1 日 1 回）を、`> ⚠️ N3MC notice: <message>` の行として出す。§3.9 のモデル劣化の通知は、劣化した検索のたびに足す。フックと CLI の劣化時の代わりの出力（§12）も、表示の時期が来た `notices.json` の通知を、見出しのすぐ後に出す。壊れているのがサーバーそのものかもしれないからである。
@@ -1146,6 +1151,7 @@ def python_cmd():
 - ガードは、保存するものを**そのやりとりの中で**ハッシュする（下記）：独立したレコードなら `mem:sha:<turn_id>:<sha1(NFKC([<role>] B))>`、親なら `docsha:<turn_id>:<sha1(NFKC([<role>] B))>`。Lite のガードと同じく、`SET NX` で取り、レコードの TTL を持つ。`turn_id` のないフックの保存は起きない（§12 は常に持つ）。**このガードの削除**：§3.5 / `delete_memories_by_session` の削除は、保存したレコードからガードのキーを計算し直す。`turn_id` を持ち、**かつ** `content` が役割の前置き（`[user` か `[claude`。つまりフックのレコード）で始まるレコードは、`mem:sha:<turn_id>:<sha1(NFKC(content))>`（親なら `docsha:<turn_id>:<sha1(NFKC(content))>`）を使う。保存した `content` は、ちょうど `[<role>] B` である。ほかのレコードは §3.8 のキーを使う。（自分の文が `[user` で始まり、`turn_id` を渡す MCP の保存は、ここではフックのレコードとして読まれる。削除はそのガードを外し、ガードは保存の TTL で消える。そのため、同じ文を 7 日後にまた保存できるようになるだけである。）チャンクの埋め込みは、ほかの保存された `content` と同じく、前置きを付けたチャンクの文から作る（`"passage: " + content`）。
 - 閉じ括弧の後には空白を 1 つ置く。親ドキュメントは、この前置きを除けば「verbatim」である。
 - `agent_name` = `"claude-code"`、`session_id` = フックの入力にある Claude Code の `session_id`（空ならサーバーの既定：サーバーのプロセスの `N3MC_SESSION_ID`、なければサーバーが起動のときに作る UUIDv4）、`turn_id` = そのやりとりの `turn_id`（§12）。
+- **索引用の文に前置きは入れない**：各レコードの `content_fts` と `content_ngram` は、前置きを付ける前の `B`（チャンクならチャンク *i*）から作る（§3.7「索引用の文」）。
 - **MCP の `save_memory` に `role` はない。** 前置きを付けずに保存する（§3.8）。
 - **フックの保存：完全一致の重複は同じやりとりの中だけ。** フックの保存では、完全一致の重複の確認（§3.8）は、Free と同じく、同じ `turn_id` のレコードとだけ比べる。そのため**すべてのメッセージと応答が保存される**：2 つのやりとりで送った `ok` は、それぞれに 1 回ずつ、2 回保存される。1 つのやりとりの中では、確認は今も働く：Stop フックと §12 の transcript からの回収の両方が、同じ応答を同じ `turn_id` で保存したとき、2 回目の保存は `duplicate` と答える。**MCP の `save_memory` は Lite の決まりを保つ**（§3.8：すべてのレコードにわたる完全一致の重複）。`role` がなく、前置きを付けずに保存するからである。
 - **`skip_code_blocks: true` はフックの保存にも当てはまる**：フェンスを含むメッセージや応答は `skipped_code` と答え、保存しない。既定は `false` で、`[code omitted]` にして保存する。
@@ -1233,7 +1239,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 | 名前 | 入力 | 振る舞い |
 | --- | --- | --- |
-| `recall_thread` | `turn_id: string, before?: int (既定 2), after?: int (既定 2)` | 指定 `turn_id` のエントリと、それ以前 `before` 件・それ以後 `after` 件を時系列で並べた markdown を返す。並び替えは保存時刻の昇順。Lite では Redis に保存された全エントリの中で「同一 turn_id を持つ親ドキュメント／単独メモリ／チャンク」をスキャンして返す。**親ドキュメントがまだあるチャンクは飛ばす**（全文は `[doc×N]` 付きの親が持つ）。**親を失ったチャンク（§3.11 の孤立チャンク）は、そのチャンクの本文で 1 件として出す** — `search_memory` と同じ退避（チャンクをすべて飛ばすと、親が失効した turn は、`search_memory` にはチャンクが出るのに `not_found` になる）。ヒットゼロの場合 `{"status":"not_found","turn_id":...}` を JSON 文字列で返す。 |
+| `recall_thread` | `turn_id: string, before?: int (既定 2), after?: int (既定 2)` | 指定 `turn_id` のエントリと、それ以前 `before` 件・それ以後 `after` 件を時系列で並べた markdown を返す。並び替えは保存時刻の昇順。Lite では Redis に保存された全エントリの中で「同一 turn_id を持つ親ドキュメント／単独メモリ／チャンク」をスキャンして返す。**前後のエントリは同じ会話から取る**：起点の turn の最初のエントリに `session_id` があれば、同じ `session_id` のエントリだけを並べる（Python 側で比べる、§3.12）。`session_id` が空なら、起点の turn のエントリだけを返す。別のセッション（並行して動く別の Claude Code のセッション、ほかの MCP クライアントの保存）のエントリは混ぜない（混ぜると、起点の直前の発言の代わりに、別の会話の発言が周辺会話として出る）。**親ドキュメントがまだあるチャンクは飛ばす**（全文は `[doc×N]` 付きの親が持つ）。**親を失ったチャンク（§3.11 の孤立チャンク）は、そのチャンクの本文で 1 件として出す** — `search_memory` と同じ退避（チャンクをすべて飛ばすと、親が失効した turn は、`search_memory` にはチャンクが出るのに `not_found` になる）。ヒットゼロの場合 `{"status":"not_found","turn_id":...}` を JSON 文字列で返す。 |
 
 **運用**: 接続中の LLM は `search_memory` のスニペットで文脈不足と判断したとき、ヒットの `turn_id` を `recall_thread` に渡して周辺会話を取得すること。ユーザーがこのツールを直接指定する必要はない。
 
@@ -1292,7 +1298,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 #### サーバーが使えないとき
 
-「使えない」とは、`ensure_server` が使えるサーバーなしで戻ったこと（60 秒たってもまだ起動中、起動に失敗した、または失敗から 5 分以内なので起動を飛ばした、ほかのフォルダのサーバーがポートを持っている）、または `/tools` のリクエストが失敗したこと（接続エラー、タイムアウト、2xx でない応答）である。`<reason>` は、`the memory server is still starting (the first start downloads the embedding model, ~1.1 GB)`、`the memory server could not start; see <server.log path>`、`another N3MC folder's server is using port <port>`、またはリクエストのエラーのどれかである。
+「使えない」とは、`ensure_server` が使えるサーバーなしで戻ったこと（60 秒たってもまだ起動中、起動に失敗した、または失敗から 5 分以内なので起動を飛ばした、ほかのフォルダのサーバーがポートを持っている、自分の古いサーバーを止められなかった）、または `/tools` のリクエストが失敗したこと（接続エラー、タイムアウト、2xx でない応答）である。`<reason>` は、`the memory server is still starting (the first start downloads the embedding model, ~1.1 GB)`、`the memory server could not start; see <server.log path>`、`another N3MC folder's server is using port <port>`、`an old N3MC Lite memory server could not be stopped`、またはリクエストのエラーのどれかである。
 
 | ツール | 応答 |
 |---|---|
@@ -1872,7 +1878,7 @@ async def list_tools() -> list[Tool]:
 **(4) 一覧を返すツールの文の形。**
 
 - `list_memories`: 何も保存されていなければ `_No memories stored._`。そうでなければ、項目ごとに 1 つの塊 `**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<tag> ` は、項目にタグがあるときだけ付く（親文書は `[doc×N]`）。塊は `\n\n---\n\n` でつなぐ。親文書の本文は、先頭 200 文字にする。200 文字より長かったときだけ、あとに `…` を付ける。単独のメモリ（`limit` 件まで）とすべての親文書を合わせ、timestamp の文字列の降順に並べ、`limit` 件に切る。`limit` がない、空、または 0 のときは 20。1 未満の値は 1。
-- `recall_thread`: `turn_id` が空なら `{"status": "error", "reason": "turn_id required"}`。行がなければ `{"status": "not_found", "turn_id": "<turn_id>"}`。そうでなければ、行ごとに 1 つの塊 `<印>**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<印>` は、求められたターンの行では `▶ `、ほかの行では空白 2 つである。塊は `\n\n---\n\n` でつなぐ。範囲は、そのターンの最初の行から `before` 行前まで、最後の行から `after` 行後までで、間にあるほかのターンの行も含む。ここでは、親文書は全文を出す（200 文字に切らない）。
+- `recall_thread`: `turn_id` が空なら `{"status": "error", "reason": "turn_id required"}`。行がなければ `{"status": "not_found", "turn_id": "<turn_id>"}`。そうでなければ、行ごとに 1 つの塊 `<印>**<tag> [<id>]** <timestamp の先頭 19 文字>` + 改行 + purify した本文。`<印>` は、求められたターンの行では `▶ `、ほかの行では空白 2 つである。塊は `\n\n---\n\n` でつなぐ。範囲は、同じ `session_id` の行（§4.3.1）の中で、そのターンの最初の行から `before` 行前まで、最後の行から `after` 行後までで、間にあるほかのターンの行も含む。ここでは、親文書は全文を出す（200 文字に切らない）。
 - `search_memory`: ヒットどうしは `\n\n---\n\n` でつなぐ。知らせ、版の文、ヒット、弱い候補の見出し、弱い候補は、空行 1 つ（`\n\n`）でつなぐ。その後に §3.17 の大きさの上限を当てる。
 
 **(5) バイグラムに展開する文字（§3.7）— `n3mc_mcp/processor.py`。** `_is_cjk(ch)` は、コードポイントが次の範囲のどれかに入るときに真である。§3.7 の「CJK の連続」は、この文字の連続のことである。1 文字だけの連続は、その 1 文字のまま残す。
@@ -2372,6 +2378,7 @@ n3mcmcp-lite/
 | `TestTimeWindow` | クエリにより近い新しい行が `limit × 5` 件より多くあっても、`since` / `until` が範囲内の行を返す（*Redis*） |
 | `TestShaping` | `vector_min_cos` が低コサインのベクトル候補を落とす。相対カット。最新版が先頭に移り、その位置のスコアを引き継ぐ。`_version_group` の行は相対カットで残る。短い行（< `version_min_chars`）はグループ化されない |
 | `TestRender` | ローカル時刻の `saved=`、版についての一文、各通知が 1 回だけ出る。最初の検索のあとで加わった通知は次の検索で出る。弱い候補が普通の行のすべての後に `#### Possibly related (weak matches — may be unrelated)` の下に出る、普通の行が 0 件なら `_No memories found._` の後に弱い候補の見出しが出て版の一文は出ない、弱い候補がなければその見出しは出ない |
+| `TestFmtSavedFallback` | `astimezone()` が `OSError`（Windows の 1970 年より前の時刻）、`OverflowError`、`ValueError` を投げる値（差し替えて起こす）で、`saved=` は UTC の時刻に `(UTC+0000)` を付けて出し、検索は例外で終わらない |
 | `TestConfig` | 読めない `config.json` が変更されない。型の誤った項目が無視され報告される。bool は数値として受け付けない |
 | `TestTestSafety` | `conftest` がライブの `redis_url` と同じテスト URL を拒否する。ライブの `config.json` を BOM 付きでも読める。データがあって目印のない DB はフラッシュしない |
 | `TestFilterScore` | 現セッションの新しい記録が cos 0.86 で先頭にあるとき、cos 0.95〜0.99 の同じセッションの 3 日前の記録と別セッションの 1 日前の記録が、相対カットと `min_score` を生き残る。並び順は引き続き最終スコアによる |
@@ -2381,6 +2388,7 @@ n3mcmcp-lite/
 | `TestLongSaveAtomic`（*Redis*） | 長文の保存の途中で埋め込みが失敗しても `doc:` / `docsha:` のキーが残らず、そのあと同じ本文を保存できる。ガード、親、すべてのチャンクは 1 つの `SAVE_WITH_GUARD` スクリプトで書かれる |
 | `TestGuardScriptAndPortReload`（*Redis*） | スクリプトを送るところで中断した保存（短文と長文）はガードを残さず、やり直しは `saved`（レコード 1 件、または親とすべてのチャンク）、3 回目は `duplicate`。ガード、親、チャンクに TTL がある。失敗のあとは、この保存の id を持つガードだけを削除する。開いたままの MCP エントリーは、`server_port` を変えたあとの 2 回目の呼び出しを新しいポートに送る。読めない `config.json` では、最後に読めた設定（同じ `owner_id`）を使い続ける |
 | `TestIndexFailure` | `FT.CREATE` が `unknown command` で失敗しても `_main()` が終わらない。ツールは「Redis Stack が必要」の案内を返す。次の呼び出しで索引を再試行する。既存の索引の `DIM` が違えば `index_dim_mismatch` が加わる |
+| `TestIndexFtsField`（*Redis*） | 新しい記録の `content_fts` と `content_ngram` に、`[user]` や `[claude 1/2]` の前置きと `[code omitted]` が入らない（生の `HGET`）。`content` は前置き付きのまま。フェンスを含む MCP の `save_memory` の `content_fts` にも `[code omitted]` が入らない。クエリ `claude`・`omitted` は、本文にその語を持たないフックの記録に BM25 で当たらない。`content_fts` のない古い形の索引（`content TEXT`）は `ensure_index()` が 1 回だけ作り直し（ハッシュは残る）、次の呼び出しでは作り直さない。`DIM` が違う索引は作り直さず、`index_dim_mismatch` を出す |
 | `TestEnforceEphemeral`（*Redis*） | 空の DB や `mem:` / `doc:` / `docsha:` のキーだけの DB では `CONFIG SET` される。ほかのキーがある DB ではされず、`shared_redis` が加わる。サーバーのほかの DB にキーがあるときや `INFO` が拒否されたときも、設定を変えずに `shared_redis` が加わる。拒否された `CONFIG` は接続を失敗させずに `config_refused` を加える。**ほかの DB に残さない**：ほかの DB のテストが DB 1 に置くキーは、60 秒の有効期限（`EX 60`）付きで置き、`finally` で消す。空の DB のテストは、接続する前に DB 1 のそのキーを消す。**理由**：イメージの既定の保存の決まりを持つテスト用 Redis は、そのキーがある間にスナップショットを書くことがある。再起動するとキーをまた読み込み、空の DB のテストがほかの DB のキーを見て、最初の 1 回だけ `shared_redis` で落ちる（毎回新しい Redis を起動する CI では起きない） |
 | `TestCodeOmittedOnSave`（*Redis*） | 短い本文も親ドキュメントも、コードブロックを `[code omitted]` に置き換えて保存される（生の `HGET` で確認）。インラインのバッククォートは残る。閉じていないフェンスは終わりまで置き換える。コードブロックの中だけが違う 2 つの本文は完全一致の重複になる。`skip_code_blocks: true` は本文を断る。フェンスのまま保存された記録（1.11.x 以前）も `[code omitted]` と見える |
 | `TestSurroundingWhitespace`（*Redis*） | 外側の `strip()`：`' \nAAA\n '` は `AAA` として保存される。親ドキュメントは中の改行を残し、外側の空白だけを落とす。前後の空白だけが違う本文は完全一致の重複になる。空白だけの本文は `empty content` で拒否される |
@@ -2394,6 +2402,7 @@ n3mcmcp-lite/
 | `TestGuardNx`（*Redis*） | 同じ内容を同時に 2 回保存してもレコードは 1 つ。ガードを取ったあとの書き込みが失敗するとガードを解放する |
 | `TestAccessCountNoGhost`（*Redis*） | 検索と `access_count` の加算の間に失効したか削除されたレコードは、`HINCRBY` で作り直されない：キーが 1 つも残らない（`access_count` だけのハッシュも、`mem:sha:` / `docsha:` ガードも残らない） |
 | `TestRecallOrphanChunks`（*Redis*） | 親があるとき、`recall_thread` は親を 1 回だけ出し（`[doc×N]`、全文）、チャンクは出さない。`doc:<id>` を消したあとは、`not_found` ではなく、その turn の各チャンクをチャンクの本文で出す |
+| `TestRecallThreadSameSession`（*Redis*） | 2 つの `session_id` の往復を交互に保存すると、`recall_thread` の前後には起点と同じ `session_id` の往復だけが出る。`session_id` が空の記録では、起点の turn だけを返す |
 | `TestDeleteIdPrefix`（*Redis*） | `doc:<uuid>` を渡した `delete_memory` は、前置きのない親の ID と同じく連鎖削除する。`mem:<uuid>` は単独レコードとそのガードを消す。応答の `id` は前置きのない UUID。`doc:doc:<uuid>`（前置き 2 つ）は `not_found` |
 | `TestNudgeOnErrors` | 数値でない `importance` の JSON、読めない `since` の `Error:`、予期しない例外、`search_memory` のバックエンドエラーが、どれもエラーの文で始まり、リマインダで終わる |
 | `TestConditionalWrites`（*Redis*） | `INCR_IF_EXISTS`・`HSET_IF_EXISTS` は、レコードがあれば書き込んで TTL を保ち、なければ何も作らない。`SCAN` のあとに消えたレコードに対する `repair_memory` はキーを作らず、`reembedded` に数えない。保存・検索・修復のあと、テスト DB のすべてのキー（テスト用の印を除く）に TTL がある |
@@ -2414,12 +2423,14 @@ n3mcmcp-lite/
 |---|---|
 | `TestAuditFirst` | どちらのフックの入口も、ほかの何よりも先に `{"ts", "hook", "raw", "payload"}` を `audit.log` に追記する。サーバーと Redis が止まっているときも、stdin が JSON でないとき（`payload` = `{"raw": …}`）も同じ。`raw` は 4,096 文字で切る。`audit.log` への書き込みが失敗してもフックは止まらない |
 | `TestTurnIdHandoff`（*Redis*） | `--hook-submit` は新しい `turn_id` を作り、`turn_id_<session>.txt`（名前は無害化し、64 文字）に書き、それで `[user]` を保存する。`--save-claude-turn` はそれを読み、同じ `turn_id` で `[claude]` を保存する。ファイルは空にしない。ファイルがなければ新しい UUID を使う。画像だけのプロンプトでも新しい `turn_id` を書き、`[user]` は保存しない |
+| `TestStopReadsTurnIdFirst` | `--save-claude-turn` は `turn_id_<session>.txt` を、設定の読み込みと `ensure_server` より前に読む：`ensure_server` の中でファイルを書き換えても（差し替え）、応答は書き換える前の `turn_id` で保存される |
 | `TestTranscriptRecovery`（*Redis*） | Free の transcript の場合（最後のテキストブロックだけ。`tool_result` だけ、`isMeta`、中断の印、スラッシュコマンド、`thinking`、`tool_use`、`isSidechain` の行は飛ばす。末尾の今のプロンプトは飛ばす。中断された応答は見つける）で、直前の応答を直前の `turn_id` で保存する。Stop がすでに保存していれば、完全一致の重複の決まりで新しく何も保存しない。transcript がない、または壊れているときは `transcript_unreadable` を記録し、フックはそれでも検索し、保存する |
 | `TestSystemPrefixes` | `<task-notification>`、`<agent-message from=`、`<system-reminder>` のプロンプトは保存も検索もせず、`turn_id` を保ち、`stage: skipped` を書き、`# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\n\n_No memories found._` を出力する。`<div>` で始まるプロンプトは飛ばさない |
 | `TestRolePrefix`（*Redis*） | 短いメッセージは、`agent_name` `claude-code` とフックの `session_id` を付けて `[user] <text>` として保存する。1,000 文字の本文は、親 `[claude] <body>` とチャンク `[claude 1/N] …` になる。`chunk_threshold` より最大 19 文字長い本文（チャンク 1 つ）は、親とチャンク `[claude] …` になる。長さの判定は前置きを無視する。`[code omitted]` は前置きより前にフェンスを置き換える。`mem:sha:<turn_id>:` / `docsha:<turn_id>:` は前置きを付けた文をそのやりとりの中でハッシュする。そのため MCP が保存した `ok` とフックの `[user] ok` はどちらも保存され、後のやりとりの同じ `[user] ok` はもう一度保存され、1 つの `turn_id` で 2 回保存した同じ応答（Stop フックと transcript からの回収）は `duplicate` になる。`skip_code_blocks: true` では、フェンスのあるメッセージは `skipped_code` になり、`audit.log` に残る |
 | `TestDirectSave`（*Redis*） | サーバーがない（ポートにほかのフォルダのサーバーがいる、サーバーがまだ起動中、も同じ）とき、フックは直接保存する：同じレコードと前置き、`embedding` フィールドなし、TTL あり。`sentence_transformers` は import されない（`sys.modules` で確かめる）。後の `/repair` がベクトルを足す。何もキューに入れない |
 | `TestRedisDown` | Redis に届かない（サーバーあり → `/buffer` が 503、サーバーなし → 直接保存が失敗）とき、フックは exit 0 で終わり、`audit.log` が文を持ち、通知 `redis_unreachable` は `docker start redis-stack` の案内を含み、次の検索の出力に出る。次に保存が成功した後で消える |
 | `TestHookSearchOutput` | フックは `# Recalled Memory Context`、`Source: N3MC Lite (7-day working memory)`（空の塊とどの代わりの出力にも）、`Search query: …` と Lite の行（`### [<id>] turn=… score=… saved=…`）を出力する。空なら `_No memories found._`。サーバーがなければ `_(memory search unavailable: <reason>)_`。表示の時期が来た通知は見出しのすぐ後 |
+| `TestHookSearchException` | `notices.json` の `last_shown` が文字列や壊れた値のとき、通知は出され、`last_shown` に今の時刻が書かれる。検索、描画、代わりの出力が例外を出しても（差し替え）、`--hook-submit` は `_(memory search unavailable: <例外の型>)_` を出力し、`[user]` を新しい `turn_id` で保存する |
 | `TestHookExitStatus` | `n3mc-lite-hook` と `n3mc-lite-stop-hook` は、上のどの経路でも exit 0 で終わる |
 
 ### Layer 6: `tests/test_api.py`
@@ -2444,6 +2455,8 @@ n3mcmcp-lite/
 |---|---|
 | `TestServerDecision` | 正常 / 別の `code_version` / 別の `root` / `root` がなく確かめられない。先に `/shutdown`。PID ファイルの番号でプロセスを止めない。死んだ PID ファイルで待たない |
 | `TestServerStart` | プラットフォームごとの切り離しのフラグ、stderr は `server.log` へ、`-m n3mc_mcp.cli --run-server`。早く終わった子プロセスは待ちを終わらせ、`server_start_failed` を出し、目印を書く。5 分以内には新しく起動しない。後で成功すれば両方を消す。60 秒たってもまだ起動中の PID ファイルのプロセスは、置き換えも重複もしない（プロセスの作成は偽物） |
+| `TestServerCwd` | `_start_server` の `Popen` の `cwd` はデータフォルダである。このパッケージの親フォルダを今のフォルダにして動かしたときは、そのフォルダである |
+| `TestStaleServerUnstoppable` | 自分の古いサーバーが止まらないとき（差し替え）、`/health` をもう一度見て、`ok` ならそれを使い、答えがなければ起動し、まだ古いサーバーが答えるなら使わない（`ensure_server` は使えるサーバーなしで戻り、フックは直接保存し、検索は `an old N3MC Lite memory server could not be stopped` を出す） |
 | `TestNoProxy` | `HTTP_PROXY` がほかのローカルのサーバーを指していても、`_get` は N3MC Lite のサーバーに届き、プロキシには何も届かない |
 | `TestCommands` | `--search` → `max_chars` なしの `/search`。`--search --since/--until` はそのまま渡す。読めない `--since` は `Error:` の文を stderr に出し、exit 2 で終わる。`--buffer` → `/tools/save_memory?nudge=0`。`--list` → `list_memories`。`--recall-thread` → `--before` / `--after` 付きの `recall_thread`。`--delete` → `delete_memory`。`--delete-session` → `delete_memories_by_session`。`--repair` → `repair_memory`。どれも応答の文をそのまま出力する。`--until 9999-12-31` と `--since 1969-12-31` は `Error:` の 1 行を stderr に出して exit 2 で終わり、`search_memory` / `/search` は §4.3.1 の `Error:` の文を返す（`/search` は 400） |
 | `TestServerPidAndIdentity` | `_write_own_pid` は、別の番号の入った PID ファイルを上書きし、ないファイルは作る。`run_server` はそれを 2 回呼び、2 回目は待ち受けの前。PID ファイルのサーバーが別のポートで待ち受け、その `/health` がこのフォルダを返すとき、`_handle_other_port` はそのポートに `/shutdown` を送る。`redis_url_mismatch` を出したあと、`redis` の一致する自分のサーバーが答えると消える。`run_server` は Redis への接続とモデルの読み込みより前に `code_version` を計算し、その値を `create_app(..., code_version=...)` に渡す |
@@ -2483,6 +2496,7 @@ n3mcmcp-lite/
 | テストクラス | テスト内容 |
 |---|---|
 | `TestInit` | `--init` は、2 つのフックを絶対パス（スラッシュ区切り、空白があるときだけ引用符）で書き、`PERMISSION_RULES` を書く。もう一度実行しても何も書かない。変える前にバックアップを作る。不正な `settings.json` は変えず、終了コード 1。自分の入口・`-m`・パッケージのスクリプトの形は置き換え、重複させない（バックスラッシュで書かれていても同じ） |
+| `TestInitNonStringCommand` | `command` が null や数のフックの項目は残り、`--init` は例外で終わらずに自分の項目を足す |
 | `TestKeepsOtherProducts` | Free の `n3mc-hook` / `n3mc-stop-hook` の項目、Pro の `python ".../n3mc_hook.py"` の項目、ほかのどのフックも残し、知らせる。Free 自身の見分け方 — その規則をここに書く：実行ファイル `n3mc-hook` / `n3mc-stop-hook`（`.exe` の有無を問わず）、`-m n3memorycore.n3mc_hook` / `-m n3memorycore.n3mc_stop_hook`、または Free のパッケージのフォルダの中のスクリプト `n3mc_hook.py` / `n3mc_stop_hook.py` — は Lite の項目に当たらない |
 | `TestPluginEnabled` | `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` が true のとき、`--init` はフックを登録せず、許可ルールを足し、§12 のメッセージを出力する。プラグインの許可スクリプトは、`settings.json` に見つけた `--init` のフックを知らせる |
 | `TestNoMcpInClaudeCode` | `plugin.json` に `mcpServers` がない。`hooks.json` には、§8 のコマンドの `SessionStart`、`UserPromptSubmit`、`Stop` がある。`--init` は `~/.claude.json` にも `.mcp.json` にも MCP サーバーを足さない。そこにある古い `n3mc-workingmemory` の項目は知らせるが、直さない |
@@ -2682,7 +2696,7 @@ LLM の自発性に依存せず保存を保証したい場合、**MCP の建付�
 5. **修復**：サーバーを使えるときは、`POST /repair` `{}`（1 回分：`ensure_index()` と、欠けているベクトル最大 200 件、§3.10）を、待ち時間 10 秒で送る。失敗や時間切れは stderr の 1 行。サーバーがなければ飛ばす。
 6. **直前の応答**：`transcript_path` から Claude の直前の応答を読む（12.5）。あれば、`role = "claude"` と、`turn_id_<session>.txt` にある `turn_id`（直前のやりとり。ファイルがなければ新しい UUIDv4 を作り、そのファイルに書く）で保存する — §12.6。Stop フックがすでに保存していれば、保存は `duplicate` と答え、2 回は保存しない。
 7. **新しいやりとり**：新しい `turn_id`（UUIDv4）を作り、`turn_id_<session>.txt` に書く — 画像だけのプロンプトでも同じ。
-8. **検索**：文が空でなければ、`query` = 文、`session_id` = フックの `session_id`、`max_chars` = `context_max_chars` で `POST /search` を送り、応答の `text` を出力する。文が空（画像だけ）なら、`# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\n\n_No memories found._\n` を出力する。サーバーがないか、エラーのときは、12.7 の代わりの出力を出す。
+8. **検索**：文が空でなければ、`query` = 文、`session_id` = フックの `session_id`、`max_chars` = `context_max_chars` で `POST /search` を送り、応答の `text` を出力する。文が空（画像だけ）なら、`# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\n\n_No memories found._\n` を出力する。サーバーがないか、エラーのときは、12.7 の代わりの出力を出す。**検索と描画で例外が起きても、手順 9 は行う**：代わりの出力を作る途中（`notices.json` の読み書き）を含めて例外を捕まえ、`# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\n\n_(memory search unavailable: <例外の型>)_\n` を出力し、メッセージを保存する。そうしないと、メッセージが保存されない（新しい `turn_id` は手順 7 で書いてある）。
 9. **メッセージを保存する**：文が空でなければ、`role = "user"` と新しい `turn_id` で保存する（§12.6）。
 
 - このフックのレコードは、どれも `agent_name = "claude-code"` と、`session_id` = フックの `session_id` を持つ。
@@ -2691,7 +2705,7 @@ LLM の自発性に依存せず保存を保証したい場合、**MCP の建付�
 
 ### 12.4 `--save-claude-turn` と `--stop`
 
-**`--save-claude-turn`** は Stop の JSON（`session_id`、`stop_hook_active`、`last_assistant_message`）を読み、`sanitize_surrogates` を当て、`last_assistant_message` が空でなければ、`role = "claude"` と `turn_id_<session>.txt` の `turn_id`（ファイルがなければ新しい UUIDv4 を作り、そのファイルに書く）で保存する — §12.6。ファイルは空にしない（次の `--hook-submit` が上書きする）。**ファイルに書く理由**：フックの完全一致の重複の確認は同じ `turn_id` の中だけで働く（§3.16）。ファイルのないまま Stop が新しい UUID で応答を保存し、それを書かずにいると、次の `--hook-submit` が transcript から同じ応答を回収したとき（手順 6）に別の新しい UUID になり、同じ応答が 2 回保存される（たとえば `--init` の直後の最初の応答）。1 つのやりとりで Stop が 2 回動いたら、2 回目の保存は `duplicate` である。stdout には何も出力しない。
+**`--save-claude-turn`** は Stop の JSON（`session_id`、`stop_hook_active`、`last_assistant_message`）を読み、`sanitize_surrogates` を当て、`last_assistant_message` が空でなければ、`role = "claude"` と `turn_id_<session>.txt` の `turn_id`（ファイルがなければ新しい UUIDv4 を作り、そのファイルに書く）で保存する — §12.6。ファイルは空にしない（次の `--hook-submit` が上書きする）。**`turn_id_<session>.txt` は、設定の読み込みとサーバーの確認（`ensure_server`）より前に読む**（ファイルがないときの新しい UUIDv4 も、このときに作って書く）。サーバーの起動や入れ替えには時間がかかることがあり、その間に次の発言の `--hook-submit` が同じファイルに新しい `turn_id` を書くと、この応答が次のやりとりの `turn_id` で保存される。**ファイルに書く理由**：フックの完全一致の重複の確認は同じ `turn_id` の中だけで働く（§3.16）。ファイルのないまま Stop が新しい UUID で応答を保存し、それを書かずにいると、次の `--hook-submit` が transcript から同じ応答を回収したとき（手順 6）に別の新しい UUID になり、同じ応答が 2 回保存される（たとえば `--init` の直後の最初の応答）。1 つのやりとりで Stop が 2 回動いたら、2 回目の保存は `duplicate` である。stdout には何も出力しない。
 
 **`--stop`**（セッションの終わりの片付け。サーバーは止め**ない** — 止めるのは `--stop-server`、§13）：
 
@@ -2764,7 +2778,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 1. データフォルダの `config.json` を読み込む（作る）（§6）。
 2. `~/.claude/settings.json` を読む。**ないファイルは `{}` として読む**。手順 6 で作り、控えは取らない（控えるものがない）。要れば `~/.claude/` も作る。読めないファイル、または型の違う `hooks` / `permissions` / `permissions.allow`：何も変えず、理由を出力し、exit 1。
 3. **プラグインは有効か？** `settings["enabledPlugins"]["n3mc-workingmemory@neuralnexusnote"]` が `true` なら、プラグインがフックを登録する：自分の項目を（あれば）消して何も足さず、`The n3mc-workingmemory plugin is enabled and registers the N3MC Lite hooks, so n3mc-lite --init added no hooks.` を出力し、手順 5 に進む。
-4. **フックを合わせる**：`UserPromptSubmit` と `Stop` について、自分のものでない項目はすべて残し（`n3mc` を含む残したコマンドは、それぞれ `Another N3MC hook is registered for <event> and was left in place: <command>` で知らせる）、項目 `{"hooks": [{"type": "command", "command": resolve_cmd(<entry point>), "timeout": 60}]}` を 1 つ足す。
+4. **フックを合わせる**：`UserPromptSubmit` と `Stop` について、自分のものでない項目はすべて残し（`n3mc` を含む残したコマンドは、それぞれ `Another N3MC hook is registered for <event> and was left in place: <command>` で知らせる）、項目 `{"hooks": [{"type": "command", "command": resolve_cmd(<entry point>), "timeout": 60}]}` を 1 つ足す。`command` が文字列でないフックの項目（null など）は、自分のものではないとして残す（知らせの対象にもしない）。
 5. **許可ルール**：§8 の `PERMISSION_RULES`（`python -m n3mc_mcp.cli` と `n3mc-lite` の形）のうち欠けているものを足す。何も消さない。
 6. **何かが変わったときだけ書く**：ファイルを `settings.json.bak-n3mc-lite-<YYYYmmddHHMMSS>` に写し、同じフォルダに一時ファイルを書いて、`os.replace` する。
 7. **古い MCP の登録**：`~/.claude.json` か `./.mcp.json` にある `n3mc-workingmemory` の項目を、§8 のとおりに知らせる（読むだけ）。
@@ -2785,6 +2799,8 @@ def _tokens(command: str) -> list:
         return command.split()
 
 def is_own_hook(command: str, event: str) -> bool:
+    if not isinstance(command, str):                   # null or another type: not ours, keep it
+        return False
     exe_name, module = OURS[event]
     toks = _tokens(command)
     if not toks:
