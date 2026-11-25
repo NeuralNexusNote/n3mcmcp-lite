@@ -1,4 +1,4 @@
-# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.0
+# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.2
 
 **Claude Code に、7 日で消える作業メモリを。同じ記憶を、Claude のデスクトップアプリでも。**
 
@@ -159,7 +159,7 @@ Claude Code の中で実行します。
 
 プラグインは 3 つのフックを登録します。
 `SessionStart` は、CLI のコマンドを事前に許可します。
-`UserPromptSubmit` と `Stop` は、`uvx --from n3memorycore-mcp-lite==2.0.1 …` で動きます。
+`UserPromptSubmit` と `Stop` は、`uvx --from n3memorycore-mcp-lite==2.0.2 …` で動きます。
 この版の番号は、パッケージの版に合わせて固定されています。
 
 **(b) pip**
@@ -211,7 +211,7 @@ pip で入れた場合：
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.1", "n3mc-workingmemory"],
+      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"],
       "env": {
         "N3MC_AGENT_NAME": "claude-desktop"
       }
@@ -426,7 +426,7 @@ CLI は、自動保存を促す一文を付けずに表示します。Claude Cod
 | `delete_memories_by_session` | `--delete-session <session_id>` | ある `session_id` の記憶をまとめて消す |
 | `repair_memory` | `--repair` | 索引がなければ作り直し、ベクトルのないレコードにベクトルを足す（1 回に 200 件まで） |
 
-- Claude Code では、`--search`、`--buffer`、`--list`、`--recall-thread`、`--repair`、`--stop` を事前に許可します（`permissions.allow`）。形は、pip では `python -m n3mc_mcp.cli` と `n3mc-lite`、プラグインでは `uvx --from n3memorycore-mcp-lite==2.0.1 n3mc-lite` です。
+- Claude Code では、`--search`、`--buffer`、`--list`、`--recall-thread`、`--repair`、`--stop` を事前に許可します（`permissions.allow`）。形は、pip では `python -m n3mc_mcp.cli` と `n3mc-lite`、プラグインでは `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` です。
 - **`--delete` と `--delete-session` は、事前に許可しません。** 元に戻せないので、Claude Code が毎回たずねます。
 - 手で実行する `--search` には、大きさの制限がありません。フックの塊と MCP の `search_memory` の結果は、`context_max_chars` に収めます。
 

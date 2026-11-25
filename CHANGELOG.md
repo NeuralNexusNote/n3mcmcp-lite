@@ -7,6 +7,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
+## [2.0.2] — 2026-11-25
+
+Documentation only; the package code is the same as 2.0.1.
+
+### Changed
+- **Generation from the specification is the primary way to install.** The
+  README starts with the setup steps: make an empty folder, put the
+  specification in it, open the folder in Claude Code (desktop app: **Code**
+  tab → **+ New** → **Local** → **Open folder…**; or `claude` in a terminal) and
+  ask it to implement n3mcmcp-lite. `pip` and the plugin remain as the second way.
+- **Desktop app registration is automatic in that setup.** The AI backs up
+  `claude_desktop_config.json`, replaces only the `n3mc-workingmemory` entry and
+  adds `mcp__n3mc-workingmemory` to `permissions.deny` in
+  `~/.claude/settings.json`, so the desktop app's Code tab keeps using the hooks.
+- **Restart guidance.** The final setup message starts with a restart heading
+  and explains how to quit Claude completely (the taskbar icon, or sign out of
+  Windows); after the restart you open the same session and send "I restarted".
+- **README is shorter.** The disclaimer (no support, use at your own risk, back
+  up first) is right after the setup steps. Detailed sections (configuration,
+  ranking formula, multilingual handling, encoding, development, extending, and
+  what changed in 2.0.0) moved out of the README; they are in the specification
+  and in this changelog.
+- The specification no longer carries development history.
+- The plugin and the marketplace entry are version 2.0.2, and the plugin's
+  `uvx` commands and pre-approved rules are pinned to
+  `n3memorycore-mcp-lite==2.0.2`.
+
 ## [2.0.1] — 2026-11-22
 
 ### Fixed

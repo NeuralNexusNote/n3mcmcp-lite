@@ -39,12 +39,12 @@ class TestThinNames:
         assert proj["scripts"]["n3mc-workingmemory"] == "n3mc_mcp.__main__:run"
         assert proj["scripts"]["n3mc-mcp-lite"] == "n3mc_mcp.__main__:run"
         assert proj["scripts"]["n3mc-lite"] == "n3mc_mcp.cli:main"
-        assert proj["version"] == "2.0.1" and "mcp>=1.0.0,<2.0.0" in proj["dependencies"]
+        assert proj["version"] == "2.0.2" and "mcp>=1.0.0,<2.0.0" in proj["dependencies"]
 
     def test_server_info(self):
         s = server.build_server()
         opts = s.create_initialization_options()
-        assert opts.server_name == "n3mc-workingmemory" and opts.server_version == "2.0.1"
+        assert opts.server_name == "n3mc-workingmemory" and opts.server_version == "2.0.2"
         assert opts.instructions == INSTRUCTIONS
 
 
@@ -314,7 +314,7 @@ class TestThinNoModel:
                     proc.kill()
         assert len(lines) == 2
         replies = [json.loads(l) for l in lines]
-        assert replies[0]["result"]["serverInfo"] == {"name": "n3mc-workingmemory", "version": "2.0.1"} or \
+        assert replies[0]["result"]["serverInfo"] == {"name": "n3mc-workingmemory", "version": "2.0.2"} or \
             replies[0]["result"]["serverInfo"]["name"] == "n3mc-workingmemory"
         assert len(replies[1]["result"]["tools"]) == 7
 
