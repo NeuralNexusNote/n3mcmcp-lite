@@ -1,4 +1,4 @@
-"""Entry point: python -m n3mc_mcp (= the MCP thin client, run())."""
+"""Entry point: python -m n3mc_mcp — the MCP thin client (spec §4.6)."""
 import os as _os
 import sys as _sys
 
@@ -15,7 +15,11 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         pass
 
-from n3mc_mcp.server import run  # noqa: E402
+
+def run():
+    from n3mc_mcp.server import run as _run
+    _run()
+
 
 if __name__ == "__main__":
     run()

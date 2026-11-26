@@ -1,7 +1,5 @@
-"""Stop hook entry `n3mc-lite-stop-hook` (spec §12.1): step 0 appends the audit record, then
-`python -m n3mc_mcp.cli --save-claude-turn` and `python -m n3mc_mcp.cli --stop`, both with the same
-stdin. Always exits 0.
-"""
+"""Stop hook entry (spec §12.1): audit.log first, then `python -m n3mc_mcp.cli --save-claude-turn`,
+then `python -m n3mc_mcp.cli --stop`, both with the same stdin. Always exits 0."""
 import os as _os
 import sys as _sys
 
@@ -18,36 +16,27 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         pass
 
-import sys
-
 for _stream_name in ("stdin", "stdout", "stderr"):
-    _stream = getattr(sys, _stream_name, None)
+    _stream = getattr(_sys, _stream_name, None)
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
-import time  # noqa: E402
+import sys  # noqa: E402
 
 from n3mc_mcp import lite_hook  # noqa: E402
 
+HOOK_NAME = "Stop"
+STEPS = (["--save-claude-turn"], ["--stop"])
 
-def main() -> int:
-    deadline = time.monotonic() + lite_hook.CHILD_TIMEOUT
-    try:
-        uvx = ["--uvx"] if "--uvx" in sys.argv[1:] else []
-        data = lite_hook.read_stdin()
-        lite_hook.audit_first("Stop", data)
-        lite_hook.run_step(["--save-claude-turn", *uvx], data, deadline)
-        lite_hook.run_step(["--stop", *uvx], data, deadline)
-    except Exception as e:  # noqa: BLE001
-        try:
-            sys.stderr.write(f"[n3mc-lite] stop hook: {type(e).__name__}: {e}\n")
-        except Exception:  # noqa: BLE001
-            pass
+
+def main(argv=None) -> int:
+    lite_hook.run_hook(HOOK_NAME, STEPS, argv)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
+    sys.exit(0)

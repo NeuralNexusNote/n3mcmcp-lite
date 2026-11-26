@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Claude Code connects through MCP again; the hooks are added to it.**
+  The specification (EN / JP) no longer removes MCP from Claude Code. Claude
+  Code has three valid configurations: MCP only (the default; the model calls
+  `search_memory` / `save_memory`, as in v1.12.2), MCP + hooks (full recall:
+  the hooks save every message and reply and add the matching memories on
+  every turn, and the MCP tools stay available), and hooks only.
+  `n3mc-lite --init` registers the MCP server `n3mc-workingmemory` in Claude
+  Code's user scope (`~/.claude.json`) and pre-approves the memory tools
+  except the two delete tools; `n3mc-lite --init --hooks` adds the hooks.
+  Hooks that are already registered keep running and are registered again by
+  `--init`; `--init` never removes them. Method A registers MCP only unless
+  the user asks for the hooks. The plugin `n3mc-workingmemory` registers the
+  MCP server again (`mcpServers` in `plugin.json`) next to its hooks, so
+  plugin users get MCP + hooks after updating; the new plugin
+  `n3mc-workingmemory-mcp` registers MCP only. `--init` removes
+  `mcp__n3mc-workingmemory` from `permissions.deny`, which the earlier Method A
+  added and which hides the MCP tools from Claude Code. The README shows the
+  three configurations.
+
 ## [2.0.2] — 2026-11-25
 
 Documentation only; the package code is the same as 2.0.1.

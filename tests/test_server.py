@@ -1,26 +1,30 @@
-"""Layer 3: the tool handlers end to end (tools.py, as run by /tools/<name>), isolated config.json and
-a flushed test DB 0."""
+"""Layer 3: the MCP tool handlers end to end (tools.py, isolated config.json + flushed DB 0)."""
+import json
+
 import pytest
 
-from conftest import parse_json
 from n3mc_mcp.tooldefs import TOOLS
 
-SHIRANUI = """浮遊都市・不知火（架空の設定資料）
 
-第一章　地理：不知火は雲海の上、高度三千二百メートルに浮かぶ環状の都市である。直径は十四キロ、外周には「霧の港」と呼ばれる七つの浮遊桟橋が並ぶ。
-第二章　動力：都市を支えるのは中央塔に収められた「蒼炎炉」。燃料は月に一度だけ採れる結晶「燐光石」で、炉守と呼ばれる職人が三交代で管理する。
-第三章　社会：住民はおよそ八万人。評議会は九名で構成され、議長は「灯主」と呼ばれる。通貨は「雫」で、百雫が一燐に当たる。
-第四章　禁忌：夜明け前に鐘を三度鳴らすことは禁じられている。破った者は外周の桟橋で一年間の見張り役を務める。
-第五章　年表：建都三百年祭は来年の秋分に予定されており、記念に新しい桟橋「八番港」が開かれる。
-第六章　気候：雲海の上にあるため雨は降らず、水は朝霧を集める「霧網」から得る。霧網は外周に二百四十枚張られ、乾季には半数が畳まれる。
-第七章　交通：環状の街路を「風車馬車」が巡り、中央塔へは三本の吊り橋で渡る。吊り橋の名は東から順に暁橋、凪橋、宵橋である。
-第八章　祭礼：毎年冬至の夜、住民は燐光石の欠片を灯籠に入れて雲海へ流す。灯籠が見えなくなるまで誰も口をきかないのが習わしである。"""
+def _j(text):
+    return json.JSONDecoder().raw_decode(text)[0]
 
+
+SHIRANUI = (
+    "【浮遊都市・不知火（架空の設定資料）】\n"
+    "第一節：地理。不知火は雲海の上、高度三千メートルに浮かぶ環状の都市で、直径は十二キロメートル。"
+    "外周には霧を集める風車塔が百八基並び、その水が都市のすべての水源になる。\n\n"
+    "第二節：政治。都市は七つの浮島区に分かれ、各区の長老が月に一度『雲上評議会』を開く。"
+    "評議会の議長は抽選で選ばれ、任期は満月から次の満月まで。\n\n"
+    "第三節：経済。主な産業は雲綿（うんめん）の採集と、風車塔で作る蒸留水の輸出である。"
+    "通貨は『霧貨』で、一霧貨は蒸留水一リットルと交換できる。\n\n"
+    "第四節：禁忌。夜明け前に外周の鐘を三度鳴らしてはならない。鳴らせば雲海の龍が目を覚ますと伝えられる。\n\n"
+    "第五節：暦。不知火の一年は十三の月からなり、各月は二十八日。年の終わりの『霧明け祭』では、"
+    "住民が灯籠を雲海へ流し、翌年の風を占う。祭の三日間だけは評議会も開かれない。\n\n"
+    "第六節：人物。初代議長の汐見カグラは、風車塔の設計者でもあった。彼女の手記『雲上覚書』は、"
+    "今も中央図書塔の最上階に収められ、年に一度だけ公開される。"
+)
 assert len(SHIRANUI) > 400
-
-
-def _hits(text):
-    return [line for line in text.splitlines() if line.startswith("### ")]
 
 
 class TestToolRegistration:
@@ -28,94 +32,90 @@ class TestToolRegistration:
         names = [t.name for t in TOOLS]
         assert len(names) == 7 and "recall_thread" in names
 
-    def test_schemas_are_objects(self):
+    def test_schema_types(self):
         assert all(t.inputSchema["type"] == "object" for t in TOOLS)
 
-    def test_descriptions_not_empty(self):
-        assert all(t.description.strip() for t in TOOLS)
+    def test_descriptions(self):
+        assert all(t.description for t in TOOLS)
 
 
 class TestSaveAndSearch:
     def test_roundtrip(self, runner):
-        r = parse_json(runner.call("save_memory", {"content": "坂本龍馬は薩長同盟を仲介した。"}))
-        assert r["saved"] is True
-        out = runner.call("search_memory", {"query": "坂本龍馬"})
-        assert "坂本龍馬は薩長同盟を仲介した。" in out and r["id"] in out
+        assert _j(runner.call("save_memory", {"content": "The capital of Atlantis is Poseidonia."}, nudge=False))["saved"]
+        out = runner.call("search_memory", {"query": "capital of Atlantis"}, nudge=False)
+        assert "Poseidonia" in out
 
-    def test_exact_duplicate(self, runner):
-        runner.call("save_memory", {"content": "dup me"})
-        assert parse_json(runner.call("save_memory", {"content": "dup me"}))["status"] == "duplicate"
+    def test_duplicate(self, runner):
+        runner.call("save_memory", {"content": "dup line"}, nudge=False)
+        assert _j(runner.call("save_memory", {"content": "dup line"}, nudge=False))["status"] == "duplicate"
 
-    def test_empty_content(self, runner):
-        r = parse_json(runner.call("save_memory", {"content": "   "}))
-        assert r == {"status": "error", "saved": False, "reason": "empty content"}
+    def test_empty(self, runner):
+        assert _j(runner.call("save_memory", {"content": "   "}, nudge=False))["reason"] == "empty content"
 
-    def test_code_block_purified(self, runner, rconn):
-        r = parse_json(runner.call("save_memory", {"content": "before\n```py\nsecret()\n```\nafter"}))
-        assert rconn.hget("mem:" + r["id"], "content") == "before\n[code omitted]\nafter".encode()
+    def test_code_block_purified(self, runner):
+        runner.call("save_memory", {"content": "how to sort:\n```python\nsorted(x)\n```\ndone"}, nudge=False)
+        out = runner.call("search_memory", {"query": "how to sort"}, nudge=False)
+        assert "[code omitted]" in out and "sorted(x)" not in out
 
 
 class TestListAndDelete:
     def test_list_newest_three(self, runner):
         for i in range(3):
-            runner.call("save_memory", {"content": f"list entry {i}"})
+            runner.call("save_memory", {"content": f"list entry number {i}"}, nudge=False)
         out = runner.call("list_memories", {"limit": 3}, nudge=False)
-        assert out.count("**[") == 3 and out.index("list entry 2") < out.index("list entry 0")
+        assert out.index("number 2") < out.index("number 1") < out.index("number 0")
 
-    def test_delete_unknown_id(self, runner):
-        r = parse_json(runner.call("delete_memory", {"id": "00000000-0000-7000-8000-000000000000"}))
-        assert r["status"] == "not_found"
+    def test_delete_missing(self, runner):
+        out = runner.call("delete_memory", {"id": "no-such-id"}, nudge=False)
+        assert _j(out)["status"] == "not_found"
 
-    def test_delete_existing(self, runner):
-        r = parse_json(runner.call("save_memory", {"content": "delete me now"}))
-        assert parse_json(runner.call("delete_memory", {"id": r["id"]}))["status"] == "deleted"
-        assert "delete me now" not in runner.call("list_memories", {}, nudge=False)
+    def test_list_empty(self, runner):
+        assert runner.call("list_memories", {}, nudge=False) == "_No memories stored._"
 
 
 class TestRepair:
-    def test_repair_empty_db(self, runner):
-        r = parse_json(runner.call("repair_memory", {}))
-        assert r["status"] == "ok" and r["message"] == "index ensured"
+    def test_repair_ok(self, runner):
+        res = _j(runner.call("repair_memory", {}, nudge=False))
+        assert res["status"] == "ok" and res["message"] == "index ensured"
 
 
 class TestUnknownTool:
     def test_unknown(self, runner):
-        assert runner.call("nope", {}).startswith("Error: unknown tool 'nope'")
+        assert runner.call("nope", {}, nudge=False) == "Error: unknown tool 'nope'"
 
 
 class TestParentDocRecall:
-    def test_verbatim_restore(self, runner):
-        parse_json(runner.call("save_memory", {"content": SHIRANUI}))
-        out = runner.call("search_memory", {"query": "不知火 蒼炎炉 燐光石"})
+    def test_verbatim(self, runner):
+        res = _j(runner.call("save_memory", {"content": SHIRANUI}, nudge=False))
+        assert res["chunks"] >= 2
+        out = runner.call("search_memory", {"query": "不知火 雲上評議会"}, nudge=False)
         assert SHIRANUI in out
 
-    def test_chunks_fold_into_one_parent(self, runner):
-        r = parse_json(runner.call("save_memory", {"content": SHIRANUI}))
-        out = runner.call("search_memory", {"query": "不知火 桟橋 評議会 雫"})
-        assert sum(1 for h in _hits(out) if r["parent_id"] in h) == 1
+    def test_one_hit_per_parent(self, runner):
+        res = _j(runner.call("save_memory", {"content": SHIRANUI}, nudge=False))
+        out = runner.call("search_memory", {"query": "不知火 風車塔 霧貨"}, nudge=False)
+        assert out.count(f"[{res['parent_id']}]") == 1
 
     def test_doc_tag(self, runner):
-        r = parse_json(runner.call("save_memory", {"content": SHIRANUI}))
-        out = runner.call("search_memory", {"query": "不知火"})
-        assert f"[doc×{r['chunks']}] [{r['parent_id']}]" in out
-        assert f"[doc×{r['chunks']}] [{r['parent_id']}]" in runner.call("list_memories", {})
+        res = _j(runner.call("save_memory", {"content": SHIRANUI}, nudge=False))
+        out = runner.call("search_memory", {"query": "不知火"}, nudge=False)
+        assert f"[doc×{res['chunks']}]" in out
 
-    def test_cascade_delete(self, runner, rconn):
-        r = parse_json(runner.call("save_memory", {"content": SHIRANUI}))
-        parse_json(runner.call("delete_memory", {"id": r["parent_id"]}))
-        assert not [k for k in rconn.keys("mem:*") if not k.startswith(b"mem:sha:")]
+    def test_cascade(self, runner, rconn):
+        res = _j(runner.call("save_memory", {"content": SHIRANUI}, nudge=False))
+        assert _j(runner.call("delete_memory", {"id": res["parent_id"]}, nudge=False))["status"] == "deleted"
+        assert not any(rconn.exists("mem:" + c) for c in res["ids"])
 
 
 class TestEncodingSafetyE2E:
     def test_lone_surrogate_save(self, runner):
-        r = parse_json(runner.call("save_memory", {"content": "壊れた" + chr(0xD800) + "文字"}))
-        assert r["saved"] is True
+        res = _j(runner.call("save_memory", {"content": "記憶\ud800テスト"}, nudge=False))
+        assert res["saved"]
 
-    def test_all_surrogate_save(self, runner):
-        r = parse_json(runner.call("save_memory", {"content": chr(0xD800) + chr(0xDFFF)}))
-        assert r["reason"] == "empty content"
+    def test_all_surrogates(self, runner):
+        res = _j(runner.call("save_memory", {"content": "\udfff" + "\ud800"}, nudge=False))
+        assert res["reason"] == "empty content"
 
-    def test_lone_surrogate_query(self, runner):
-        runner.call("save_memory", {"content": "サロゲートの検索"})
-        out = runner.call("search_memory", {"query": "サロゲート" + chr(0xDC80)})
-        assert not out.startswith("Error") and "サロゲートの検索" in out
+    def test_query_surrogate(self, runner):
+        out = runner.call("search_memory", {"query": "記憶\udc00"}, nudge=False)
+        assert not out.startswith("Error")

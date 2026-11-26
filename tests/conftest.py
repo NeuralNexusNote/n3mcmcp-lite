@@ -1,179 +1,122 @@
-"""Shared fixtures (spec §9).
+"""Shared fixtures (spec §9): an isolated data folder and home folder for every test, the test
+Redis (N3MC_REDIS_TEST_URL, no default) with the two safety checks, and a deterministic stand-in
+for the embedding model.
 
-- Every test runs with N3MC_DATA_DIR, HOME and USERPROFILE pointed at temporary folders, so no test
-  reads or writes ~/.n3mc-workingmemory or the real ~/.claude/settings.json.
-- The temporary config.json holds the test Redis URL and a server_port of this test session (a free
-  port taken once; never 18520-18524).
-- The HTTP senders of the CLI (_get, _post, _request_shutdown) and the process creation (_popen) are
-  replaced by fakes unless a test brings its own server.
-- The embedding model is a deterministic stand-in (no download): vectors share a common component, so
-  unrelated texts have a cosine of about 0.8 and texts with shared tokens come closer to 1, as with
-  multilingual-e5.
-- Redis tests need N3MC_REDIS_TEST_URL. There is no default. A URL equal to the live redis_url, or a DB
-  that holds data and has no test marker, is refused (the test is skipped with the reason).
-
-monkeypatch.undo() is never called: the real paths would come back in the middle of a test.
-"""
+Nothing here reads or writes the real ~/.n3mc-workingmemory, ~/.claude or ~/.claude.json: the
+autouse fixture points N3MC_DATA_DIR, HOME and USERPROFILE at temporary folders before each test.
+monkeypatch.undo() is never called."""
 import hashlib
 import json
 import math
 import os
 import socket
-from pathlib import Path
-from urllib.parse import urlparse
+import uuid
 
 import pytest
 
-REAL_HOME = Path(os.path.expanduser("~"))
-REDIS_TEST_URL = os.environ.get("N3MC_REDIS_TEST_URL", "").strip() or None
-LIVE_ENV_REDIS_URL = os.environ.get("N3MC_REDIS_URL", "").strip() or None
-TEST_MARKER = "__n3mc_test_db__"
-NOT_A_TEST_DB = ("N3MC_REDIS_TEST_URL points at a Redis that holds data and is not marked as a test DB")
-UNREACHABLE_URL = "redis://127.0.0.1:1/0"
+REDIS_TEST_URL = os.environ.get("N3MC_REDIS_TEST_URL") or None
+TEST_MARK = "__n3mc_test_db__"
+
+# Captured at import, before any fixture changes the environment.
+_REAL_HOME = os.path.expanduser("~")
+_REAL_DATA_DIR = os.environ.get("N3MC_DATA_DIR") or os.path.join(_REAL_HOME, ".n3mc-workingmemory")
+REAL_HF_HOME = os.environ.get("HF_HOME") or os.path.join(_REAL_HOME, ".cache", "huggingface")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def norm_redis_url(url):
+def read_live_redis_url(path):
+    """redis_url of a config.json read like the server reads it (utf-8-sig), or None."""
     try:
-        p = urlparse(url)
-        host = (p.hostname or "localhost").lower()
-        if host in ("localhost", "::1"):
-            host = "127.0.0.1"
-        path = (p.path or "").strip("/")
-        return host, p.port or 6379, int(path) if path else 0
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def live_config_redis_url(home: Path = REAL_HOME):
-    """redis_url of the user's real config.json (read with utf-8-sig, like the server)."""
-    data_dir = os.environ.get("N3MC_DATA_DIR_LIVE") or str(home / ".n3mc-workingmemory")
-    p = Path(data_dir) / "config.json"
-    try:
-        obj = json.loads(p.read_text(encoding="utf-8-sig"))
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        url = data.get("redis_url") if isinstance(data, dict) else None
+        return url if isinstance(url, str) else None
     except (OSError, ValueError):
         return None
-    url = obj.get("redis_url") if isinstance(obj, dict) else None
-    return url if isinstance(url, str) else None
+
+
+def _norm_url(url):
+    return (url or "").strip().rstrip("/").lower()
 
 
 def refusal_reason(test_url, live_urls):
-    """Why the test URL must not be used (None when it may)."""
+    """Why the suite refuses to use test_url, or None."""
     if not test_url:
         return "N3MC_REDIS_TEST_URL is not set"
-    t = norm_redis_url(test_url)
     for live in live_urls:
-        if live and norm_redis_url(live) == t:
-            return f"N3MC_REDIS_TEST_URL is the live Redis ({live}); refusing to run the Redis tests"
+        if live and _norm_url(live) == _norm_url(test_url):
+            return f"N3MC_REDIS_TEST_URL is the same as the live redis_url ({live}); refusing to flush it"
     return None
 
 
-SAFETY_REASON = refusal_reason(REDIS_TEST_URL, [LIVE_ENV_REDIS_URL, live_config_redis_url()])
+def _live_urls():
+    urls = [os.environ.get("N3MC_REDIS_URL")]
+    urls.append(read_live_redis_url(os.path.join(_REAL_DATA_DIR, "config.json")))
+    return [u for u in urls if u]
+
+
+LIVE_URLS = _live_urls()
+REFUSAL = refusal_reason(REDIS_TEST_URL, LIVE_URLS)
 
 
 def _free_port():
-    s = socket.socket()
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
     return port
 
 
-SESSION_PORT = _free_port()
-while SESSION_PORT in (18520, 18521, 18522, 18523, 18524):
-    SESSION_PORT = _free_port()
+TEST_PORT = _free_port()
+DEAD_URL = f"redis://127.0.0.1:{_free_port()}/0"   # nothing listens there
+assert TEST_PORT not in (18520, 18521, 18522, 18523, 18524)
 
 
-# ── the deterministic embedding ──────────────────────────────────────────────
-
-class FakeModel:
-    dim = 768
-    COMMON = 2.0
-
-    def __init__(self):
-        self.calls = []
-
-    def vector(self, text):
-        from n3mc_mcp import processor
-        bag = [0.0] * self.dim
-        for tok in processor.prepare_query(text).lower().split():
-            h = int(hashlib.md5(tok.encode("utf-8")).hexdigest(), 16)
-            bag[1 + h % (self.dim - 1)] += 1.0 if (h >> 40) & 1 else -1.0
-        n = math.sqrt(sum(x * x for x in bag)) or 1.0
-        v = [b / n for b in bag]
-        v[0] = self.COMMON
-        m = math.sqrt(sum(x * x for x in v))
-        return [x / m for x in v]
-
-    def encode(self, texts, normalize_embeddings=True):
-        out = []
-        for t in texts:
-            self.calls.append(t)
-            body = t.split(": ", 1)[1] if t.startswith(("passage: ", "query: ")) else t
-            out.append(self.vector(body))
-        return out
+def fake_embed(text):
+    """Deterministic 768-d vector: a shared base direction plus a bag of hashed tokens. Unrelated
+    texts land near cos 0.8 (like e5), identical texts at 1.0, overlapping texts in between."""
+    body = text.split(": ", 1)[-1]
+    from n3mc_mcp import processor as P
+    v = [0.0] * 768
+    for t in P.prepare_query(body).lower().split():
+        h = int(hashlib.md5(t.encode("utf-8")).hexdigest(), 16)
+        v[1 + h % 767] += 1.0
+    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    v = [x / n for x in v]
+    v[0] = 2.0
+    n = math.sqrt(sum(x * x for x in v))
+    return [x / n for x in v]
 
 
-# ── fake HTTP ────────────────────────────────────────────────────────────────
-
-def no_server(*_a, **_k):
-    from n3mc_mcp import cli
-    raise cli._NotSent("ConnectionRefusedError: no server in this test")
-
-
-def no_popen(*_a, **_k):
-    raise OSError("process creation is disabled in this test")
-
-
-def route_http_to(monkeypatch, client, port):
-    """Route the CLI's HTTP senders to a FastAPI TestClient for `port`."""
-    from n3mc_mcp import cli
-    headers = {"Host": f"127.0.0.1:{port}"}
-
-    def _get(p, path, timeout=5):
-        if int(p) != int(port):
-            raise cli._NotSent("ConnectionRefusedError: nothing on that port")
-        r = client.get(path, headers=headers)
-        return r.status_code, (r.json() if r.content else {})
-
-    def _post(p, path, body, timeout=30):
-        if int(p) != int(port):
-            raise cli._NotSent("ConnectionRefusedError: nothing on that port")
-        r = client.post(path, content=json.dumps(body), headers=headers)
-        try:
-            return r.status_code, r.json()
-        except ValueError:
-            return r.status_code, {}
-
-    def _shutdown(p, root):
-        return _post(p, "/shutdown", {"root": str(root)})
-
-    monkeypatch.setattr(cli, "_get", _get)
-    monkeypatch.setattr(cli, "_post", _post)
-    monkeypatch.setattr(cli, "_request_shutdown", _shutdown)
+def write_test_config(data_dir, **extra):
+    cfg = {"owner_id": str(uuid.uuid4()), "local_id": str(uuid.uuid4()),
+           "redis_url": REDIS_TEST_URL or DEAD_URL, "server_port": TEST_PORT}
+    cfg.update(extra)
+    os.makedirs(data_dir, exist_ok=True)
+    with open(os.path.join(data_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    return cfg
 
 
-# ── fixtures ─────────────────────────────────────────────────────────────────
+def _no_server(*_a, **_k):
+    raise ConnectionRefusedError("no N3MC Lite server in tests")
 
-@pytest.fixture(scope="session", autouse=True)
-def stop_leftover_test_server():
-    """Safety net: a server a test started on the session port (data folder under the pytest temp
-    folder) is asked to stop when the session ends."""
-    yield
-    from n3mc_mcp import cli
-    try:
-        if cli._port_free(SESSION_PORT):
-            return
-        _s, h = cli._request("GET", SESSION_PORT, "/health")
-        root = h.get("root", "")
-        if "pytest-of-" in root:
-            cli._request("POST", SESSION_PORT, "/shutdown", {"root": root})
-            cli._wait_port_free(SESSION_PORT, 15)
-    except Exception:  # noqa: BLE001
-        pass
+
+from n3mc_mcp import cli as _cli  # noqa: E402
+
+ORIG_START_SERVER = _cli._start_server
+START_CALLS = []
+
+
+def _fake_start_server(cfg, max_wait=60):
+    """Tests never start a real server unless they ask for it (they restore ORIG_START_SERVER)."""
+    START_CALLS.append(max_wait)
+    _cli._LAST_REASON = _cli.reason_starting()
+    return False
 
 
 @pytest.fixture(autouse=True)
-def isolated(tmp_path, monkeypatch):
+def isolate(tmp_path, monkeypatch):
     data = tmp_path / "data"
     home = tmp_path / "home"
     data.mkdir()
@@ -181,112 +124,113 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("N3MC_DATA_DIR", str(data))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    for var in ("N3MC_REDIS_URL", "N3MC_SESSION_ID", "N3MC_AGENT_NAME", "CLAUDE_PROJECT_DIR"):
+    monkeypatch.setenv("HF_HOME", REAL_HF_HOME)
+    for var in ("N3MC_REDIS_URL", "N3MC_SESSION_ID", "N3MC_AGENT_NAME", "HTTP_PROXY", "HTTPS_PROXY",
+                "http_proxy", "https_proxy", "CLAUDE_PROJECT_DIR"):
         monkeypatch.delenv(var, raising=False)
-    url = REDIS_TEST_URL if (REDIS_TEST_URL and not SAFETY_REASON) else UNREACHABLE_URL
-    (data / "config.json").write_text(json.dumps({"redis_url": url, "server_port": SESSION_PORT}),
-                                      encoding="utf-8")
-
-    from n3mc_mcp import cli, processor
-    fake = FakeModel()
-    monkeypatch.setattr(processor, "_model", fake)
-    monkeypatch.setattr(processor, "_build_model", lambda name: FakeModel())
-    monkeypatch.setattr(processor, "_last_error", None)
-    monkeypatch.setattr(cli, "_get", no_server)
-    monkeypatch.setattr(cli, "_post", no_server)
-    monkeypatch.setattr(cli, "_request_shutdown", no_server)
-    monkeypatch.setattr(cli, "_popen", no_popen)
+    write_test_config(str(data))
+    from n3mc_mcp import cli
+    from n3mc_mcp import processor as P
+    monkeypatch.setattr(P, "_FAKE_EMBED", fake_embed)
+    monkeypatch.setattr(cli, "_get", _no_server)
+    monkeypatch.setattr(cli, "_post", _no_server)
+    monkeypatch.setattr(cli, "_request_shutdown", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_start_server", _fake_start_server)
+    monkeypatch.setattr(cli, "_LAST_REASON", None)
     monkeypatch.setattr(cli, "_FOREIGN_SERVER_ROOT", None)
-    monkeypatch.setattr(cli, "_UNAVAILABLE_REASON", None)
-    yield {"data": data, "home": home, "model": fake, "url": url}
+    yield {"data": data, "home": home, "tmp": tmp_path}
 
 
 @pytest.fixture
-def fake_model(isolated):
-    return isolated["model"]
+def cfg():
+    from n3mc_mcp import config
+    return config.load_config()
 
 
-@pytest.fixture
-def cfg(isolated):
-    from n3mc_mcp.config import load_config
-    return load_config(quiet=True)
-
-
-def _connect(url):
+def _redis_client():
     import redis
-    return redis.Redis.from_url(url, decode_responses=False, socket_connect_timeout=2, socket_timeout=5,
-                                protocol=2)
+    return redis.Redis.from_url(REDIS_TEST_URL, decode_responses=False, protocol=2,
+                                socket_connect_timeout=2, socket_timeout=5)
 
 
-def flush_test_db(client):
-    """FLUSHDB only an empty DB or one with the test marker; then set the marker (spec §9)."""
-    if client.dbsize() != 0 and not client.exists(TEST_MARKER):
-        pytest.skip(NOT_A_TEST_DB)
+def safe_flush(client):
+    """Flush only an empty DB or one marked as a test DB, then mark it (§9, second defence)."""
+    if client.dbsize() != 0 and not client.exists(TEST_MARK):
+        pytest.skip("N3MC_REDIS_TEST_URL points at a Redis that holds data and is not marked as a test DB")
     client.flushdb()
-    client.set(TEST_MARKER, 1)
+    client.set(TEST_MARK, 1)
 
 
 @pytest.fixture
-def rconn(cfg):
-    """The flushed test Redis (the deterministic embedding is already in place)."""
-    if not REDIS_TEST_URL:
-        pytest.skip("N3MC_REDIS_TEST_URL is not set")
-    if SAFETY_REASON:
-        pytest.skip(SAFETY_REASON)
-    client = _connect(REDIS_TEST_URL)
+def rconn():
+    if REFUSAL:
+        pytest.skip(REFUSAL)
+    client = _redis_client()
     try:
         client.ping()
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"the test Redis is not reachable: {e}")
-    flush_test_db(client)
+    safe_flush(client)
     yield client
     try:
-        if client.dbsize() == 0 or client.exists(TEST_MARKER):
-            client.flushdb()
-            client.set(TEST_MARKER, 1)
+        safe_flush(client)
     finally:
         client.close()
 
 
 @pytest.fixture
-def db(rconn, cfg):
+def db(cfg, rconn):
     from n3mc_mcp.database import Database
     d = Database(cfg)
     assert d.ensure_connected() == "ok"
     yield d
-    d.close()
+    if d.client is not None:
+        d.client.close()
 
 
 @pytest.fixture
-def runner(db, cfg):
+def runner(cfg, db):
     from n3mc_mcp.tools import ToolRunner
     return ToolRunner(cfg, db)
 
 
+class AppRouter:
+    """Routes the CLI's HTTP senders to an in-process FastAPI TestClient."""
+
+    def __init__(self, app, port=TEST_PORT):
+        from fastapi.testclient import TestClient
+        self.client = TestClient(app)
+        self.port = port
+        self.calls = []
+
+    def _headers(self, port):
+        return {"Host": f"127.0.0.1:{port or self.port}"}
+
+    def get(self, cfg, path, timeout=5.0, port=None):
+        if port not in (None, self.port):
+            raise ConnectionRefusedError("other port")
+        self.calls.append(("GET", path, None, timeout))
+        r = self.client.get(path, headers=self._headers(port))
+        return r.status_code, (r.json() if r.content else {})
+
+    def post(self, cfg, path, body, timeout=30.0, port=None):
+        if port not in (None, self.port):
+            raise ConnectionRefusedError("other port")
+        self.calls.append(("POST", path, body, timeout))
+        r = self.client.post(path, json=body, headers=self._headers(port))
+        return r.status_code, (r.json() if r.content else {})
+
+
 @pytest.fixture
-def app_factory(cfg, monkeypatch):
-    """Build the FastAPI app with a given Database; the process exit of /shutdown is recorded only."""
+def app_router(cfg, db, monkeypatch):
+    """A real app (fake embeddings, no model load) behind the CLI's _get / _post."""
     from n3mc_mcp import app as app_mod
-    from n3mc_mcp.config import compute_code_version, read_config_raw
-    exits = []
-    monkeypatch.setattr(app_mod, "_exit_server", lambda: exits.append(1))
-
-    def make(database, **kw):
-        cv = kw.pop("code_version", None) or compute_code_version(read_config_raw())
-        return app_mod.create_app(cfg, database, code_version=cv, **kw)
-
-    make.exits = exits
-    return make
-
-
-@pytest.fixture
-def server_client(app_factory, db, cfg, monkeypatch):
-    """A TestClient of the resident server, with the CLI's HTTP senders routed to it."""
-    from fastapi.testclient import TestClient
-    client = TestClient(app_factory(db))
-    route_http_to(monkeypatch, client, cfg["server_port"])
-    return client
-
-
-def parse_json(text):
-    return json.JSONDecoder().raw_decode(text)[0]
+    from n3mc_mcp import cli, config
+    application = app_mod.create_app(cfg, db, code_version=config.compute_code_version(cfg["_raw"]),
+                                     load_model=False)
+    router = AppRouter(application)
+    monkeypatch.setattr(cli, "_get", router.get)
+    monkeypatch.setattr(cli, "_post", router.post)
+    monkeypatch.setattr(app_mod, "_exit_process", lambda: None)
+    router.app = application
+    return router

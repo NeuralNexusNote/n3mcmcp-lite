@@ -1,126 +1,104 @@
-"""Layer 9: the context size limit (spec §3.17). No model, no Redis: prepared result rows."""
-import io
+"""Layer 9: the context size limit (spec §3.17). Rows are built by hand (no model, no Redis),
+except TestHookUsesLimit."""
 import json
-from datetime import datetime, timezone
 
 import pytest
 
-from n3mc_mcp import cli, context, tools
-from n3mc_mcp.config import load_config
-
-TS = datetime.now(timezone.utc).isoformat()
-
-
-def rows(n, size=600, prefix="row"):
-    return [{"id": f"{prefix}-{i:02d}", "content": f"{prefix} {i} " + ("本文テキスト😀 " * (size // 8)),
-             "score": 1.0 - i / 100, "timestamp": TS} for i in range(n)]
+import conftest
+from n3mc_mcp import cli, config
+from n3mc_mcp import context as C
+from n3mc_mcp.tools import _NUDGE_AFTER_SEARCH
 
 
-def head():
-    return context.hook_head("question", 2000)
+def rows(n, size=600, text="word "):
+    return [{"id": f"id{i:02d}", "content": f"row {i} " + text * (size // len(text)), "score": 1 - i / 100,
+             "timestamp_epoch": 1.8e9, "turn_id": f"t{i}"} for i in range(n)]
+
+
+HEAD = C.hook_head("query")
 
 
 class TestContextSize:
-    def test_utf16_units(self):
-        assert context.context_size("😀") == 2 and context.context_size("abc") == 3
+    def test_utf16(self):
+        assert C.context_size("😀") == 2 and C.context_size("あa") == 2
 
-    def test_newlines_count_twice(self):
-        assert context.context_size("a\nb") == 4
+    def test_newlines(self):
+        assert C.context_size("a\nb") == 4
 
 
 class TestRenderLimit:
-    def test_no_limit_unchanged(self):
-        out = context.render_search(rows(20), [], head=head())
-        assert context.context_size(out) > 10_000 and "omitted" not in out and out.count("### ") == 20
+    def test_unlimited(self):
+        out = C.render(rows(20), [], head=HEAD)
+        assert C.context_size(out) > 10000 and out == C.render(rows(20), [], head=HEAD, max_chars=None)
 
-    def test_fitting_output_is_identical(self):
+    def test_fitting_unchanged(self):
         r = rows(2, 100)
-        assert context.render_search(r, [], head=head(), max_chars=9500) == context.render_search(r, [], head=head())
+        assert C.render(r, [], head=HEAD, max_chars=9500) == C.render(r, [], head=HEAD)
 
-    def test_drops_lowest_rows_with_note(self):
-        r = rows(20)
-        out = context.render_search(r, [], head=head(), max_chars=9500)
-        assert context.context_size(out) + 2 <= 9500
-        kept = [line for line in out.splitlines() if line.startswith("### ")]
-        n = len(kept)
-        assert kept == [line for line in context.render_search(r[:n], [], head=head()).splitlines()
-                        if line.startswith("### ")]
-        assert f"_({20 - n} lower-ranked match(es) omitted" in out
-        bigger = context.render_search(r[: n + 1], [], head=head())
-        assert context.context_size(bigger) + 2 > 9500
+    def test_drop_lowest(self):
+        out = C.render(rows(20), [], head=HEAD, max_chars=9500)
+        assert C.context_size(out) + 2 <= 9500
+        kept = [i for i in range(20) if f"[id{i:02d}]" in out]
+        assert kept == list(range(len(kept))) and 3 < len(kept) < 20
+        n = 20 - len(kept)
+        assert C.omitted_line(n) in out
+        bigger = C._compose(HEAD, [], [C.render_row(r) for r in rows(20)[:len(kept) + 1]], [], "", n - 1)
+        assert C.context_size(bigger) + 2 > 9500
 
-    def test_note_before_weak_heading(self):
-        weak = rows(1, 50, "weak")
-        out = context.render_search(rows(20), weak, head=head(), max_chars=9500)
-        assert out.index("omitted to keep") < out.index(context.WEAK_HEADING)
-        assert "weak-00" in out
+    def test_omitted_before_weak(self):
+        weak = [{"id": "weak1", "content": "w", "score": 0.1}]
+        out = C.render(rows(20), weak, head=HEAD, max_chars=9500)
+        last = max(out.index(f"[id{i:02d}]") for i in range(20) if f"[id{i:02d}]" in out)
+        assert last < out.index("lower-ranked match(es) omitted") < out.index(C.WEAK_HEADING) < out.index("[weak1]")
 
-    def test_three_rows_are_cut(self):
-        out = context.render_search(rows(3, 4000), [], head=head(), max_chars=4000)
-        assert out.endswith(context.CUT_LINE) and context.context_size(out) + 2 <= 4000
+    def test_three_rows_cut(self):
+        out = C.render(rows(3, 5000), [], head=HEAD, max_chars=4000)
+        assert out.endswith(C.CUT_LINE) and C.context_size(out) + 2 <= 4000
 
-    def test_huge_parent_doc_is_cut(self):
-        doc = [{"id": "doc", "content": "x" * 30_000, "score": 1.0, "timestamp": TS, "_doc": True,
-                "chunk_count": 80}]
-        out = context.render_search(doc, [], head=head(), max_chars=9500)
-        assert out.startswith(head()) and out.endswith(context.CUT_LINE)
+    def test_big_parent_cut(self):
+        r = [{"id": "doc", "content": "x" * 30000, "_doc": True, "chunk_count": 80, "score": 1}]
+        out = C.render(r, [], head=HEAD, max_chars=9500)
+        assert out.startswith(HEAD) and out.endswith(C.CUT_LINE) and C.context_size(out) + 2 <= 9500
 
-    def test_notices_and_weak_rows_kept(self):
-        out = context.render_search(rows(20), rows(2, 50, "weak"), ["important notice"], head=head(),
-                                    max_chars=9500)
-        assert "> ⚠️ N3MC notice: important notice" in out and "weak-01" in out
+    def test_notices_and_weak_kept(self):
+        weak = [{"id": "weakX", "content": "weak", "score": 0.1}]
+        out = C.render(rows(15), weak, notices=["keep me"], head=HEAD, max_chars=9500)
+        assert "keep me" in out and "[weakX]" in out
 
-    def test_mcp_tail_is_kept_and_counted(self):
-        out = context.render_search(rows(20), [], tail=tools._NUDGE_AFTER_SEARCH, max_chars=5000)
-        assert out.endswith(tools._NUDGE_AFTER_SEARCH) and context.context_size(out) + 2 <= 5000
+    def test_japanese_emoji(self):
+        r = rows(20, 600, "記憶😀")
+        out = C.render(r, [], head=HEAD, max_chars=9500)
+        assert C.context_size(out) + 2 <= 9500
+
+    def test_mcp_tail(self):
+        out = C.render(rows(20), [], tail=_NUDGE_AFTER_SEARCH, max_chars=9500)
+        assert out.endswith(_NUDGE_AFTER_SEARCH) and C.context_size(out) + 2 <= 9500
+        out = C.render(rows(3, 5000), [], tail=_NUDGE_AFTER_SEARCH, max_chars=4000)
+        assert out.endswith(C.CUT_LINE + _NUDGE_AFTER_SEARCH) and C.context_size(out) + 2 <= 4000
 
 
 class TestHookUsesLimit:
-    def _capture(self, monkeypatch):
-        sent = []
-
-        def fake_post(port, path, body, timeout=30):
-            sent.append((path, body))
-            if path == "/search":
-                return 200, {"text": "# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)"}
-            return 200, {"status": "saved"}
-
-        monkeypatch.setattr(cli, "_post", fake_post)
-        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
-        return sent
-
-    def test_hook_sends_max_chars(self, monkeypatch, capsys):
-        sent = self._capture(monkeypatch)
-        monkeypatch.setattr(cli, "_read_stdin", lambda: json.dumps({"prompt": "hello there",
-                                                                    "session_id": "s"}).encode())
-        cli.main(["--hook-submit"])
-        body = [b for p, b in sent if p == "/search"][0]
-        assert body["max_chars"] == 9500 and body["no_model_wait"] is True
-
-    def test_manual_search_unlimited(self, monkeypatch, capsys):
-        sent = self._capture(monkeypatch)
-        cli.main(["--search", "hello"])
-        body = [b for p, b in sent if p == "/search"][0]
-        assert "max_chars" not in body and "no_model_wait" not in body
+    def test_hook_and_manual(self, app_router, db, capsys):
+        for i in range(30):
+            db.save_memory(f"limit topic statement {i} " + "about the same topic " * 25)
+        cli.hook_submit(json.dumps({"session_id": "s", "prompt": "limit topic statement"}))
+        hook_out = capsys.readouterr().out
+        assert C.context_size(hook_out.rstrip("\n")) + 2 <= 9500
+        cli.main(["--search", "limit topic statement"])
+        manual = capsys.readouterr().out
+        assert manual.count("### [") > hook_out.count("### [") and "omitted to keep" not in manual
 
 
 class TestConfigContextMaxChars:
-    def _load(self, isolated, value):
-        p = isolated["data"] / "config.json"
-        obj = json.loads(p.read_text(encoding="utf-8"))
-        obj["context_max_chars"] = value
-        p.write_text(json.dumps(obj), encoding="utf-8")
-        return load_config(quiet=True)
+    def test_default(self):
+        assert config.DEFAULTS["context_max_chars"] == 9500
 
-    def test_default(self, cfg):
-        assert cfg["context_max_chars"] == 9500
+    @pytest.mark.parametrize("v", [1999, 10001, 9500.0, "9500"])
+    def test_rejected(self, isolate, v):
+        conftest.write_test_config(str(isolate["data"]), context_max_chars=v)
+        cfg = config.load_config()
+        assert cfg["context_max_chars"] == 9500 and any("context_max_chars" in n for n in cfg["_notices"])
 
-    @pytest.mark.parametrize("value", [1999, 10001, 9500.0, "9500"])
-    def test_rejected(self, isolated, value):
-        c = self._load(isolated, value)
-        assert c["context_max_chars"] == 9500
-        assert any(n.startswith("config_type:") and "context_max_chars" in n for n in c["_notices"])
-
-    @pytest.mark.parametrize("value", [2000, 10000])
-    def test_accepted(self, isolated, value):
-        assert self._load(isolated, value)["context_max_chars"] == value
+    @pytest.mark.parametrize("v", [2000, 10000])
+    def test_accepted(self, v):
+        assert config.config_value_ok("context_max_chars", v)

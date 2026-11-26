@@ -1,7 +1,6 @@
-"""CLI `n3mc-lite` (spec §13): the tool commands through the resident server, the hook steps
-(--hook-submit, --save-claude-turn, --stop; spec §12), --init (spec §12.8), --run-server and
---stop-server; ensure_server, _start_server and _notify (spec §3.15).
-"""
+"""CLI `n3mc-lite` (spec §13): registration in Claude Code (--init, §8, §12.8), the hook commands
+(--hook-submit, --save-claude-turn, --stop, §12), the tool commands, and the resident server
+(--run-server, --stop-server; ensure_server, _start_server, _notify, §3.15)."""
 import os as _os
 import sys as _sys
 
@@ -18,18 +17,17 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         pass
 
-import sys
-
 for _stream_name in ("stdin", "stdout", "stderr"):
-    _stream = getattr(sys, _stream_name, None)
+    _stream = getattr(_sys, _stream_name, None)
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 import argparse  # noqa: E402
 import copy  # noqa: E402
+import datetime  # noqa: E402
 import hashlib  # noqa: E402
 import http.client  # noqa: E402
 import json  # noqa: E402
@@ -40,747 +38,676 @@ import shlex  # noqa: E402
 import shutil  # noqa: E402
 import socket  # noqa: E402
 import subprocess  # noqa: E402
+import sys  # noqa: E402
 import sysconfig  # noqa: E402
-import tempfile  # noqa: E402
 import time  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 import uuid  # noqa: E402
-from datetime import datetime  # noqa: E402
-from pathlib import Path  # noqa: E402
 
 import n3mc_mcp  # noqa: E402
-from . import __version__, context, paths  # noqa: E402
-from .config import (backend_hint, compute_code_version, load_config, read_config_raw,  # noqa: E402
-                     redis_display)
-from .processor import parse_time_bounds, sanitize_surrogates  # noqa: E402
+from n3mc_mcp import __version__, paths  # noqa: E402
+from n3mc_mcp import config as _config  # noqa: E402
+from n3mc_mcp.processor import TimeBoundError, parse_time_bounds, sanitize_surrogates  # noqa: E402
 
-# ── constants ────────────────────────────────────────────────────────────────
-
-START_WAIT = 60
-HEALTH_TIMEOUT = 5
-SHUTDOWN_TIMEOUT = 5
-SHORT_TIMEOUT = 30          # /buffer /search /repair
-TOOL_TIMEOUT = 300          # /tools/<name>
-HOOK_REPAIR_TIMEOUT = 10
-PORT_FREE_WAIT = 15
-START_FAIL_WINDOW = 300
-STARTING_GRACE = 60
-SERVER_LOG_MAX = 1024 * 1024
-AUDIT_ROTATE_BYTES = 50 * 1024 * 1024
-TURN_FILE_MAX_AGE = 30 * 86400
-CHILD_TIMEOUT = 55
-
-PLUGIN_KEY = "n3mc-workingmemory@neuralnexusnote"
+PKG = "n3memorycore-mcp-lite"
 MCP_NAME = "n3mc-workingmemory"
+PLUGIN_MCP = "n3mc-workingmemory-mcp@neuralnexusnote"
+PLUGIN_FULL = "n3mc-workingmemory@neuralnexusnote"
+SOURCE_LINE = "Source: N3MC Lite (7-day working memory)"
+EMPTY_BLOCK = f"# Recalled Memory Context\n{SOURCE_LINE}\n\n_No memories found._"
 _SYSTEM_PROMPT_PREFIXES = ("<task-notification>", "<agent-message from=", "<system-reminder>")
-EMPTY_BLOCK = f"{context.HEADER_LINE}\n{context.SOURCE_LINE}\n\n{context.NO_MEMORIES}"
+START_WAIT = 60
+START_FAILED_WINDOW = 300
 
-STILL_STARTING = "the memory server is still starting (the first start downloads the embedding model, ~1.1 GB)"
-OLD_SERVER = "an old N3MC Lite memory server could not be stopped"
+_notify = paths.notify
+_clear_notice = paths.clear_notice
 
+# Set by ensure_server for the caller's fallback text.
+_LAST_REASON = None
 _FOREIGN_SERVER_ROOT = None
-_UNAVAILABLE_REASON = None
-
-
-def _could_not_start() -> str:
-    return f"the memory server could not start; see {paths.server_log_path()}"
-
-
-def _foreign_reason(port) -> str:
-    return f"another N3MC folder's server is using port {port}"
-
-
-def last_unavailable_reason() -> str:
-    return _UNAVAILABLE_REASON or STILL_STARTING
 
 
 def _err(msg: str) -> None:
     try:
-        sys.stderr.write(f"[n3mc-lite] {msg}\n")
-        sys.stderr.flush()
+        print(msg, file=sys.stderr)
     except Exception:  # noqa: BLE001
         pass
 
 
-def _out(text: str) -> None:
-    sys.stdout.write(text + "\n")
-    sys.stdout.flush()
-
-
-# ── notices (spec §3.15) ─────────────────────────────────────────────────────
-
-def _notify(key: str, message: str) -> None:
-    paths.notify(key, message)
-
-
-def _clear_notice(key: str) -> None:
-    paths.clear_notice(key)
-
-
-def _redis_unreachable_message(cfg, hint=None) -> str:
-    return (f"N3MC Lite could not reach Redis, so a message was kept only in {paths.audit_log_path()}. "
-            + (hint or backend_hint(cfg["redis_url"])))
-
-
-# ── HTTP to the resident server (spec §3.15 "Transport") ────────────────────
+# ── HTTP to the resident server (never through a proxy, §3.15) ───────────────
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-class _NotSent(Exception):
-    """The request did not reach a server (connection refused and the like)."""
-
-
-class _NoAnswer(Exception):
-    """The request was sent but no answer came back (timeout, connection closed)."""
-
-
-def _request(method, port, path, body=None, timeout=HEALTH_TIMEOUT):
-    url = f"http://127.0.0.1:{int(port)}{path}"
-    if _port_free(port):
-        # Nothing listens there. Windows takes about 2 s to refuse a connection to a closed local port.
-        raise _NotSent(f"ConnectionRefusedError: nothing listens on 127.0.0.1:{int(port)}")
+def _http(cfg, method, path, body=None, timeout=5.0, port=None):
+    port = int(port or cfg.get("server_port", 18524))
     data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"Host": f"127.0.0.1:{int(port)}",
-                                          "Content-Type": "application/json"})
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
+                                 headers={"Host": f"127.0.0.1:{port}", "Content-Type": "application/json"})
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
-            status, raw = resp.status, resp.read()
+            raw = resp.read()
+            status = resp.status
     except urllib.error.HTTPError as e:
+        raw = e.read() or b""
         status = e.code
-        try:
-            raw = e.read()
-        except Exception:  # noqa: BLE001
-            raw = b""
-    except urllib.error.URLError as e:
-        reason = e.reason
-        if isinstance(reason, (socket.timeout, TimeoutError)):
-            raise _NoAnswer(f"TimeoutError: {reason}")
-        if isinstance(reason, (ConnectionResetError, ConnectionAbortedError)):
-            raise _NoAnswer(f"{type(reason).__name__}: {reason}")
-        raise _NotSent(f"{type(reason).__name__}: {reason}")
-    except (socket.timeout, TimeoutError) as e:
-        raise _NoAnswer(f"TimeoutError: {e}")
-    except (ConnectionResetError, ConnectionAbortedError, http.client.HTTPException, OSError) as e:
-        raise _NoAnswer(f"{type(e).__name__}: {e}")
     try:
         parsed = json.loads(raw.decode("utf-8")) if raw else {}
-    except Exception:  # noqa: BLE001
+    except ValueError:
         parsed = {}
-    return status, (parsed if isinstance(parsed, dict) else {})
+    return status, parsed
 
 
-def _get(port, path, timeout=HEALTH_TIMEOUT):
-    return _request("GET", port, path, None, timeout)
+def _get(cfg, path, timeout=5.0, port=None):
+    return _http(cfg, "GET", path, None, timeout, port)
 
 
-def _post(port, path, body, timeout=SHORT_TIMEOUT):
-    return _request("POST", port, path, body, timeout)
+def _post(cfg, path, body, timeout=30.0, port=None):
+    return _http(cfg, "POST", path, body if body is not None else {}, timeout, port)
 
 
-def _request_shutdown(port, root):
-    return _post(port, "/shutdown", {"root": str(root)}, SHUTDOWN_TIMEOUT)
+def _own_root() -> str:
+    return os.path.normcase(os.path.abspath(paths.data_dir()))
 
 
-def _health(port):
+def _health(cfg, port=None):
     try:
-        status, data = _get(port, "/health", HEALTH_TIMEOUT)
+        status, data = _get(cfg, "/health", 5.0, port)
     except Exception:  # noqa: BLE001
         return None
-    if status != 200 or data.get("status") != "ok":
-        return None
-    return data
+    return data if status == 200 and isinstance(data, dict) else None
 
 
-# ── server identity and replacement (spec §3.15) ────────────────────────────
-
-def _health_decision(health, root=None, code_version=None) -> str:
-    if not health:
-        return "none"
-    root = str(paths.data_dir()) if root is None else root
-    hroot = health.get("root")
-    if not hroot:
-        return "legacy"
-    if not paths.same_folder(hroot, root):
-        return "foreign"
-    if code_version is None:
-        code_version = compute_code_version(read_config_raw())
-    return "ok" if health.get("code_version") == code_version else "stale"
-
-
-def _process_data_dir(env) -> str:
-    d = (env or {}).get("N3MC_DATA_DIR", "").strip()
-    if d:
-        return os.path.abspath(os.path.expanduser(d))
-    home = (env or {}).get("USERPROFILE") if os.name == "nt" else None
-    home = home or (env or {}).get("HOME") or os.path.expanduser("~")
-    return os.path.join(home, paths.DATA_DIR_NAME)
-
-
-def _is_own_server_process(pid) -> bool:
+def _request_shutdown(cfg, root, port=None) -> bool:
     try:
-        import psutil
-        proc = psutil.Process(int(pid))
-        cmd = proc.cmdline()
-        if "n3mc_mcp.cli" not in cmd or "--run-server" not in cmd:
-            return False
-        return paths.same_folder(_process_data_dir(proc.environ()), paths.data_dir())
+        status, _ = _post(cfg, "/shutdown", {"root": root}, 5.0, port)
+        return status == 200
     except Exception:  # noqa: BLE001
         return False
 
 
-def _port_free(port) -> bool:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def _port_in_use(port: int) -> bool:
     try:
-        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        else:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("127.0.0.1", int(port)))
-        return True
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.3):
+            return True
     except OSError:
         return False
-    finally:
-        s.close()
 
 
-def _wait_port_free(port, timeout=PORT_FREE_WAIT) -> bool:
-    deadline = time.monotonic() + timeout
+def _wait_port_free(port: int, total: float = 15.0) -> bool:
+    deadline = time.monotonic() + total
     while True:
-        if _port_free(port):
+        if not _port_in_use(port):
             return True
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.3)
 
 
+def classify_request_error(e: BaseException):
+    """(reason, sent): sent=False only when the request surely did not reach the server."""
+    reason = f"{type(e).__name__}: {e}"
+    inner = getattr(e, "reason", None)
+    if isinstance(e, ConnectionRefusedError) or isinstance(inner, ConnectionRefusedError):
+        return reason, False
+    if isinstance(e, urllib.error.URLError) and isinstance(inner, OSError) and getattr(inner, "winerror", None) == 10061:
+        return reason, False
+    return reason, True
+
+
+# ── server identity and replacement (§3.15) ───────────────────────────────────
+
+def own_code_version(cfg) -> str:
+    return _config.compute_code_version(cfg.get("_raw"))
+
+
+def _health_decision(health, cfg=None) -> str:
+    if not health:
+        return "none"
+    root = health.get("root")
+    if not root:
+        return "legacy"
+    if os.path.normcase(os.path.abspath(root)) != _own_root():
+        return "foreign"
+    if cfg is not None and health.get("code_version") != own_code_version(cfg):
+        return "stale"
+    return "ok"
+
+
+def _proc_data_root(proc) -> str:
+    try:
+        env = proc.environ()
+    except Exception:  # noqa: BLE001
+        return None
+    d = env.get("N3MC_DATA_DIR")
+    if d:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(d)))
+    return os.path.normcase(os.path.join(os.path.expanduser("~"), ".n3mc-workingmemory"))
+
+
+def _is_own_server_process(pid) -> bool:
+    if not pid:
+        return False
+    try:
+        import psutil
+        p = psutil.Process(int(pid))
+        cmd = p.cmdline()
+    except Exception:  # noqa: BLE001
+        return False
+    joined = " ".join(cmd)
+    if "n3mc_mcp.cli" not in joined or "--run-server" not in cmd:
+        return False
+    return _proc_data_root(p) == _own_root()
+
+
+def _listening_pid(port):
+    try:
+        import psutil
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == int(port) and c.status == psutil.CONN_LISTEN:
+                return c.pid
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _listening_ports(pid):
+    try:
+        import psutil
+        return sorted({c.laddr.port for c in psutil.net_connections(kind="tcp")
+                       if c.pid == int(pid) and c.status == psutil.CONN_LISTEN and c.laddr})
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _terminate(pid) -> None:
-    import psutil
-    proc = psutil.Process(int(pid))
-    proc.terminate()
     try:
-        proc.wait(5)
-    except Exception:  # noqa: BLE001
-        proc.kill()
-
-
-def _stop_stale_server(port, root, pid=None) -> bool:
-    """Ask our old server to stop (POST /shutdown); only a server that does not know /shutdown is
-    ended, after psutil confirmed it is ours. Never by the number in the PID file."""
-    try:
-        status, _data = _request_shutdown(port, root)
-    except Exception:  # noqa: BLE001
-        status = None
-    if status == 200:
-        return _wait_port_free(port, PORT_FREE_WAIT)
-    if pid is not None and _is_own_server_process(pid):
+        import psutil
+        p = psutil.Process(int(pid))
+        p.terminate()
         try:
-            _terminate(pid)
-        except Exception as e:  # noqa: BLE001
-            _err(f"could not end the old server (pid {pid}): {e}")
-        return _wait_port_free(port, PORT_FREE_WAIT)
-    _notify("stale_server", f"Cannot stop the old N3MC Lite server. Another program may be using server_port {port}. "
-                            "Check server_port in config.json and restart manually.")
+            p.wait(5)
+        except psutil.TimeoutExpired:
+            p.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _stop_stale_server(cfg, health) -> bool:
+    port = int(cfg.get("server_port", 18524))
+    if _request_shutdown(cfg, _own_root()):
+        return _wait_port_free(port)
+    pid = (health or {}).get("pid") or _listening_pid(port)
+    if pid and _is_own_server_process(pid):
+        _terminate(pid)
+        return _wait_port_free(port)
+    _notify("stale_server", f"Cannot stop the old N3MC Lite server. Another program may be using "
+                            f"server_port {port}. Check server_port in config.json and restart manually.")
     return False
 
 
-def _listening_ports(pid) -> set:
+def _read_pid_file():
+    """(pid or None, mtime) of the PID file, or (None, None) when there is none."""
+    path = paths.pid_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        return (int(text) if text.isdigit() else None), mtime
+    except OSError:
+        return None, mtime
+
+
+def _remove_pid_file(expect_pid=None) -> None:
+    path = paths.pid_path()
+    if expect_pid is not None:
+        pid, _ = _read_pid_file()
+        if pid != expect_pid:
+            return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _write_own_pid() -> None:
+    path = paths.pid_path()
+    try:
+        paths.ensure_data_dir()
+        try:
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+        except FileExistsError:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+    except OSError:
+        pass
+
+
+def _pid_is_starting(pid, mtime) -> bool:
+    if pid is None:
+        return mtime is not None and time.time() - mtime < START_WAIT
     try:
         import psutil
-        proc = psutil.Process(int(pid))
-        conns = proc.net_connections(kind="inet") if hasattr(proc, "net_connections") else proc.connections(kind="inet")
-        return {c.laddr.port for c in conns if c.status == psutil.CONN_LISTEN and c.laddr}
+    except ImportError:
+        return mtime is not None and time.time() - mtime < START_WAIT
+    try:
+        if not psutil.pid_exists(int(pid)):
+            return False
     except Exception:  # noqa: BLE001
-        return set()
+        return False
+    return _is_own_server_process(pid)
 
 
-def _handle_other_port(pid, cfg) -> bool:
-    """The PID file's server listens on a port other than server_port (the user changed it): stop it
-    there when that port's /health reports this data folder (spec §3.15)."""
-    root = str(paths.data_dir())
-    for p in sorted(_listening_ports(pid) - {int(cfg["server_port"])}):
-        h = _health(p)
-        if not h or not h.get("root") or not paths.same_folder(h["root"], root):
+def _handle_other_port(cfg, pid) -> bool:
+    """The PID file's server listens on another port (server_port changed): stop it there."""
+    port = int(cfg.get("server_port", 18524))
+    for p in _listening_ports(pid):
+        if p == port:
             continue
-        try:
-            _request_shutdown(p, root)
-        except Exception:  # noqa: BLE001
-            pass
-        _wait_port_free(p, PORT_FREE_WAIT)
-        if _read_pid() == pid:
-            _remove_pid_file()
+        h = _health(cfg, port=p)
+        if not h or not h.get("root") or os.path.normcase(os.path.abspath(h["root"])) != _own_root():
+            continue
+        _request_shutdown(cfg, _own_root(), port=p)
+        _wait_port_free(p)
+        _remove_pid_file(expect_pid=int(pid))
         return True
     return False
 
 
-def _read_pid():
+def _marker_recent() -> bool:
     try:
-        text = paths.pid_path().read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    try:
-        return int(text)
-    except ValueError:
-        return ""
-
-
-def _remove_pid_file() -> None:
-    try:
-        os.unlink(paths.pid_path())
-    except OSError:
-        pass
-
-
-def _pid_file_young() -> bool:
-    try:
-        return time.time() - paths.pid_path().stat().st_mtime < STARTING_GRACE
+        return time.time() - os.path.getmtime(paths.start_failed_path()) < START_FAILED_WINDOW
     except OSError:
         return False
 
 
-def _pid_state():
-    """('none' | 'own' | 'starting' | 'dead', pid)."""
-    if not paths.pid_path().exists():
-        return "none", None
-    pid = _read_pid()
-    if pid is None:
-        return "none", None
-    if pid == "":
-        return ("starting" if _pid_file_young() else "dead"), None
-    try:
-        import psutil
-    except ImportError:
-        return ("starting" if _pid_file_young() else "dead"), pid
-    try:
-        if not psutil.pid_exists(pid):
-            return "dead", pid
-    except Exception:  # noqa: BLE001
-        return "dead", pid
-    return ("own" if _is_own_server_process(pid) else "dead"), pid
-
-
-def _write_own_pid() -> None:
-    """The server writes its own PID (spec §13 "PID file"); OSError is ignored."""
-    p = paths.pid_path()
-    try:
-        paths.ensure_data_dir()
-        try:
-            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(str(os.getpid()))
-        except FileExistsError:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(str(os.getpid()))
-    except OSError:
-        pass
-
-
-def remove_pid_file_if_own() -> None:
-    try:
-        if _read_pid() == os.getpid():
-            _remove_pid_file()
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _record_start_failure(detail) -> None:
+def _record_start_failure(detail: str) -> None:
     _notify("server_start_failed", f"The N3MC Lite memory server could not start ({detail}). "
                                    f"See {paths.server_log_path()} for the reason.")
     try:
         paths.ensure_data_dir()
-        paths.start_failed_path().write_text(datetime.now().isoformat(), encoding="utf-8")
+        with open(paths.start_failed_path(), "w", encoding="utf-8") as f:
+            f.write(paths.utc_now_iso())
     except OSError:
         pass
 
 
-def _recent_start_failure() -> bool:
-    try:
-        return time.time() - paths.start_failed_path().stat().st_mtime < START_FAIL_WINDOW
-    except OSError:
-        return False
-
-
-def _on_ok(cfg, health) -> bool:
-    for key in ("stale_server", "port_conflict", "server_start_failed"):
-        _clear_notice(key)
+def _server_ok(cfg, health) -> bool:
+    global _LAST_REASON
+    _LAST_REASON = None
+    for k in ("stale_server", "port_conflict", "server_start_failed"):
+        _clear_notice(k)
     try:
         os.unlink(paths.start_failed_path())
     except OSError:
         pass
-    own = redis_display(cfg["redis_url"])
-    theirs = health.get("redis")
-    if theirs is not None and theirs != own:
+    own = _config.redis_display(cfg.get("redis_url", ""))
+    theirs = (health or {}).get("redis")
+    if theirs and theirs != own:
         _notify("redis_url_mismatch",
-                f"The N3MC Lite server uses Redis at {theirs}, but this process is set to {own}. Put redis_url "
-                f"into {paths.config_path()} instead of setting N3MC_REDIS_URL per application, then restart "
-                "the server (it restarts after config.json changes).")
+                f"The N3MC Lite server uses Redis at {theirs}, but this process is set to {own}. Put "
+                f"redis_url into {paths.config_path()} instead of setting N3MC_REDIS_URL per application, "
+                "then restart the server (it restarts after config.json changes).")
     else:
         _clear_notice("redis_url_mismatch")
     return True
 
 
-def _foreign(cfg, root) -> bool:
-    global _FOREIGN_SERVER_ROOT, _UNAVAILABLE_REASON
-    port = int(cfg["server_port"])
-    _FOREIGN_SERVER_ROOT = root
-    _UNAVAILABLE_REASON = _foreign_reason(port)
-    _notify("port_conflict", f"Another N3MC server ({root}) is using port {port}. Give N3MC Lite its own "
-                             f"server_port in {paths.config_path()}.")
-    return False
+def reason_starting() -> str:
+    return "the memory server is still starting (the first start downloads the embedding model, ~1.1 GB)"
 
 
-def _wait_for_start(cfg, max_wait, proc=None) -> bool:
-    global _UNAVAILABLE_REASON
-    port = int(cfg["server_port"])
+def reason_failed() -> str:
+    return f"the memory server could not start; see {paths.server_log_path()}"
+
+
+def reason_foreign(cfg) -> str:
+    return f"another N3MC folder's server is using port {cfg.get('server_port', 18524)}"
+
+
+REASON_STALE = "an old N3MC Lite memory server could not be stopped"
+
+
+def unavailable_reason(cfg) -> str:
+    return _LAST_REASON or reason_starting()
+
+
+def _wait_health(cfg, max_wait, proc=None) -> bool:
     deadline = time.monotonic() + max(0.0, float(max_wait))
     while True:
-        if proc is not None:
-            rc = proc.poll()
-            if rc is not None:
-                _record_start_failure(f"exit code {rc}")
-                if _read_pid() == proc.pid:
-                    _remove_pid_file()
-                _UNAVAILABLE_REASON = _could_not_start()
-                return False
-        h = _health(port) if max_wait > 0 or proc is None else None
-        dec = _health_decision(h)
-        if dec == "ok":
-            return _on_ok(cfg, h)
-        if dec == "foreign":
-            return _foreign(cfg, h.get("root"))
+        h = _health(cfg)
+        if _health_decision(h, cfg) == "ok":
+            return _server_ok(cfg, h)
+        if proc is not None and proc.poll() is not None:
+            return False
         if time.monotonic() >= deadline:
-            _UNAVAILABLE_REASON = STILL_STARTING
             return False
         time.sleep(0.5)
 
 
-def _popen(*args, **kwargs):
-    return subprocess.Popen(*args, **kwargs)
-
-
-def _start_server(cfg, max_wait=START_WAIT) -> bool:
-    """Start the resident server detached (spec §3.15 "Starting the server")."""
-    global _UNAVAILABLE_REASON
-    d = paths.ensure_data_dir()
-    pid_file = paths.pid_path()
-    try:
-        fd = os.open(str(pid_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-    except FileExistsError:
-        return _wait_for_start(cfg, max_wait)
-    except OSError as e:
-        _err(f"could not create the PID file {pid_file}: {e}")
-    log_path = paths.server_log_path()
-    try:
-        if log_path.exists() and log_path.stat().st_size > SERVER_LOG_MAX:
-            log_path.write_bytes(b"")
-    except OSError:
-        pass
-    env = dict(os.environ)
-    env["N3MC_DATA_DIR"] = str(d)
-    cwd = os.getcwd() if paths.source_checkout_in_place() else str(d)
-    kwargs = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-    else:
-        kwargs["start_new_session"] = True
-    log = None
-    try:
-        log = open(log_path, "ab")
-        proc = _popen([*paths.python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"], stdin=subprocess.DEVNULL,
-                      stdout=subprocess.DEVNULL, stderr=log, cwd=cwd, env=env, **kwargs)
-    except Exception as e:  # noqa: BLE001
-        _err(f"could not start the memory server: {type(e).__name__}: {e}")
-        _remove_pid_file()
-        _UNAVAILABLE_REASON = _could_not_start()
-        return False
-    finally:
-        if log is not None:
-            try:
-                log.close()
-            except OSError:
-                pass
-    try:
-        with open(pid_file, "w", encoding="utf-8") as f:
-            f.write(str(proc.pid))
-    except OSError:
-        pass
-    return _wait_for_start(cfg, max_wait, proc)
-
-
 def ensure_server(cfg, max_wait=START_WAIT) -> bool:
-    """True when a healthy server of this data folder and code answers (started when needed)."""
-    global _FOREIGN_SERVER_ROOT, _UNAVAILABLE_REASON
+    """True when a healthy server of this data folder answers (starting one if needed)."""
+    global _LAST_REASON, _FOREIGN_SERVER_ROOT
     _FOREIGN_SERVER_ROOT = None
-    _UNAVAILABLE_REASON = None
-    port = int(cfg["server_port"])
-    root = str(paths.data_dir())
-    h = _health(port)
-    dec = _health_decision(h, root)
-    if dec == "ok":
-        return _on_ok(cfg, h)
-    if dec == "foreign":
-        return _foreign(cfg, h.get("root"))
-    if dec == "legacy":
-        if _is_own_server_process(h.get("pid")):
-            dec = "stale"
+    port = int(cfg.get("server_port", 18524))
+    h = _health(cfg)
+    d = _health_decision(h, cfg)
+    if d == "legacy":
+        pid = h.get("pid") or _listening_pid(port)
+        if _is_own_server_process(pid):
+            d = "stale"
         else:
-            return _foreign(cfg, "(unknown: the server did not report its folder)")
-    if dec == "stale":
-        if _stop_stale_server(port, root, h.get("pid")):
-            if _read_pid() == h.get("pid"):
-                _remove_pid_file()
-            return _start_or_fail(cfg, max_wait)
-        else:
-            h2 = _health(port)
-            d2 = _health_decision(h2, root)
+            h = dict(h, root="(unknown: the server did not report its folder)")
+            d = "foreign"
+    if d == "ok":
+        return _server_ok(cfg, h)
+    if d == "foreign":
+        _FOREIGN_SERVER_ROOT = h.get("root")
+        _LAST_REASON = reason_foreign(cfg)
+        _notify("port_conflict", f"Another N3MC server ({h.get('root')}) is using port {port}. Give N3MC "
+                                 f"Lite its own server_port in {paths.config_path()}.")
+        return False
+    if d == "stale":
+        if not _stop_stale_server(cfg, h):
+            h2 = _health(cfg)
+            d2 = _health_decision(h2, cfg)
             if d2 == "ok":
-                return _on_ok(cfg, h2)
-            if d2 == "foreign":
-                return _foreign(cfg, h2.get("root"))
+                return _server_ok(cfg, h2)
             if d2 != "none":
-                _UNAVAILABLE_REASON = OLD_SERVER
+                _LAST_REASON = REASON_STALE
+                _notify("stale_server", f"Cannot stop the old N3MC Lite server. Another program may be "
+                                        f"using server_port {port}. Check server_port in config.json and "
+                                        "restart manually.")
                 return False
-    state, pid = _pid_state()
-    if state == "own":
-        if _handle_other_port(pid, cfg):
-            return _start_or_fail(cfg, max_wait)
-        return _wait_for_start(cfg, max_wait)
-    if state == "starting":
-        return _wait_for_start(cfg, max_wait)
-    if state == "dead":
-        _remove_pid_file()
-    return _start_or_fail(cfg, max_wait)
-
-
-def _start_or_fail(cfg, max_wait) -> bool:
-    global _UNAVAILABLE_REASON
-    if _recent_start_failure():
-        _UNAVAILABLE_REASON = _could_not_start()
+    # No server answers.
+    pid, mtime = _read_pid_file()
+    if mtime is not None:
+        if _pid_is_starting(pid, mtime):
+            if pid and _handle_other_port(cfg, pid):
+                pass  # the old server on another port was stopped: start a new one below
+            else:
+                if _wait_health(cfg, min(max_wait, START_WAIT)):
+                    return True
+                _LAST_REASON = reason_starting()
+                return False
+        else:
+            _remove_pid_file()
+    if _marker_recent():
+        _LAST_REASON = reason_failed()
         return False
     return _start_server(cfg, max_wait)
 
 
-# ── --run-server / --stop-server (spec §13) ──────────────────────────────────
+def _start_server(cfg, max_wait=START_WAIT) -> bool:
+    global _LAST_REASON
+    paths.ensure_data_dir()
+    pid_path = paths.pid_path()
+    try:
+        fh = open(pid_path, "x", encoding="utf-8")
+    except FileExistsError:
+        if _wait_health(cfg, min(max_wait, START_WAIT)):
+            return True
+        _LAST_REASON = reason_starting()
+        return False
+    except OSError as e:
+        _err(f"n3mc-lite: could not create the PID file ({e})")
+        _LAST_REASON = reason_failed()
+        return False
+    try:
+        log = paths.server_log_path()
+        try:
+            if os.path.getsize(log) > 1024 * 1024:
+                open(log, "wb").close()
+        except OSError:
+            pass
+        logf = open(log, "ab")
+        env = dict(os.environ)
+        env["N3MC_DATA_DIR"] = paths.data_dir()
+        cwd = os.getcwd() if paths.package_parent_is_cwd() else paths.data_dir()
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        else:
+            kwargs["start_new_session"] = True
+        try:
+            proc = subprocess.Popen([*paths.python_cmd(), "-m", "n3mc_mcp.cli", "--run-server"],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=logf,
+                                    cwd=cwd, env=env, **kwargs)
+        finally:
+            logf.close()
+        fh.write(str(proc.pid))
+        fh.close()
+    except Exception as e:  # noqa: BLE001
+        try:
+            fh.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _remove_pid_file()
+        _err(f"n3mc-lite: could not start the memory server ({type(e).__name__}: {e})")
+        _LAST_REASON = reason_failed()
+        return False
+    if _wait_health(cfg, max_wait, proc):
+        return True
+    code = proc.poll()
+    if code is not None:
+        _record_start_failure(f"exit code {code}")
+        _remove_pid_file(expect_pid=proc.pid)
+        _LAST_REASON = reason_failed()
+        return False
+    _LAST_REASON = reason_starting()
+    return False
 
-def run_server() -> int:
+
+# ── the resident server process (§3.15, §13 --run-server) ────────────────────
+
+def run_server() -> None:
+    cfg = _config.load_config()
+    code_version = _config.compute_code_version(cfg.get("_raw"))
     try:
         _write_own_pid()
-        cfg = load_config()
-        code_version = compute_code_version(cfg.get("_config_raw"))
-        port = int(cfg["server_port"])
-        host = cfg.get("bind_host") or "127.0.0.1"
+        host = cfg.get("bind_host", "127.0.0.1")
         if host != "127.0.0.1":
-            _err(f"bind_host is {host}: the memory server has no authentication, so your memories are "
-                 "reachable from the network. Keep bind_host at 127.0.0.1.")
-        from . import processor
-        processor.configure(cfg)
+            _err(f"n3mc-lite: WARNING bind_host is {host}; the memory server has no authentication and "
+                 "your memories may be reachable from the network. Keep 127.0.0.1.")
+        from n3mc_mcp import processor
         processor.import_backend()
-        from .database import BackendError, Database
+        from n3mc_mcp.database import Database
         db = Database(cfg)
-        try:
-            db.ensure_connected()
-        except BackendError as e:
-            _err(str(e))
-        from .app import create_app
-        app = create_app(cfg, db, code_version=code_version, port=port, root=str(paths.data_dir()),
-                         start_model_loader=True)
-        _write_own_pid()
+        status = db.ensure_connected()
+        if status != "ok":
+            _err(f"n3mc-lite: {status}")
+        from n3mc_mcp import app as app_mod
+        application = app_mod.create_app(cfg, db, code_version=code_version)
         import uvicorn
-        uvicorn.run(app, host=host, port=port, log_level="error")
-        return 0
+        _write_own_pid()
+        uvicorn.run(application, host=host, port=int(cfg.get("server_port", 18524)), log_level="error")
     except SystemExit as e:
         if e.code not in (0, None):
             _record_start_failure(f"exit code {e.code}")
         raise
     except KeyboardInterrupt:
-        return 0
+        raise
     except BaseException as e:  # noqa: BLE001
         _record_start_failure(f"{type(e).__name__}: {e}")
         raise
     finally:
-        remove_pid_file_if_own()
+        try:
+            from n3mc_mcp.app import remove_pid_file_if_own
+            remove_pid_file_if_own()
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def stop_server(cfg) -> int:
-    port = int(cfg["server_port"])
-    root = str(paths.data_dir())
-    h = _health(port)
-    if not h or not h.get("root") or not paths.same_folder(h["root"], root):
-        _out("No N3MC Lite server of this data folder is running.")
-        return 0
-    pid = h.get("pid")
-    reason = None
-    try:
-        status, _d = _request_shutdown(port, root)
-        if status != 200:
-            reason = f"/shutdown answered HTTP {status}"
-    except Exception as e:  # noqa: BLE001
-        reason = f"{type(e).__name__}: {e}"
-    if _wait_port_free(port, PORT_FREE_WAIT if reason is None else 0):
-        _out(f"Stopped the N3MC Lite server (pid {pid}).")
-        return 0
-    reason = reason or f"port {port} is still in use after {PORT_FREE_WAIT} seconds"
-    sys.stderr.write(f"Could not stop the N3MC Lite server (pid {pid}): {reason}. End the process whose "
-                     "command line contains n3mc_mcp.cli and --run-server.\n")
-    return 1
+# ── unavailable server: texts and the direct save (§3.16, §4.6) ──────────────
+
+def server_unavailable_detail(reason: str) -> str:
+    return (f"The N3MC Lite memory server was not available ({reason}), so this entry was saved without a "
+            "vector. It is found by keywords now and gets its vector from repair_memory once the server runs.")
 
 
-# ── the tools through the server, and without it (spec §4.6, §13) ───────────
-
-def _nudges():
-    from .tools import _NUDGE_AFTER_SAVE, _NUDGE_GENERIC
-    return _NUDGE_GENERIC, _NUDGE_AFTER_SAVE
-
-
-def direct_save_tool(cfg, args, reason, nudge=True) -> str:
-    """save_memory without the server: straight to Redis without a vector (spec §3.16, §4.6)."""
-    from .database import CONN_ERRORS, BackendError, Database
-    from .tools import dumps
-    generic, after_save = _nudges()
-    g = generic if nudge else ""
-    a = after_save if nudge else ""
-    db = Database(cfg, enforce_on_connect=False)
-    try:
-        r = db.save_memory(args.get("content"), agent_name=args.get("agent_name"), owner_id=args.get("owner_id"),
-                           importance=args.get("importance"), session_id=args.get("session_id"),
-                           turn_id=args.get("turn_id"), embed=False)
-    except (BackendError,) + CONN_ERRORS:
-        return dumps({"status": "error", "saved": False, "reason": backend_hint(cfg["redis_url"])}) + g
-    except Exception as e:  # noqa: BLE001
-        return f"Error: {type(e).__name__}: {e}" + g
-    finally:
-        db.close()
-    if r.get("status") == "error":
-        return dumps(r) + g
-    detail = (f"The N3MC Lite memory server was not available ({reason}), so this entry was saved without a "
-              "vector. It is found by keywords now and gets its vector from repair_memory once the server runs.")
-    if r.get("warning"):
-        r["warning"] = "embedding_unavailable; " + r["warning"]
-        r["detail"] = detail + " " + r.get("detail", "")
-    else:
-        r["warning"] = "embedding_unavailable"
-        r["detail"] = detail
-    return dumps(r) + a
-
-
-def unavailable_text(cfg, name, args, reason, sent=False, nudge=True) -> str:
-    """The answer of a tool when the server cannot be used (spec §4.6 "When the server is unavailable")."""
-    from .tools import TOOL_NAMES, dumps
-    generic, _a = _nudges()
-    g = generic if nudge else ""
-    if name not in TOOL_NAMES:
-        return f"Error: unknown tool '{name}'" + g
-    if name == "save_memory":
-        return direct_save_tool(cfg, args, reason, nudge)
+def unavailable_text(name: str, reason: str, sent: bool = False) -> str:
+    """The §4.6 table text without a reminder (save_memory is handled by direct_save_text)."""
     if name in ("search_memory", "list_memories", "recall_thread"):
         return (f"Error: memory backend unreachable. The N3MC Lite memory server is not available ({reason}). "
-                "It is started automatically; retry in a minute." + g)
+                "It is started automatically; retry in a minute.")
     if name in ("delete_memory", "delete_memories_by_session"):
-        if not sent:
-            return dumps({"status": "error", "reason": f"The N3MC Lite memory server is not available ({reason}). "
-                                                       "Nothing was deleted; retry in a minute."}) + g
-        return dumps({"status": "unknown",
-                      "reason": f"The request reached the N3MC Lite memory server but no answer came back "
-                                f"({reason}). The delete may have completed; check with list_memories or "
-                                "search_memory before deleting again."}) + g
-    return dumps({"status": "error", "message": f"The N3MC Lite memory server is not available ({reason}). "
-                                                "Retry in a minute."}) + g
+        if sent:
+            return json.dumps({"status": "unknown", "reason": (
+                f"The request reached the N3MC Lite memory server but no answer came back ({reason}). The "
+                "delete may have completed; check with list_memories or search_memory before deleting again.")},
+                ensure_ascii=False)
+        return json.dumps({"status": "error", "reason": (
+            f"The N3MC Lite memory server is not available ({reason}). Nothing was deleted; retry in a minute.")},
+            ensure_ascii=False)
+    if name == "repair_memory":
+        return json.dumps({"status": "error", "message": (
+            f"The N3MC Lite memory server is not available ({reason}). Retry in a minute.")}, ensure_ascii=False)
+    return f"Error: unknown tool '{name}'"
 
 
-def forward_tool(cfg, name, args, nudge=True, server_ok=True) -> str:
-    if not server_ok:
-        return unavailable_text(cfg, name, args, last_unavailable_reason(), False, nudge)
-    port = int(cfg["server_port"])
+def direct_save(cfg, content, embed_detail=None, **kw):
+    """Save straight into Redis without a vector. (result dict, None) or (None, hint)."""
+    from n3mc_mcp.database import Database
+    import redis
+    db = Database(cfg)
     try:
-        status, data = _post(port, f"/tools/{name}?nudge={1 if nudge else 0}", args, TOOL_TIMEOUT)
-    except _NotSent as e:
-        return unavailable_text(cfg, name, args, str(e), False, nudge)
-    except _NoAnswer as e:
-        return unavailable_text(cfg, name, args, str(e), True, nudge)
-    if status != 200 or not isinstance(data.get("text"), str):
-        return unavailable_text(cfg, name, args, f"HTTP {status}", True, nudge)
-    return data["text"]
-
-
-# ── hooks (spec §12) ─────────────────────────────────────────────────────────
-
-def _read_stdin() -> bytes:
-    try:
-        return sys.stdin.buffer.read()
-    except Exception:  # noqa: BLE001
+        status = db.ensure_connected(ephemeral=False)
+        if status != "ok":
+            return None, status
         try:
-            return sys.stdin.read().encode("utf-8", "surrogateescape")
-        except Exception:  # noqa: BLE001
-            return b""
+            return db.save_memory(content, embed=False, embed_detail=embed_detail, **kw), None
+        except (redis.ConnectionError, redis.TimeoutError):
+            return None, db.hint()
+    finally:
+        if db.client is not None:
+            try:
+                db.client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
-def _payload(raw: bytes):
-    """(payload dict or None, the decoded stdin) — lone surrogates removed."""
-    text = raw.decode("utf-8", "surrogateescape")
+def direct_save_text(cfg, args: dict, reason: str):
+    """The MCP save_memory answer without a server (§4.6): (JSON text, ok)."""
+    owner = args.get("owner_id")
+    if owner not in (None, "") and owner != cfg.get("owner_id"):
+        return json.dumps({"status": "error", "saved": False, "reason": "owner_id mismatch"}), False
+    imp = args.get("importance", 1.0)
+    if imp is not None:
+        try:
+            if isinstance(imp, bool):
+                raise ValueError
+            v = float(imp)
+            if v != v or v in (float("inf"), float("-inf")):
+                raise ValueError
+        except (TypeError, ValueError):
+            return json.dumps({"saved": False, "status": "error",
+                               "reason": f"importance must be numeric (got {imp})"}), False
+    res, hint = direct_save(cfg, args.get("content"), embed_detail=server_unavailable_detail(reason),
+                            agent_name=args.get("agent_name"), owner_id=owner, importance=imp,
+                            session_id=args.get("session_id"), turn_id=args.get("turn_id"))
+    if res is None:
+        return json.dumps({"status": "error", "saved": False, "reason": hint}, ensure_ascii=False), False
+    return json.dumps(res, ensure_ascii=False), res.get("status") != "error"
+
+
+# ── hooks (§12) ───────────────────────────────────────────────────────────────
+
+def _audit(record: dict) -> None:
+    record = dict(record)
+    record.setdefault("ts", paths.utc_now_iso())
+    paths.append_audit(record)
+
+
+def _parse_stdin(raw: str):
     try:
-        obj = json.loads(text)
+        payload = json.loads(raw)
     except ValueError:
-        return None, sanitize_surrogates(text)
-    if isinstance(obj, dict):
-        return sanitize_surrogates(obj), sanitize_surrogates(text)
-    return None, sanitize_surrogates(text)
+        return None
+    return sanitize_surrogates(payload)
 
 
 def _extract_text(prompt) -> str:
-    if isinstance(prompt, list):
-        return "\n".join(p.get("text", "") for p in prompt
+    def _parts(lst):
+        return "\n".join(p.get("text", "") for p in lst
                          if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str))
-    if not isinstance(prompt, str):
-        return ""
-    s = prompt.strip()
-    if s.startswith("["):
-        try:
-            arr = json.loads(s)
-        except ValueError:
-            return prompt
-        if (isinstance(arr, list) and arr
-                and all(isinstance(p, dict) and isinstance(p.get("type"), str) for p in arr)):
-            return _extract_text(arr)
-    return prompt
+    if isinstance(prompt, list):
+        return _parts(prompt)
+    if isinstance(prompt, str):
+        s = prompt.strip()
+        if s.startswith("["):
+            try:
+                arr = json.loads(s)
+            except ValueError:
+                arr = None
+            if (isinstance(arr, list) and arr
+                    and all(isinstance(p, dict) and isinstance(p.get("type"), str) for p in arr)):
+                return _parts(arr)
+        return prompt
+    return "" if prompt is None else str(prompt)
 
 
-def _audit_stage(stage, reason) -> None:
-    paths.audit_append({"ts": paths.utc_now_iso(), "hook": "UserPromptSubmit", "stage": stage, "reason": reason})
+def _read_turn_id(session_id, create: bool = True) -> str:
+    path = paths.turn_id_path(session_id)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            tid = f.read().strip()
+        if tid:
+            return tid
+    except OSError:
+        pass
+    tid = str(uuid.uuid4())
+    if create:
+        _write_turn_id(session_id, tid)
+    return tid
 
 
-def _user_text(content):
+def _write_turn_id(session_id, tid) -> None:
+    try:
+        paths.ensure_data_dir()
+        paths.atomic_write_text(paths.turn_id_path(session_id), tid)
+    except OSError as e:
+        _err(f"n3mc-lite: could not write the turn id ({e})")
+
+
+def _user_text(msg):
+    content = (msg or {}).get("content") if isinstance(msg, dict) else None
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = [p.get("text") for p in content
+        texts = [p.get("text") for p in content
                  if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)]
-        if parts:
-            return "\n".join(parts)
+        if texts:
+            return "\n".join(texts)
     return None
 
 
-_NOT_PROMPT_PREFIXES = ("[Request interrupted by user", "<command-", "<local-command-") + _SYSTEM_PROMPT_PREFIXES
+def _is_real_prompt(obj, text) -> bool:
+    if obj.get("isMeta") is True or text is None:
+        return False
+    if text.startswith(("[Request interrupted by user", "<command-", "<local-command-")):
+        return False
+    return not text.startswith(_SYSTEM_PROMPT_PREFIXES)
 
 
-def _previous_response(transcript_path, current_prompt):
-    """Claude's previous reply from the transcript (spec §12.5), or None."""
+def _read_previous_response(transcript_path, prompt: str):
+    """Claude's previous answer from the transcript (§12.5), or None."""
     try:
         if not isinstance(transcript_path, str) or not transcript_path:
             raise ValueError("no transcript_path")
-        p = Path(transcript_path)
-        size = p.stat().st_size
-        with open(p, "rb") as f:
-            start = max(0, size - 5 * 1024 * 1024)
+        size = os.path.getsize(transcript_path)
+        start = max(0, size - 5 * 1024 * 1024)
+        with open(transcript_path, "rb") as f:
             f.seek(start)
             data = f.read()
         lines = data.decode("utf-8", "replace").splitlines()
         if start > 0 and lines:
             lines = lines[1:]
-        newest_seen = False
-        cur = (current_prompt or "").strip()
+        newest = True
         for line in reversed(lines):
             try:
                 obj = json.loads(line)
@@ -788,382 +715,264 @@ def _previous_response(transcript_path, current_prompt):
                 continue
             if not isinstance(obj, dict) or obj.get("isSidechain") is True:
                 continue
-            typ = obj.get("type")
-            if typ not in ("user", "assistant"):
+            t = obj.get("type")
+            if t not in ("user", "assistant"):
                 continue
             msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            if typ == "user":
-                if obj.get("isMeta") is True:
+            if t == "user":
+                text = _user_text(msg)
+                if not _is_real_prompt(obj, text):
                     continue
-                text = _user_text(msg.get("content"))
-                if text is None or text.lstrip().startswith(_NOT_PROMPT_PREFIXES):
-                    continue
-                if not newest_seen and text.strip() == cur:
-                    newest_seen = True
-                    continue
+                if newest:
+                    newest = False
+                    if text == prompt:
+                        continue
                 return None
-            newest_seen = True
+            newest = False
             content = msg.get("content")
             texts = []
             if isinstance(content, str) and content.strip():
                 texts = [content]
             elif isinstance(content, list):
-                texts = [c.get("text") for c in content if isinstance(c, dict) and c.get("type") == "text"
-                         and isinstance(c.get("text"), str) and c.get("text").strip()]
+                texts = [p["text"] for p in content if isinstance(p, dict) and p.get("type") == "text"
+                         and isinstance(p.get("text"), str) and p["text"].strip()]
             if texts:
                 return sanitize_surrogates(texts[-1])
         return None
     except Exception as e:  # noqa: BLE001
-        _audit_stage("transcript_unreadable", f"{type(e).__name__}: {e}"[:200])
+        _audit({"hook": "UserPromptSubmit", "stage": "transcript_unreadable", "reason": f"{type(e).__name__}: {e}"[:300]})
         return None
 
 
-def _read_turn_id(session, create=True):
-    p = paths.turn_id_path(session)
-    try:
-        t = p.read_text(encoding="utf-8").strip()
-        if t:
-            return t
-    except OSError:
-        pass
-    if not create:
-        return None
-    t = str(uuid.uuid4())
-    _write_turn_id(session, t)
-    return t
+def _redis_unreachable(cfg) -> None:
+    _notify("redis_unreachable", f"N3MC Lite could not reach Redis, so a message was kept only in "
+                                 f"{paths.audit_log_path()}. " + _config.backend_hint(cfg.get("redis_url", "")))
 
 
-def _write_turn_id(session, turn_id) -> None:
-    p = paths.turn_id_path(session)
-    try:
-        paths.ensure_data_dir()
-        fd, tmp = tempfile.mkstemp(prefix=".turn.", suffix=".tmp", dir=str(p.parent))
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(turn_id)
-        os.replace(tmp, p)
-    except OSError as e:
-        _err(f"could not write {p}: {e}")
+def _after_save(res) -> None:
+    if isinstance(res, dict):
+        if res.get("status") in ("saved", "duplicate"):
+            _clear_notice("redis_unreachable")
+            _clear_notice("save_failed")
+        elif res.get("status") == "error":
+            _err(f"n3mc-lite: {res.get('reason')}")
 
 
-def _clear_save_notices() -> None:
-    _clear_notice("redis_unreachable")
-    _clear_notice("save_failed")
-
-
-def _hook_save(cfg, server_ok, content, role, session, turn_id) -> None:
-    """A hook save (spec §12.6): through /buffer, else directly to Redis without a vector."""
+def _hook_save(cfg, server_ok: bool, content: str, role: str, session_id, turn_id) -> None:
+    body = {"content": content, "role": role, "agent_name": "claude-code", "session_id": session_id or "",
+            "turn_id": turn_id, "no_model_wait": True}
     if server_ok:
         try:
-            status, data = _post(int(cfg["server_port"]), "/buffer",
-                                 {"content": content, "role": role, "agent_name": "claude-code",
-                                  "session_id": session or None, "turn_id": turn_id, "no_model_wait": True},
-                                 SHORT_TIMEOUT)
-        except (_NotSent, _NoAnswer) as e:
-            _err(f"the memory server did not take the save ({e}); saving directly")
-        else:
-            if status == 503:
-                _notify("redis_unreachable", _redis_unreachable_message(cfg, data.get("reason")))
-                return
+            status, data = _post(cfg, "/buffer", body, 30.0)
             if status == 200:
-                st = data.get("status")
-                if st in ("saved", "duplicate"):
-                    _clear_save_notices()
-                elif st == "error":
-                    _err(f"save: {data.get('reason')}")
+                _after_save(data)
                 return
-            _err(f"the memory server answered HTTP {status}; saving directly")
-    from .database import CONN_ERRORS, BackendError, Database
-    db = Database(cfg, enforce_on_connect=False)
+            if status == 503:
+                _redis_unreachable(cfg)
+                return
+        except Exception:  # noqa: BLE001
+            pass
     try:
-        r = db.save_memory(content, role=role, agent_name="claude-code", session_id=session or None,
-                           turn_id=turn_id, embed=False)
-        if r.get("status") in ("saved", "duplicate"):
-            _clear_save_notices()
-        elif r.get("status") == "error":
-            _err(f"save: {r.get('reason')}")
-    except (BackendError,) + CONN_ERRORS:
-        _notify("redis_unreachable", _redis_unreachable_message(cfg))
+        res, hint = direct_save(cfg, content, role=role, agent_name="claude-code",
+                                session_id=session_id or None, turn_id=turn_id)
     except Exception as e:  # noqa: BLE001
         _notify("save_failed", f"A record could not be saved ({type(e).__name__}: {e}). Current memories may be lost.")
-    finally:
-        db.close()
+        return
+    if res is None:
+        _redis_unreachable(cfg)
+        return
+    _after_save(res)
 
 
-def _fallback(reason) -> str:
+def _fallback_line(cfg) -> str:
+    if _FOREIGN_SERVER_ROOT is not None:
+        return f"_(memory search unavailable: {reason_foreign(cfg)})_"
+    return f"_(memory search unavailable: {unavailable_reason(cfg)})_"
+
+
+def _fallback(cfg, line: str) -> str:
     try:
-        notes = paths.take_due_notices()
+        notices = paths.take_due_notices()
     except Exception:  # noqa: BLE001
-        notes = []
-    return context.fallback_block(f"_(memory search unavailable: {reason})_", notes)
+        notices = []
+    from n3mc_mcp.context import fallback_block
+    return fallback_block(line, notices)
 
 
-def _search_block(cfg, server_ok, query, body_extra, hook=False) -> str:
-    """The `# Recalled Memory Context` block of --hook-submit / --search (spec §12.7)."""
+def _search_text(cfg, server_ok: bool, body: dict) -> str:
     if not server_ok:
-        if _FOREIGN_SERVER_ROOT is not None:
-            return _fallback(_foreign_reason(cfg["server_port"]))
-        return _fallback(last_unavailable_reason())
-    body = {"query": query}
-    body.update(body_extra)
+        return _fallback(cfg, _fallback_line(cfg))
     try:
-        status, data = _post(int(cfg["server_port"]), "/search", body, SHORT_TIMEOUT)
-    except (_NotSent, _NoAnswer) as e:
-        return _fallback(str(e))
+        status, data = _post(cfg, "/search", body, 30.0)
+    except Exception as e:  # noqa: BLE001
+        return _fallback(cfg, f"_(memory search unavailable: {type(e).__name__}: {e})_")
     if status == 200 and isinstance(data.get("text"), str):
         return data["text"]
     if status == 503:
-        hint = data.get("detail") or backend_hint(cfg["redis_url"])
-        _notify("redis_unreachable", _redis_unreachable_message(cfg, hint))
-        return _fallback(hint)
-    if status == 400 and not hook:
-        raise ValueError(data.get("detail") or "Error: bad request")
-    return _fallback(f"HTTPError: HTTP {status}")
+        _redis_unreachable(cfg)
+        return _fallback(cfg, f"_(memory search unavailable: {data.get('detail') or _config.backend_hint(cfg.get('redis_url', ''))})_")
+    if status == 400:
+        raise TimeBoundError(data.get("detail") or "Error: bad request")
+    return _fallback(cfg, f"_(memory search unavailable: HTTPError: HTTP {status})_")
 
 
-def cmd_hook_submit(uvx=False) -> int:
-    payload, raw_text = _payload(_read_stdin())
-    if payload is not None:
-        prompt = payload.get("prompt") if "prompt" in payload else payload.get("message")
+def hook_submit(raw: str, uvx: bool = False) -> int:
+    payload = _parse_stdin(raw)
+    if isinstance(payload, dict):
+        prompt = payload.get("prompt", payload.get("message"))
+        session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else ""
+        transcript = payload.get("transcript_path")
     else:
-        payload, prompt = {}, raw_text
+        prompt, session_id, transcript = sanitize_surrogates(raw), "", None
     text = _extract_text(prompt)
-    session = payload.get("session_id") if isinstance(payload.get("session_id"), str) else ""
-    if text.lstrip().startswith(_SYSTEM_PROMPT_PREFIXES):
-        _audit_stage("skipped", "system_prompt")
-        _out(EMPTY_BLOCK)
+    if text.startswith(_SYSTEM_PROMPT_PREFIXES):
+        _audit({"hook": "UserPromptSubmit", "stage": "skipped", "reason": "system_prompt"})
+        print(EMPTY_BLOCK)
         return 0
-    cfg = load_config()
-    try:
-        ok = ensure_server(cfg, max_wait=0)
-    except Exception as e:  # noqa: BLE001
-        _err(f"server check failed: {type(e).__name__}: {e}")
-        ok = False
+    cfg = _config.load_config()
+    ok = ensure_server(cfg, max_wait=0)
     if ok:
         try:
-            _post(int(cfg["server_port"]), "/repair", {}, HOOK_REPAIR_TIMEOUT)
+            _post(cfg, "/repair", {}, 10.0)
         except Exception as e:  # noqa: BLE001
-            _err(f"repair: {e}")
-    prev = _previous_response(payload.get("transcript_path"), text)
+            _err(f"n3mc-lite: repair failed ({type(e).__name__}: {e})")
+    prev = _read_previous_response(transcript, text)
     if prev and prev.strip():
-        _hook_save(cfg, ok, prev, "claude", session, _read_turn_id(session, create=True))
-    new_tid = str(uuid.uuid4())
-    _write_turn_id(session, new_tid)
+        _hook_save(cfg, ok, prev, "claude", session_id, _read_turn_id(session_id, create=True))
+    new_turn = str(uuid.uuid4())
+    _write_turn_id(session_id, new_turn)
     try:
-        if not text.strip():
-            out = EMPTY_BLOCK
+        if text.strip():
+            out = _search_text(cfg, ok, {"query": text, "session_id": session_id,
+                                         "max_chars": int(cfg.get("context_max_chars", 9500)),
+                                         "no_model_wait": True})
         else:
-            out = _search_block(cfg, ok, text, {"session_id": session or None,
-                                                "max_chars": int(cfg["context_max_chars"]),
-                                                "no_model_wait": True}, hook=True)
+            out = EMPTY_BLOCK
     except Exception as e:  # noqa: BLE001
-        out = (f"{context.HEADER_LINE}\n{context.SOURCE_LINE}\n\n"
-               f"_(memory search unavailable: {type(e).__name__})_")
-    _out(out)
-    if text.strip():
-        _hook_save(cfg, ok, text, "user", session, new_tid)
-    return 0
-
-
-def cmd_save_claude_turn() -> int:
-    payload, _raw = _payload(_read_stdin())
-    payload = payload or {}
-    session = payload.get("session_id") if isinstance(payload.get("session_id"), str) else ""
-    turn_id = _read_turn_id(session, create=True)      # before the config and the server check
-    msg = payload.get("last_assistant_message")
-    if isinstance(msg, str) and msg.strip():
-        cfg = load_config()
-        try:
-            ok = ensure_server(cfg, max_wait=0)
-        except Exception as e:  # noqa: BLE001
-            _err(f"server check failed: {type(e).__name__}: {e}")
-            ok = False
-        _hook_save(cfg, ok, msg, "claude", session, turn_id)
-    return 0
-
-
-# ── the rules file (spec §12.9) ──────────────────────────────────────────────
-
-_RULES_MD_TEMPLATE = """<!-- n3mc-lite-behavior v1 -->
-# N3MemoryCore Lite Behavioral Guidelines
-
-These guidelines apply to every Claude Code session in this project. They are
-loaded automatically from `.claude/rules/` at session start. N3MC Lite is a
-working memory: every record is deleted 7 days after it was saved.
-
-## Fully Automatic Saving
-All conversations are saved by hooks (UserPromptSubmit + Stop). Do NOT call
-`--buffer` for them. Every non-empty user message and Claude response is
-saved (fenced code blocks as `[code omitted]`); there is no length filter and
-no skip-pattern filter. Make NO acknowledgement when a save succeeds —
-silence is correct. Run `{cli} --buffer "<text>"` only when the user asks
-you to remember something specific.
-
-## Recalled Memory Context
-Every turn, the UserPromptSubmit hook adds a `# Recalled Memory Context` block
-to your context. Each hit starts with `### ` and shows its `saved=` time and,
-when it has one, `turn=<turn_id>`; a `[doc×N]` hit is a long text shown in
-full. When several versions of the same content appear, the one with the
-newest `saved` time is the current one. If the block contains a
-`> ⚠️ N3MC notice:` line, tell the user what it says.
-
-## Weak Matches
-Records under `#### Possibly related (weak matches — may be unrelated)` did
-not pass the relevance floors and are often unrelated. Use one only when it
-is actually relevant to the question; if it is not, ignore it and do not
-mention it.
-
-## Active RAG
-When prior context would help, run a search proactively. **Always invoke via
-`{cli} --search "<keywords>"`** (optional `--since 2026-11-13`,
-`--until 2026-11-14`). To read the conversation around a hit, run
-`{cli} --recall-thread <turn_id>`. `{cli} --list` shows the newest records.
-These commands are auto-allowed via `permissions.allow`.
-
-## Cut Context
-The block is kept within a size limit. If it says that lower-ranked matches
-were omitted, or ends with `_(cut here to keep this block within the context
-limit.)_`, and the missing part is needed, run `{cli} --search` with the same
-keywords: a manual search is not limited.
-
-## Deleting
-Delete only when the user explicitly asks: `{cli} --delete <id>` or
-`{cli} --delete-session <session_id>`. Both are irreversible and are not
-auto-allowed; confirm the id or session_id with the user first. They
-remove the memory from Redis only: the raw text stays in `audit.log` in
-the data folder (no TTL); tell the user so when they ask to forget
-something.
-
-## Seven-Day Lifetime
-When the user expects something to be kept permanently ("remember this
-forever", 「ずっと覚えておいて」), the hooks save it as usual; add ONE short
-sentence in the user's language: Lite memories are deleted 7 days after they
-were saved; for permanent storage use the Pro build or keep an external copy.
-
-## Recall Acknowledgment
-When recalled memory actually shapes your reply (you are recalling something
-saved earlier), open the reply with a short acknowledgment in the user's
-language — e.g. "Pulling this from earlier memory in this session." or
-「前回の回答がメモリに保存されています。」 If no relevant memory was found,
-or it did not influence your answer, do NOT announce anything.
-
-## Save Failures
-If a `> ⚠️ N3MC notice:` line says that Redis could not be reached or that a
-record could not be saved, tell the user prominently and relay the command it
-gives (for example `docker start redis-stack`): until then, new messages are
-kept only in `audit.log`.
-"""
-
-# SHA-256 (first 16 hex characters) of earlier templates, after the command forms are taken out.
-_KNOWN_RULES_MD_HASHES = set()
-
-RULES_MD_NAME = "n3mc-lite-behavior.md"
-_CLI_FORM_RES = (
-    re.compile(r'(?:"[^"\n]*"|[^\s`]+) -m n3mc_mcp\.cli'),
-    re.compile(r"uvx --from n3memorycore-mcp-lite==\S+ n3mc-lite"),
-)
-
-
-def _cli_form(uvx: bool) -> str:
-    if uvx:
-        return f"uvx --from n3memorycore-mcp-lite=={__version__} n3mc-lite"
-    return f"{shell_path(sys.executable)} -m n3mc_mcp.cli"
-
-
-def _rules_text(uvx: bool) -> str:
-    return _RULES_MD_TEMPLATE.replace("{cli}", _cli_form(uvx))
-
-
-def _strip_cli_forms(text: str) -> str:
-    for rx in _CLI_FORM_RES:
-        text = rx.sub("{cli}", text)
-    return text
-
-
-def _write_text_atomic(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".n3mc.", suffix=".tmp", dir=str(path.parent))
+        out = f"# Recalled Memory Context\n{SOURCE_LINE}\n\n_(memory search unavailable: {type(e).__name__})_"
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        print(out)
+        sys.stdout.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    if text.strip():
+        _hook_save(cfg, ok, text, "user", session_id, new_turn)
+    return 0
 
 
-def _stamp() -> str:
-    return datetime.now().strftime("%Y%m%d%H%M%S")
-
-
-def _ensure_rules_md(project, uvx=False) -> None:
-    path = Path(project) / ".claude" / "rules" / RULES_MD_NAME
-    want = _rules_text(uvx)
-    key = "rules_md_edited:" + hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
-    if not path.exists():
-        _write_text_atomic(path, want)
-        return
-    cur = path.read_text(encoding="utf-8").replace("\r\n", "\n")
-    if cur == want:
-        _clear_notice(key)
-        return
-    stripped = _strip_cli_forms(cur)
-    if (stripped == _RULES_MD_TEMPLATE
-            or hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:16] in _KNOWN_RULES_MD_HASHES):
-        shutil.copy2(path, path.with_name(f"{RULES_MD_NAME}.bak-n3mc-lite-{_stamp()}"))
-        _write_text_atomic(path, want)
-        _clear_notice(key)
-        return
-    _notify(key, f"The rules file {path.resolve()} has been edited by hand, so it was not updated. Merge the new "
-                 "template manually if needed.")
+def save_claude_turn(raw: str, uvx: bool = False) -> int:
+    payload = _parse_stdin(raw)
+    if not isinstance(payload, dict):
+        return 0
+    session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else ""
+    turn = _read_turn_id(session_id, create=True)   # before load_config and ensure_server (§12.4)
+    msg = payload.get("last_assistant_message")
+    if not isinstance(msg, str) or not msg.strip():
+        return 0
+    cfg = _config.load_config()
+    ok = ensure_server(cfg, max_wait=0)
+    _hook_save(cfg, ok, msg, "claude", session_id, turn)
+    return 0
 
 
 def _project_dir(payload) -> str:
-    env = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    env = os.environ.get("CLAUDE_PROJECT_DIR")
     if env and os.path.isdir(env):
         return env
     cwd = payload.get("cwd") if isinstance(payload, dict) else None
-    if isinstance(cwd, str) and cwd:
+    if isinstance(cwd, str) and cwd and os.path.isdir(cwd):
         return cwd
     return os.getcwd()
 
 
-def cmd_stop(uvx=False) -> int:
-    payload, _raw = _payload(_read_stdin())
-    payload = payload or {}
+def stop(raw: str, uvx: bool = False) -> int:
+    payload = _parse_stdin(raw)
     try:
         project = _project_dir(payload)
-        if not paths.same_folder(project, os.path.expanduser("~")):
+        home = os.path.normcase(os.path.abspath(os.path.expanduser("~")))
+        if os.path.normcase(os.path.abspath(project)) != home:
             _ensure_rules_md(project, uvx)
     except Exception as e:  # noqa: BLE001
-        _err(f"rules file: {type(e).__name__}: {e}")
+        _err(f"n3mc-lite: could not update the rules file ({type(e).__name__}: {e})")
     try:
-        now = time.time()
-        for p in paths.data_dir().glob("turn_id*.txt"):
-            try:
-                if now - p.stat().st_mtime > TURN_FILE_MAX_AGE:
-                    p.unlink()
-            except OSError:
-                pass
+        d = paths.data_dir()
+        cutoff = time.time() - 30 * 86400
+        if os.path.isdir(d):
+            for name in os.listdir(d):
+                if name.startswith("turn_id") and name.endswith(".txt"):
+                    p = os.path.join(d, name)
+                    if os.path.getmtime(p) < cutoff:
+                        os.unlink(p)
     except Exception as e:  # noqa: BLE001
-        _err(f"turn_id cleanup: {type(e).__name__}: {e}")
+        _err(f"n3mc-lite: could not clean the turn id files ({type(e).__name__}: {e})")
     try:
-        a = paths.audit_log_path()
-        if a.exists() and a.stat().st_size > AUDIT_ROTATE_BYTES:
-            os.replace(a, a.with_name(a.name + ".1"))
+        paths.rotate_audit_log()
     except Exception as e:  # noqa: BLE001
-        _err(f"audit.log rotation: {type(e).__name__}: {e}")
+        _err(f"n3mc-lite: could not rotate audit.log ({type(e).__name__}: {e})")
     return 0
 
 
-# ── --init (spec §12.8) ──────────────────────────────────────────────────────
+# ── rules file (§12.9) ────────────────────────────────────────────────────────
+
+_RULES_MD_TEMPLATE = '<!-- n3mc-lite-behavior v1 -->\n# N3MemoryCore Lite Behavioral Guidelines\n\nThese guidelines apply to every Claude Code session in this project. They are\nloaded automatically from `.claude/rules/` at session start. N3MC Lite is a\nworking memory: every record is deleted 7 days after it was saved.\n\n## Fully Automatic Saving\nAll conversations are saved by hooks (UserPromptSubmit + Stop). Do NOT call\n`--buffer` for them. Every non-empty user message and Claude response is\nsaved (fenced code blocks as `[code omitted]`); there is no length filter and\nno skip-pattern filter. Make NO acknowledgement when a save succeeds —\nsilence is correct. Run `{cli} --buffer "<text>"` only when the user asks\nyou to remember something specific.\n\n## Recalled Memory Context\nEvery turn, the UserPromptSubmit hook adds a `# Recalled Memory Context` block\nto your context. Each hit starts with `### ` and shows its `saved=` time and,\nwhen it has one, `turn=<turn_id>`; a `[doc×N]` hit is a long text shown in\nfull. When several versions of the same content appear, the one with the\nnewest `saved` time is the current one. If the block contains a\n`> ⚠️ N3MC notice:` line, tell the user what it says.\n\n## Weak Matches\nRecords under `#### Possibly related (weak matches — may be unrelated)` did\nnot pass the relevance floors and are often unrelated. Use one only when it\nis actually relevant to the question; if it is not, ignore it and do not\nmention it.\n\n## Active RAG\nWhen prior context would help, run a search proactively. **Always invoke via\n`{cli} --search "<keywords>"`** (optional `--since 2026-11-13`,\n`--until 2026-11-14`). To read the conversation around a hit, run\n`{cli} --recall-thread <turn_id>`. `{cli} --list` shows the newest records.\nThese commands are auto-allowed via `permissions.allow`.\n\n## Cut Context\nThe block is kept within a size limit. If it says that lower-ranked matches\nwere omitted, or ends with `_(cut here to keep this block within the context\nlimit.)_`, and the missing part is needed, run `{cli} --search` with the same\nkeywords: a manual search is not limited.\n\n## Deleting\nDelete only when the user explicitly asks: `{cli} --delete <id>` or\n`{cli} --delete-session <session_id>`. Both are irreversible and are not\nauto-allowed; confirm the id or session_id with the user first. They\nremove the memory from Redis only: the raw text stays in `audit.log` in\nthe data folder (no TTL); tell the user so when they ask to forget\nsomething.\n\n## Seven-Day Lifetime\nWhen the user expects something to be kept permanently ("remember this\nforever", 「ずっと覚えておいて」), the hooks save it as usual; add ONE short\nsentence in the user\'s language: Lite memories are deleted 7 days after they\nwere saved; for permanent storage use the Pro build or keep an external copy.\n\n## Recall Acknowledgment\nWhen recalled memory actually shapes your reply (you are recalling something\nsaved earlier), open the reply with a short acknowledgment in the user\'s\nlanguage — e.g. "Pulling this from earlier memory in this session." or\n「前回の回答がメモリに保存されています。」 If no relevant memory was found,\nor it did not influence your answer, do NOT announce anything.\n\n## Save Failures\nIf a `> ⚠️ N3MC notice:` line says that Redis could not be reached or that a\nrecord could not be saved, tell the user prominently and relay the command it\ngives (for example `docker start redis-stack`): until then, new messages are\nkept only in `audit.log`.\n'
+_KNOWN_RULES_MD_HASHES = frozenset()
+RULES_NAME = "n3mc-lite-behavior.md"
+
+
+def _cli_form(uvx: bool) -> str:
+    if uvx:
+        return f"uvx --from {PKG}=={__version__} n3mc-lite"
+    return f"{shell_path(sys.executable)} -m n3mc_mcp.cli"
+
+
+def _strip_forms(text: str) -> str:
+    text = re.sub(r'(?:"[^"\n]*"|[^\s`]+) -m n3mc_mcp\.cli', "{cli}", text)
+    return re.sub(r"uvx --from n3memorycore-mcp-lite==\S+ n3mc-lite", "{cli}", text)
+
+
+def _ensure_rules_md(project: str, uvx: bool) -> None:
+    path = os.path.join(project, ".claude", "rules", RULES_NAME)
+    want = _RULES_MD_TEMPLATE.replace("{cli}", _cli_form(uvx))
+    key = "rules_md_edited:" + hashlib.sha256(os.path.abspath(path).encode("utf-8")).hexdigest()[:12]
+    if not os.path.exists(path):
+        paths.atomic_write_text(path, want)
+        return
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        cur = f.read().replace("\r\n", "\n")
+    if cur == want:
+        _clear_notice(key)
+        return
+    stripped = _strip_forms(cur)
+    if stripped == _RULES_MD_TEMPLATE or \
+            hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:16] in _KNOWN_RULES_MD_HASHES:
+        stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        shutil.copyfile(path, f"{path}.bak-n3mc-lite-{stamp}")
+        paths.atomic_write_text(path, want)
+        _clear_notice(key)
+        return
+    _notify(key, f"The rules file {os.path.abspath(path)} has been edited by hand, so it was not updated. "
+                 "Merge the new template manually if needed.")
+
+
+# ── --init (§8, §12.8) ────────────────────────────────────────────────────────
 
 OURS = {  # event -> (entry-point name, module name)
     "UserPromptSubmit": ("n3mc-lite-hook", "n3mc_mcp.lite_hook"),
     "Stop":             ("n3mc-lite-stop-hook", "n3mc_mcp.lite_stop_hook"),
 }
 PKG_DIR = os.path.normcase(os.path.abspath(os.path.dirname(n3mc_mcp.__file__)))
+
+MCP_TOOLS_ALLOWED = ("search_memory", "save_memory", "list_memories", "recall_thread", "repair_memory")
+MCP_PERMISSION_RULES = [f"mcp__{MCP_NAME}__{t}" for t in MCP_TOOLS_ALLOWED]
+
+
+def permission_rules(python: str = None) -> list:
+    python = python or shell_path(sys.executable)
+    out = []
+    for prefix in (f"{python} -m n3mc_mcp.cli", "n3mc-lite"):
+        out += [f"Bash({prefix} --search *)", f"Bash({prefix} --buffer *)", f"Bash({prefix} --list*)",
+                f"Bash({prefix} --recall-thread *)", f"Bash({prefix} --repair*)", f"Bash({prefix} --stop*)"]
+    return out
 
 
 def _tokens(command: str) -> list:
@@ -1228,11 +1037,30 @@ def _short_path(p) -> str:
     return buf.value if 0 < n < len(buf) else ""
 
 
-def resolve_cmd(script_name: str) -> str:
+def _script_folders() -> list:
     folders = [sysconfig.get_path("scripts")]
     try:
         folders.append(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))
     except (KeyError, ValueError, AttributeError):
+        pass
+    return folders
+
+
+def find_script(script_name: str):
+    """The absolute path of a console script of this installation, or None."""
+    for folder in _script_folders():
+        for name in (script_name + ".exe", script_name):
+            cand = pathlib.Path(folder) / name
+            if cand.is_file():
+                return str(cand)
+    return shutil.which(script_name)
+
+
+def resolve_cmd(script_name: str) -> str:
+    folders = [sysconfig.get_path("scripts")]
+    try:
+        folders.append(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))
+    except (KeyError, ValueError):
         pass
     for folder in folders:
         for name in (script_name + ".exe", script_name):
@@ -1247,237 +1075,390 @@ def resolve_cmd(script_name: str) -> str:
     return f"{shell_path(sys.executable)} -m {module}"
 
 
-_RULE_SUFFIXES = ("--search *", "--buffer *", "--list*", "--recall-thread *", "--repair*", "--stop*")
-
-
-def permission_rules() -> list:
-    py = shell_path(sys.executable)
-    return ([f"Bash({py} -m n3mc_mcp.cli {s})" for s in _RULE_SUFFIXES]
-            + [f"Bash(n3mc-lite {s})" for s in _RULE_SUFFIXES])
-
-
-PERMISSION_RULES = permission_rules()
-
-
-def _old_mcp_messages() -> list:
-    out = []
-    cj = Path(os.path.expanduser("~")) / ".claude.json"
+def _read_json_file(path: pathlib.Path):
+    """(dict, None) or (None, reason). A missing file is {}."""
+    if not path.exists():
+        return {}, None
     try:
-        data = json.loads(cj.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        data = None
-    if isinstance(data, dict):
-        top = data.get("mcpServers")
-        if isinstance(top, dict) and MCP_NAME in top:
-            out.append(f"An MCP registration of {MCP_NAME} was found in Claude Code ({cj}). Claude Code now uses "
-                       f"the hooks; remove it with: claude mcp remove {MCP_NAME} -s user")
-        projects = data.get("projects")
-        if isinstance(projects, dict):
-            for ppath, proj in projects.items():
-                servers = proj.get("mcpServers") if isinstance(proj, dict) else None
-                if isinstance(servers, dict) and MCP_NAME in servers:
-                    out.append(f"An MCP registration of {MCP_NAME} was found in Claude Code ({cj}, project "
-                               f"{ppath}). Claude Code now uses the hooks; remove it with: claude mcp remove "
-                               f"{MCP_NAME} -s local (run it in that project)")
-    mj = Path.cwd() / ".mcp.json"
-    try:
-        mdata = json.loads(mj.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        mdata = None
-    if isinstance(mdata, dict) and isinstance(mdata.get("mcpServers"), dict) and MCP_NAME in mdata["mcpServers"]:
-        out.append(f"An MCP registration of {MCP_NAME} was found in Claude Code ({mj}). Claude Code now uses "
-                   f"the hooks; remove the \"{MCP_NAME}\" entry from {mj}")
-    return out
+        data = json.loads(path.read_bytes().decode("utf-8-sig"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return None, f"{type(e).__name__}: {e}"
+    if not isinstance(data, dict):
+        return None, "the top level is not a JSON object"
+    return data, None
 
 
-def cmd_init() -> int:
-    load_config()
-    sp = Path(os.path.expanduser("~")) / ".claude" / "settings.json"
-    existed = sp.exists()
-    if existed:
-        try:
-            data = json.loads(sp.read_text(encoding="utf-8-sig"))
-        except (OSError, ValueError) as e:
-            _out(f"{sp} could not be read ({type(e).__name__}: {e}); nothing was changed.")
-            return 1
-        if not isinstance(data, dict):
-            _out(f"{sp} is not a JSON object; nothing was changed.")
-            return 1
+def _write_json_file(path: pathlib.Path, data: dict, backup: bool = True) -> None:
+    if backup and path.exists():
+        stamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        shutil.copyfile(path, f"{path}.bak-n3mc-lite-{stamp}")
+    paths.atomic_write_text(str(path), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def mcp_entry() -> dict:
+    exe = find_script(MCP_NAME)
+    if exe:
+        entry = {"type": "stdio", "command": os.path.abspath(exe), "args": []}
     else:
-        data = {}
-    hooks = data.get("hooks", {})
-    perms = data.get("permissions", {})
-    allow = perms.get("allow", []) if isinstance(perms, dict) else None
-    if not isinstance(hooks, dict) or not isinstance(perms, dict) or not isinstance(allow, list):
-        _out(f"{sp} has a \"hooks\", \"permissions\" or \"permissions.allow\" of the wrong type; nothing was changed.")
-        return 1
-    for event in OURS:
-        if event in hooks and not isinstance(hooks[event], list):
-            _out(f"{sp} has a \"hooks.{event}\" that is not a list; nothing was changed.")
-            return 1
-    new = copy.deepcopy(data)
-    plugins = data.get("enabledPlugins")
-    plugin_on = isinstance(plugins, dict) and plugins.get(PLUGIN_KEY) is True
-    messages = []
-    new_hooks = new.setdefault("hooks", {}) if (not plugin_on or hooks) else new.get("hooks", {})
+        entry = {"type": "stdio", "command": sys.executable, "args": ["-m", "n3mc_mcp"]}
+    env = {"N3MC_AGENT_NAME": "claude-code"}
+    if os.environ.get("N3MC_DATA_DIR"):
+        env["N3MC_DATA_DIR"] = paths.data_dir()
+    entry["env"] = env
+    return entry
+
+
+def _settings_type_error(settings: dict):
+    hooks = settings.get("hooks")
+    if hooks is not None and not isinstance(hooks, dict):
+        return "hooks is not an object"
+    if isinstance(hooks, dict):
+        for ev in OURS:
+            if ev in hooks and not isinstance(hooks[ev], list):
+                return f"hooks.{ev} is not a list"
+    perms = settings.get("permissions")
+    if perms is not None and not isinstance(perms, dict):
+        return "permissions is not an object"
+    if isinstance(perms, dict):
+        for k in ("allow", "deny"):
+            if k in perms and not isinstance(perms[k], list):
+                return f"permissions.{k} is not a list"
+    return None
+
+
+def _has_own_hooks(settings: dict) -> bool:
+    hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
+    for ev in OURS:
+        for e in hooks.get(ev, []) or []:
+            if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+                for h in e["hooks"]:
+                    if isinstance(h, dict) and is_own_hook(h.get("command"), ev):
+                        return True
+    return False
+
+
+def _add_rules(settings: dict, rules) -> None:
+    perms = settings.setdefault("permissions", {})
+    allow = perms.setdefault("allow", [])
+    for r in rules:
+        if r not in allow:
+            allow.append(r)
+
+
+def _register_hooks(settings: dict, messages: list, settings_path) -> None:
+    enabled = settings.get("enabledPlugins") if isinstance(settings.get("enabledPlugins"), dict) else {}
+    plugin_on = enabled.get(PLUGIN_FULL) is True
+    hooks = settings.setdefault("hooks", {})
     for event, (exe_name, _module) in OURS.items():
-        entries = hooks.get(event, [])
-        desired = None if plugin_on else {"type": "command", "command": resolve_cmd(exe_name), "timeout": 60}
-        kept, placed = [], False
+        entries = hooks.get(event, []) or []
+        new_entries = []
+        insert_at = None
         for e in entries:
-            hs = e.get("hooks") if isinstance(e, dict) else None
-            if not isinstance(hs, list):
-                kept.append(e)
+            if not isinstance(e, dict) or not isinstance(e.get("hooks"), list):
+                new_entries.append(e)
                 continue
-            rest = []
-            for h in hs:
-                cmd = h.get("command") if isinstance(h, dict) else None
-                if isinstance(h, dict) and is_own_hook(cmd, event):
-                    if desired is not None and not placed and h == desired and len(hs) == 1:
-                        rest.append(h)
-                        placed = True
+            kept = []
+            had_own = False
+            for h in e["hooks"]:
+                if isinstance(h, dict) and is_own_hook(h.get("command"), event):
+                    had_own = True
                     continue
-                rest.append(h)
+                kept.append(h)
+                cmd = h.get("command") if isinstance(h, dict) else None
                 if isinstance(cmd, str) and "n3mc" in cmd.lower():
                     messages.append(f"Another N3MC hook is registered for {event} and was left in place: {cmd}")
-            if rest:
-                kept.append(e if rest == hs else dict(e, hooks=rest))
-        if desired is not None and not placed:
-            kept.append({"hooks": [desired]})
-            if desired["command"].startswith('"'):
-                messages.append(f"The hook command for {event} starts with a quote because {desired['command']} "
+            if had_own and insert_at is None:
+                insert_at = len(new_entries)
+            if kept:
+                e2 = dict(e)
+                e2["hooks"] = kept
+                new_entries.append(e2)
+            elif not had_own:
+                new_entries.append(e)
+        if not plugin_on:
+            cmd = resolve_cmd(exe_name)
+            entry = {"hooks": [{"type": "command", "command": cmd, "timeout": 60}]}
+            if insert_at is None:
+                new_entries.append(entry)
+            else:
+                new_entries.insert(insert_at, entry)
+            if cmd.startswith('"'):
+                messages.append(f"The hook command for {event} starts with a quote because {sys.executable} "
                                 "contains a space or another character the shell treats specially; if the hook "
                                 "does not run, install Python into a folder without such characters.")
-        if kept or event in hooks:
-            new_hooks[event] = kept
-    if not new_hooks and "hooks" not in data:
-        new.pop("hooks", None)
-    new_perms = new.setdefault("permissions", {})
-    new_allow = new_perms.setdefault("allow", [])
-    for rule in PERMISSION_RULES:
-        if rule not in new_allow:
-            new_allow.append(rule)
-    if new != data:
-        try:
-            sp.parent.mkdir(parents=True, exist_ok=True)
-            if existed:
-                shutil.copy2(sp, sp.with_name(f"settings.json.bak-n3mc-lite-{_stamp()}"))
-            _write_text_atomic(sp, json.dumps(new, indent=2, ensure_ascii=False) + "\n")
-        except OSError as e:
-            _out(f"{sp} could not be written ({type(e).__name__}: {e}).")
-            return 1
-    messages.extend(_old_mcp_messages())
-    for m in messages:
-        _out(m)
+        if new_entries:
+            hooks[event] = new_entries
+        elif event in hooks:
+            hooks[event] = new_entries
+    _add_rules(settings, permission_rules())
     if plugin_on:
-        _out("The n3mc-workingmemory plugin is enabled and registers the N3MC Lite hooks, so n3mc-lite --init "
-             "added no hooks.")
+        messages.append("The n3mc-workingmemory plugin is enabled and registers the N3MC Lite hooks, so "
+                        "n3mc-lite --init added no hooks.")
     else:
-        _out(f"N3MC Lite hooks registered in {sp}. Saving starts with the next Claude Code session.")
+        messages.append(f"N3MC Lite hooks registered in {settings_path}. Saving starts with the next "
+                        "Claude Code session.")
+
+
+def _apply_mcp(cj: dict, plugin: str) -> None:
+    servers = cj.setdefault("mcpServers", {})
+    if plugin:
+        servers.pop(MCP_NAME, None)
+    else:
+        servers[MCP_NAME] = mcp_entry()
+
+
+def init(hooks: bool = False) -> int:
+    _config.load_config()
+    home = pathlib.Path(os.path.expanduser("~"))
+    settings_path = home / ".claude" / "settings.json"
+    cj_path = home / ".claude.json"
+    settings, err = _read_json_file(settings_path)
+    if err is None:
+        err = _settings_type_error(settings)
+    if err is not None:
+        print(f"Could not read {settings_path} ({err}); nothing was changed.")
+        return 1
+    cj, err = _read_json_file(cj_path)
+    if err is None and "mcpServers" in cj and not isinstance(cj["mcpServers"], dict):
+        err = "mcpServers is not an object"
+    if err is not None:
+        print(f"Could not read {cj_path} ({err}); nothing was changed.")
+        return 1
+    messages = []
+    orig_settings = copy.deepcopy(settings)
+    enabled = settings.get("enabledPlugins") if isinstance(settings.get("enabledPlugins"), dict) else {}
+    plugin = next((p.split("@")[0] for p in (PLUGIN_MCP, PLUGIN_FULL) if enabled.get(p) is True), None)
+    own_hooks = _has_own_hooks(settings)
+    do_hooks = hooks or own_hooks
+
+    orig_cj = copy.deepcopy(cj)
+    _apply_mcp(cj, plugin)
+    cj_changed = cj != orig_cj
+    if not orig_cj.get("mcpServers") and cj.get("mcpServers") == {} and "mcpServers" not in orig_cj:
+        cj_changed = False
+
+    _add_rules(settings, MCP_PERMISSION_RULES)
+    perms = settings.get("permissions", {})
+    deny = perms.get("deny")
+    if isinstance(deny, list):
+        kept = []
+        for r in deny:
+            if isinstance(r, str) and (r == f"mcp__{MCP_NAME}" or r.startswith(f"mcp__{MCP_NAME}__")):
+                messages.append(f'Removed "{r}" from permissions.deny in {settings_path}: it hid the N3MC Lite '
+                                "MCP tools from Claude Code.")
+                continue
+            kept.append(r)
+        perms["deny"] = kept
+
+    hook_messages = []
+    if do_hooks:
+        _register_hooks(settings, hook_messages, settings_path)
+        if not hooks and own_hooks:
+            hook_messages.insert(0, f"N3MC Lite hooks are already registered in {settings_path}, so n3mc-lite "
+                                    "--init also refreshed them (MCP + hooks).")
+
+    if settings != orig_settings:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_file(settings_path, settings)
+    if cj_changed:
+        fresh, err = _read_json_file(cj_path)   # Claude Code writes this file too: re-read it
+        if err is None and (not isinstance(fresh.get("mcpServers", {}), dict)):
+            err = "mcpServers is not an object"
+        if err is not None:
+            print(f"Could not read {cj_path} ({err}); the MCP server was not registered.")
+            return 1
+        _apply_mcp(fresh, plugin)
+        _write_json_file(cj_path, fresh)
+
+    projects = cj.get("projects") if isinstance(cj.get("projects"), dict) else {}
+    for proj, pd in projects.items():
+        if isinstance(pd, dict) and isinstance(pd.get("mcpServers"), dict) and MCP_NAME in pd["mcpServers"]:
+            messages.append(f"Another registration of {MCP_NAME} was found in {cj_path} (project {proj}). In that "
+                            f"project Claude Code uses it instead of the one n3mc-lite --init wrote; remove it with: "
+                            f"claude mcp remove {MCP_NAME} -s local (run it in that project)")
+    mcp_json = pathlib.Path(os.getcwd()) / ".mcp.json"
+    mj, err = _read_json_file(mcp_json)
+    if err is None and isinstance(mj.get("mcpServers"), dict) and MCP_NAME in mj["mcpServers"]:
+        messages.append(f"Another registration of {MCP_NAME} was found in {mcp_json}. In that project Claude Code "
+                        f"uses it instead of the one n3mc-lite --init wrote; remove the \"{MCP_NAME}\" entry from "
+                        f"{mcp_json}")
+
+    if plugin:
+        head = (f"The {plugin} plugin is enabled and registers the N3MC Lite MCP server, so n3mc-lite --init "
+                "added no MCP server.")
+    else:
+        head = (f"N3MC Lite MCP server registered in {cj_path} (user scope). Restart Claude Code; the memory "
+                "tools appear in the next session.")
+    for m in messages:
+        print(m)
+    print(head)
+    for m in hook_messages:
+        print(m)
     return 0
 
 
-# ── the CLI (spec §13) ───────────────────────────────────────────────────────
+# ── the tool commands (§13) ───────────────────────────────────────────────────
 
-def _parser():
-    p = argparse.ArgumentParser(prog="n3mc-lite", description="N3MemoryCore MCP-Lite: 7-day working memory.")
+def _tool(cfg, name: str, args: dict) -> int:
+    ok = ensure_server(cfg)
+    sent = False
+    if ok:
+        try:
+            status, data = _post(cfg, f"/tools/{name}?nudge=0", args, 300.0)
+            if status == 200 and isinstance(data.get("text"), str):
+                print(data["text"])
+                return 0
+            reason, sent = f"HTTPError: HTTP {status}", True
+        except Exception as e:  # noqa: BLE001
+            reason, sent = classify_request_error(e)
+    elif _FOREIGN_SERVER_ROOT is not None:
+        reason = reason_foreign(cfg)
+    else:
+        reason = unavailable_reason(cfg)
+    if name == "save_memory":
+        text, _ = direct_save_text(cfg, args, reason)
+        print(text)
+    else:
+        print(unavailable_text(name, reason, sent))
+    return 0
+
+
+def _search_cmd(args) -> int:
+    try:
+        parse_time_bounds(args.since, args.until)
+    except TimeBoundError as e:
+        _err(str(e))
+        return 2
+    cfg = _config.load_config()
+    ok = ensure_server(cfg)
+    body = {"query": args.search}
+    for k in ("since", "until"):
+        v = getattr(args, k)
+        if v is not None:
+            body[k] = v
+    if args.limit is not None:
+        body["limit"] = args.limit
+    if os.environ.get("N3MC_SESSION_ID"):
+        body["session_id"] = os.environ["N3MC_SESSION_ID"]
+    try:
+        print(_search_text(cfg, ok, body))
+    except TimeBoundError as e:
+        _err(str(e))
+        return 2
+    return 0
+
+
+def stop_server() -> int:
+    cfg = _config.load_config()
+    port = int(cfg.get("server_port", 18524))
+    h = _health(cfg)
+    if not h or not h.get("root") or os.path.normcase(os.path.abspath(h["root"])) != _own_root():
+        print("No N3MC Lite server of this data folder is running.")
+        return 0
+    pid = h.get("pid")
+    ok = _request_shutdown(cfg, _own_root())
+    freed = _wait_port_free(port, 15.0) if ok else not _port_in_use(port)
+    if ok and freed:
+        print(f"Stopped the N3MC Lite server (pid {pid}).")
+        return 0
+    reason = "the stop request failed" if not ok else "the port was still in use after 15 seconds"
+    _err(f"Could not stop the N3MC Lite server (pid {pid}): {reason}. End the process whose command line "
+         "contains n3mc_mcp.cli and --run-server.")
+    return 1
+
+
+def _read_stdin_text() -> str:
+    try:
+        data = sys.stdin.buffer.read()
+        return data.decode("utf-8", "surrogateescape")
+    except Exception:  # noqa: BLE001
+        try:
+            return sys.stdin.read()
+        except Exception:  # noqa: BLE001
+            return ""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="n3mc-lite", description="N3MemoryCore MCP-Lite command line.")
     g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--search", metavar="KEYWORDS", help="search the memory")
-    g.add_argument("--buffer", metavar="TEXT", help="save a text ('-' reads stdin)")
-    g.add_argument("--list", action="store_true", help="list the newest records")
-    g.add_argument("--recall-thread", metavar="TURN_ID", help="the records around a turn")
-    g.add_argument("--delete", metavar="ID", help="delete a record (irreversible)")
-    g.add_argument("--delete-session", metavar="SESSION_ID", help="delete a session's records (irreversible)")
-    g.add_argument("--repair", action="store_true", help="ensure the index and add missing vectors")
-    g.add_argument("--stop-server", action="store_true", help="stop this data folder's memory server")
-    g.add_argument("--hook-submit", action="store_true", help=argparse.SUPPRESS)
-    g.add_argument("--save-claude-turn", action="store_true", help=argparse.SUPPRESS)
-    g.add_argument("--stop", action="store_true", help=argparse.SUPPRESS)
-    g.add_argument("--init", action="store_true", help="register the Claude Code hooks")
-    g.add_argument("--run-server", action="store_true", help=argparse.SUPPRESS)
+    g.add_argument("--search", metavar="KEYWORDS")
+    g.add_argument("--buffer", metavar="TEXT")
+    g.add_argument("--list", action="store_true")
+    g.add_argument("--recall-thread", metavar="TURN_ID")
+    g.add_argument("--delete", metavar="ID")
+    g.add_argument("--delete-session", metavar="SESSION_ID")
+    g.add_argument("--repair", action="store_true")
+    g.add_argument("--stop-server", action="store_true")
+    g.add_argument("--hook-submit", action="store_true")
+    g.add_argument("--save-claude-turn", action="store_true")
+    g.add_argument("--stop", action="store_true")
+    g.add_argument("--init", action="store_true")
+    g.add_argument("--run-server", action="store_true")
+    p.add_argument("--hooks", action="store_true", help="with --init: also register the hooks")
+    p.add_argument("--uvx", action="store_true")
     p.add_argument("--since")
     p.add_argument("--until")
     p.add_argument("--limit", type=int)
-    p.add_argument("--before", type=int)
-    p.add_argument("--after", type=int)
     p.add_argument("--agent-name")
     p.add_argument("--session-id")
     p.add_argument("--turn-id")
     p.add_argument("--importance", type=float)
-    p.add_argument("--uvx", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--before", type=int)
+    p.add_argument("--after", type=int)
     return p
 
 
-def _tool(name, args) -> int:
-    cfg = load_config()
-    ok = ensure_server(cfg)
-    _out(forward_tool(cfg, name, args, nudge=False, server_ok=ok))
-    return 0
-
-
 def main(argv=None) -> int:
-    args = _parser().parse_args(argv)
-    for k, v in list(vars(args).items()):
+    argv = sys.argv[1:] if argv is None else argv
+    parser = build_parser()
+    args = parser.parse_args([sanitize_surrogates(a) for a in argv])
+    for k, v in vars(args).items():
         if isinstance(v, str):
             setattr(args, k, sanitize_surrogates(v))
-    if args.hook_submit:
-        return cmd_hook_submit(args.uvx)
-    if args.save_claude_turn:
-        return cmd_save_claude_turn()
-    if args.stop:
-        return cmd_stop(args.uvx)
-    if args.init:
-        return cmd_init()
+    if args.hooks and not args.init:
+        parser.error("--hooks can only be used with --init")
     if args.run_server:
-        return run_server()
-    if args.stop_server:
-        return stop_server(load_config())
-    if args.search is not None:
-        try:
-            parse_time_bounds(args.since, args.until)
-        except ValueError as e:
-            sys.stderr.write(str(e) + "\n")
-            return 2
-        cfg = load_config()
-        ok = ensure_server(cfg)
-        body = {"since": args.since, "until": args.until}
-        if args.limit is not None:
-            body["limit"] = args.limit
-        sid = os.environ.get("N3MC_SESSION_ID", "").strip()
-        if sid:
-            body["session_id"] = sid
-        try:
-            out = _search_block(cfg, ok, args.search, body)
-        except ValueError as e:
-            sys.stderr.write(str(e) + "\n")
-            return 2
-        _out(out)
+        run_server()
         return 0
+    if args.init:
+        return init(hooks=args.hooks)
+    if args.hook_submit:
+        return hook_submit(_read_stdin_text(), args.uvx)
+    if args.save_claude_turn:
+        return save_claude_turn(_read_stdin_text(), args.uvx)
+    if args.stop:
+        return stop(_read_stdin_text(), args.uvx)
+    if args.stop_server:
+        return stop_server()
+    if args.search is not None:
+        return _search_cmd(args)
+    cfg = _config.load_config()
     if args.buffer is not None:
-        content = args.buffer
-        if content == "-":
-            content = sanitize_surrogates(_read_stdin().decode("utf-8", "surrogateescape"))
-        a = {"content": content, "agent_name": args.agent_name or "claude-code"}
-        for k in ("session_id", "turn_id", "importance"):
-            if getattr(args, k) is not None:
-                a[k] = getattr(args, k)
-        return _tool("save_memory", a)
+        content = _read_stdin_text() if args.buffer == "-" else args.buffer
+        a = {"content": sanitize_surrogates(content), "agent_name": args.agent_name or "claude-code"}
+        if args.session_id is not None:
+            a["session_id"] = args.session_id
+        if args.turn_id is not None:
+            a["turn_id"] = args.turn_id
+        if args.importance is not None:
+            a["importance"] = args.importance
+        return _tool(cfg, "save_memory", a)
     if args.list:
-        a = {} if args.limit is None else {"limit": args.limit}
-        return _tool("list_memories", a)
+        return _tool(cfg, "list_memories", {"limit": args.limit} if args.limit is not None else {})
     if args.recall_thread is not None:
         a = {"turn_id": args.recall_thread}
         if args.before is not None:
             a["before"] = args.before
         if args.after is not None:
             a["after"] = args.after
-        return _tool("recall_thread", a)
+        return _tool(cfg, "recall_thread", a)
     if args.delete is not None:
-        return _tool("delete_memory", {"id": args.delete})
+        return _tool(cfg, "delete_memory", {"id": args.delete})
     if args.delete_session is not None:
-        return _tool("delete_memories_by_session", {"session_id": args.delete_session})
+        return _tool(cfg, "delete_memories_by_session", {"session_id": args.delete_session})
     if args.repair:
-        return _tool("repair_memory", {})
+        return _tool(cfg, "repair_memory", {})
+    parser.error("no command")
     return 2
 
 

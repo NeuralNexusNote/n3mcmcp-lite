@@ -1,5 +1,6 @@
-"""The seven Tool definitions of spec §5 (3), shared by the MCP thin client (tools/list) and the
-resident server. Descriptions, argument texts, minimum / maximum and required are as written there."""
+"""The seven MCP Tool definitions of spec §5 (3), shared by the thin client and the
+resident server. Written exactly as the specification gives them."""
+
 from mcp.types import Tool
 
 TOOLS = [
@@ -218,4 +219,4 @@ TOOLS = [
     ),
 ]
 
-TOOL_NAMES = tuple(t.name for t in TOOLS)
+TOOL_NAMES = [t.name for t in TOOLS]

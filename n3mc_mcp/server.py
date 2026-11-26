@@ -1,7 +1,6 @@
-"""The MCP thin client `n3mc-workingmemory` (spec §4.6): stdio only; answers initialize and tools/list
-itself and forwards every tools/call to the resident server. No model, no Redis (except the direct
-save when the server cannot be used). stdout carries MCP messages only.
-"""
+"""MCP thin client `n3mc-workingmemory` (spec §4.6): answers initialize and tools/list itself and
+forwards every tools/call to the resident server. No model, and no Redis except the direct save
+when the server is not available. stdout carries MCP messages only."""
 import os as _os
 import sys as _sys
 
@@ -18,142 +17,153 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         pass
 
-import sys
-
 for _stream_name in ("stdin", "stdout", "stderr"):
-    _stream = getattr(sys, _stream_name, None)
+    _stream = getattr(_sys, _stream_name, None)
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
 import asyncio  # noqa: E402
 import os  # noqa: E402
+import sys  # noqa: E402
 import threading  # noqa: E402
 import uuid  # noqa: E402
 
-from mcp.server.lowlevel import Server  # noqa: E402
-from mcp.types import TextContent, Tool  # noqa: E402
+# The compiled modules the direct save loads are imported before stdio starts (§4.6 item 2).
+# redis and database.py are pure Python and are imported at the direct save, so that
+# initialize stays within 2 seconds.
+import psutil  # noqa: E402,F401
 
-from n3mc_mcp import __version__, cli  # noqa: E402
-# The direct save (§4.6) needs database.py and redis. Import them now, before stdio starts: on Windows an
-# import of a compiled module in a worker thread while stdio reads the stdin pipe can hang (spec §3.9).
-from n3mc_mcp import database as _database  # noqa: E402,F401
-try:  # psutil (compiled) is used by ensure_server in worker threads
-    import psutil as _psutil  # noqa: E402,F401
-except ImportError:  # pragma: no cover
-    _psutil = None
-from n3mc_mcp.config import load_config  # noqa: E402
+try:
+    import hiredis  # noqa: E402,F401
+except ImportError:
+    pass
+
+import mcp.types as types  # noqa: E402
+from mcp.server.lowlevel import Server  # noqa: E402
+from mcp.server.stdio import stdio_server  # noqa: E402
+
+from n3mc_mcp import __version__  # noqa: E402
+from n3mc_mcp import cli  # noqa: E402
+from n3mc_mcp import config as _config  # noqa: E402
 from n3mc_mcp.instructions import INSTRUCTIONS  # noqa: E402
-from n3mc_mcp.tooldefs import TOOL_NAMES, TOOLS  # noqa: E402
-from n3mc_mcp.tools import _NUDGE_GENERIC  # noqa: E402
+from n3mc_mcp.tooldefs import TOOLS  # noqa: E402
+from n3mc_mcp.tools import TOOL_NAMES, _NUDGE_AFTER_SAVE, _NUDGE_GENERIC  # noqa: E402
 
 SERVER_NAME = "n3mc-workingmemory"
+# The entry's own default session: N3MC_SESSION_ID, else one UUIDv4 for this process (§4.6 6.2).
+SESSION = os.environ.get("N3MC_SESSION_ID") or str(uuid.uuid4())
 
-# The entry's default session: N3MC_SESSION_ID of this process, else one UUIDv4 made at start (spec §4.6).
-SESSION_ID = os.environ.get("N3MC_SESSION_ID", "").strip() or str(uuid.uuid4())
-
-
-class _State:
-    cfg = None
+_state = {"cfg": None, "client_name": None}
 
 
-STATE = _State()
+def current_cfg() -> dict:
+    """config.json, read again on every call; an unreadable file keeps the last good settings."""
+    cfg = _config.load_config()
+    if cfg.get("_unreadable") and _state["cfg"] is not None:
+        return _state["cfg"]
+    if not cfg.get("_unreadable") or _state["cfg"] is None:
+        _state["cfg"] = cfg
+    return cfg
 
 
-def current_config():
-    """Re-read config.json on every call; while it cannot be read, keep the last readable one (or the
-    start-up one), so that the temporary owner_id does not change with every call."""
-    try:
-        new = load_config(quiet=True)
-    except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"[n3mc-lite] config.json: {type(e).__name__}: {e}\n")
-        new = None
-    if new is not None and (not new.get("_unreadable") or STATE.cfg is None):
-        STATE.cfg = new
-    return STATE.cfg
-
-
-def _blank(v) -> bool:
-    return v is None or (isinstance(v, str) and not v.strip())
-
-
-def prepare_args(name, arguments, client_name=None) -> dict:
-    args = dict(arguments) if isinstance(arguments, dict) else {}
-    if name in ("search_memory", "save_memory") and _blank(args.get("session_id")):
-        args["session_id"] = SESSION_ID
-    if name == "save_memory" and _blank(args.get("agent_name")):
-        for cand in (os.environ.get("N3MC_AGENT_NAME"), client_name):
-            if isinstance(cand, str) and cand.strip():
-                args["agent_name"] = cand.strip()
-                break
+def prepare_args(name: str, args) -> dict:
+    args = dict(args) if isinstance(args, dict) else {}
+    if name in ("search_memory", "save_memory"):
+        sid = args.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            args["session_id"] = SESSION
+    if name == "save_memory":
+        an = args.get("agent_name")
+        if not isinstance(an, str) or not an.strip():
+            for cand in (os.environ.get("N3MC_AGENT_NAME"), _state["client_name"]):
+                if isinstance(cand, str) and cand.strip():
+                    args["agent_name"] = cand.strip()
+                    break
     return args
 
 
-def handle_call(name, arguments, client_name=None) -> str:
-    """One tools/call, synchronously (run in a worker thread). Never raises."""
+def forward(name: str, args: dict) -> str:
+    """One tools/call: ensure_server, POST /tools/<name>?nudge=1, or the §4.6 answers."""
+    cfg = current_cfg()
+    ok = cli.ensure_server(cfg)
+    sent = False
+    if ok:
+        try:
+            status, data = cli._post(cfg, f"/tools/{name}?nudge=1", args, 300.0)
+            if status == 200 and isinstance(data, dict) and isinstance(data.get("text"), str):
+                return data["text"]
+            reason, sent = f"HTTPError: HTTP {status}", True
+        except Exception as e:  # noqa: BLE001
+            reason, sent = cli.classify_request_error(e)
+    elif cli._FOREIGN_SERVER_ROOT is not None:
+        reason = cli.reason_foreign(cfg)
+    else:
+        reason = cli.unavailable_reason(cfg)
+    if name == "save_memory":
+        text, saved_ok = cli.direct_save_text(cfg, args, reason)
+        return text + (_NUDGE_AFTER_SAVE if saved_ok else _NUDGE_GENERIC)
+    return cli.unavailable_text(name, reason, sent) + _NUDGE_GENERIC
+
+
+async def handle_call(name: str, arguments) -> list:
+    if name not in TOOL_NAMES:
+        return [types.TextContent(type="text", text=f"Error: unknown tool '{name}'" + _NUDGE_GENERIC)]
     try:
-        if name not in TOOL_NAMES:
-            return f"Error: unknown tool '{name}'" + _NUDGE_GENERIC
-        args = prepare_args(name, arguments, client_name)
-        cfg = current_config()
-        ok = cli.ensure_server(cfg)
-        return cli.forward_tool(cfg, name, args, nudge=True, server_ok=ok)
+        text = await asyncio.to_thread(forward, name, prepare_args(name, arguments))
     except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"[n3mc-lite] tool {name} failed: {type(e).__name__}: {e}\n")
-        return f"Error: {type(e).__name__}: {e}" + _NUDGE_GENERIC
+        print(f"n3mc-workingmemory: {name} failed ({type(e).__name__}: {e})", file=sys.stderr)
+        text = f"Error: {type(e).__name__}: {e}" + _NUDGE_GENERIC
+    return [types.TextContent(type="text", text=text)]
 
 
 def build_server() -> Server:
     server = Server(SERVER_NAME, version=__version__, instructions=INSTRUCTIONS)
 
     @server.list_tools()
-    async def list_tools() -> list[Tool]:
-        return list(TOOLS)
+    async def list_tools():
+        return TOOLS
 
     async def call_tool(name, arguments):
-        client_name = None
         try:
             params = server.request_context.session.client_params
-            client_name = params.clientInfo.name if params and params.clientInfo else None
+            if params is not None and params.clientInfo is not None:
+                _state["client_name"] = params.clientInfo.name
         except Exception:  # noqa: BLE001
-            client_name = None
-        text = await asyncio.to_thread(handle_call, name, arguments, client_name)
-        return [TextContent(type="text", text=text)]
+            pass
+        return await handle_call(name, arguments)
 
     try:
-        server.call_tool(validate_input=False)(call_tool)
+        decorator = server.call_tool(validate_input=False)
+        server._n3mc_validate_input = False
     except TypeError:
-        server.call_tool()(call_tool)
+        decorator = server.call_tool()
+        server._n3mc_validate_input = None
+    decorator(call_tool)
     return server
 
 
-def _background_ensure():
+def _background_start(cfg) -> None:
     try:
-        cli.ensure_server(STATE.cfg)
+        cli.ensure_server(cfg)
     except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"[n3mc-lite] could not start the memory server: {type(e).__name__}: {e}\n")
+        print(f"n3mc-workingmemory: could not start the memory server ({type(e).__name__}: {e})", file=sys.stderr)
 
 
-def start_background_ensure() -> threading.Thread:
-    t = threading.Thread(target=_background_ensure, name="n3mc-ensure-server", daemon=True)
-    t.start()
-    return t
-
-
-async def _serve():
-    from mcp.server.stdio import stdio_server
+async def _main() -> None:
+    cfg = current_cfg()
+    threading.Thread(target=_background_start, args=(cfg,), name="n3mc-ensure-server", daemon=True).start()
     server = build_server()
+    options = server.create_initialization_options()
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+        await server.run(read_stream, write_stream, options)
 
 
-def run():
-    current_config()
-    start_background_ensure()
+def run() -> None:
     try:
-        asyncio.run(_serve())
+        asyncio.run(_main())
     except KeyboardInterrupt:
         pass
 

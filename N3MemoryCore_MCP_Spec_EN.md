@@ -1,13 +1,13 @@
-# N3MemoryCore MCP-Lite v2.0.2 [Volatile Memory — hooks for Claude Code, MCP for other apps]
+# N3MemoryCore MCP-Lite v2.0.2 [Volatile Memory — MCP for every app, plus optional hooks for full recall in Claude Code]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build** uses SQLite + sqlite-vec to store memories permanently.
 >
-> **What it is made of**: MCP-Lite = N3MC-Free + MCP, with Redis as the database. Concretely: Lite's own search and save rules (this document, §3), plus Free's hooks, resident server and CLI (§3.15, §12, §13), plus a thin MCP entry for applications without hooks (§4.6). Free and Lite keep separate search and save rules.
+> **What it is made of**: MCP-Lite = N3MC-Free + MCP, with Redis as the database. Concretely: Lite's own search and save rules (this document, §3), plus Free's hooks, resident server and CLI (§3.15, §12, §13), plus a thin MCP entry for Claude Code and the other MCP-compatible applications (§4.6). Free and Lite keep separate search and save rules.
 >
-> **Who is this for?** Claude Code users (through **hooks** — every message and reply is saved and searched automatically) and users of other MCP-compatible applications such as the Claude desktop app (through **MCP**), who want searchable, short-lived memory shared across sessions within a 7-day window.
+> **Who is this for?** Users of Claude Code and of other MCP-compatible applications such as the Claude desktop app who want searchable, short-lived memory shared across sessions within a 7-day window. Lite is an MCP product: every application connects through **MCP**. In Claude Code the user can add the **hooks** to MCP: with them, every message and reply is saved automatically and the matching memories are added on every turn (full recall). Claude Code can run MCP only, MCP + hooks, or hooks only; all three are valid (§8).
 >
-> **Transport**: Claude Code: hooks and a CLI that talk to a resident server on `127.0.0.1` over HTTP. Other applications: Model Context Protocol over stdio (JSON-RPC) to a thin MCP entry, which forwards to the same resident server. Tested environment: Windows 11 with Python 3.12 and Redis Stack 7.x (the 1.x versions were also tested on Ubuntu). macOS is not a target.
+> **Transport**: applications that connect through MCP (Claude Code included) speak Model Context Protocol over stdio (JSON-RPC) to a thin MCP entry, which forwards over HTTP to a resident server on `127.0.0.1`. Claude Code's hooks and CLI talk to the same resident server over HTTP. Tested environment: Windows 11 with Python 3.12 and Redis Stack 7.x (the 1.x versions were also tested on Ubuntu). macOS is not a target.
 
 ## ⚠️ Disclaimer & Distribution Terms
 
@@ -22,7 +22,7 @@ By using this software, you agree to the terms above.
 
 - **License**: Apache License 2.0. See the `LICENSE` file for details.
 
-> **Removal (Uninstall)**: Ask the AI "Please remove N3MC Lite" so that the hook entries are removed too, or do it yourself: (1) plugin users: `/plugin uninstall n3mc-workingmemory@neuralnexusnote`; pip users: remove the two entries of `~/.claude/settings.json` whose command runs `n3mc-lite-hook` / `n3mc-lite-stop-hook`; (2) stop the resident server: `n3mc-lite --stop-server` (or end the process whose command line contains `n3mc_mcp.cli` and `--run-server`); (3) `pip uninstall n3memorycore-mcp-lite` removes the package; (4) stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly; (5) delete `${N3MC_DATA_DIR}` (default `~/.n3mc-workingmemory/`) to remove `config.json`, `audit.log` and the other files of §7; (6) remove the `n3mc-workingmemory` entry from the Claude desktop app's config file. `.claude/rules/n3mc-lite-behavior.md` in your project folders can be deleted by hand.
+> **Removal (Uninstall)**: Ask the AI "Please remove N3MC Lite" so that the Claude Code registrations are removed too, or do it yourself: (1) remove the Claude Code registrations: plugin users run `/plugin uninstall n3mc-workingmemory-mcp@neuralnexusnote` or `/plugin uninstall n3mc-workingmemory@neuralnexusnote` (the one installed); otherwise remove the MCP server with `claude mcp remove n3mc-workingmemory -s user` and, if the hooks were added, the two entries of `~/.claude/settings.json` whose command runs `n3mc-lite-hook` / `n3mc-lite-stop-hook`; (2) stop the resident server: `n3mc-lite --stop-server` (or end the process whose command line contains `n3mc_mcp.cli` and `--run-server`); (3) `pip uninstall n3memorycore-mcp-lite` removes the package; (4) stop and delete the Redis container (`docker rm -f redis-stack`) to erase all stored memories instantly; (5) delete `${N3MC_DATA_DIR}` (default `~/.n3mc-workingmemory/`) to remove `config.json`, `audit.log` and the other files of §7; (6) remove the `n3mc-workingmemory` entry from the Claude desktop app's config file. `.claude/rules/n3mc-lite-behavior.md` in your project folders can be deleted by hand.
 >
 > **Backup?** The Lite build is **not designed to be backed up**. Entries vanish on a 7d rolling window; if you need durable memory, the **Pro build** offers persistent storage.
 
@@ -58,51 +58,61 @@ This section captures the tradeoffs unique to the Lite build; the rest of the sp
 
 ## What changed in v2.0.0
 
-v2.0.0 is a MAJOR version (Semantic Versioning): the way Lite connects to Claude Code changed. Up to v1.12.2 (whose specification was titled v1.9.1) Lite was an MCP server only; the model decided what to save. From v2.0.0 Lite is "N3MC-Free + MCP, with Redis as the database".
+v2.0.0 is a MAJOR version (Semantic Versioning). Up to v1.12.2 (whose specification was titled v1.9.1) Lite was an MCP server only; the model decided what to save. From v2.0.0 Lite is "N3MC-Free + MCP, with Redis as the database": MCP works as before, and in Claude Code Free's hooks can be added.
 
 **Shape**
 
 ```
-Claude Code ──hooks / CLI (HTTP)─────────────────────────┐
-                                                         ├─▶ resident server (127.0.0.1:18524, model loaded once) ─▶ Redis Stack
-Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
-                                   (thin client, no model)
+Claude Code ────────(MCP, stdio)─▶ n3mc-workingmemory ───┐
+Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┤  (thin client, no model)
+                                                          ├─▶ resident server (127.0.0.1:18524, model loaded once) ─▶ Redis Stack
+Claude Code, optional ──hooks / CLI (HTTP)───────────────┘
 ```
 
 **Which application uses what**
 
 | Application | Connects through | Registered by |
 |---|---|---|
-| Claude Code | **the hooks only** (`UserPromptSubmit`, `Stop`) and the CLI `n3mc-lite` (§12, §13) | the plugin, or `n3mc-lite --init` |
-| Claude desktop app and other applications without hooks | **MCP only** (the thin client `n3mc-workingmemory`, §4.6) | the Claude desktop app: the AI writes its configuration file in the Method A setup; other applications: the user (§8) |
+| Claude Code | **MCP** (the thin client `n3mc-workingmemory`, §4.6), with the seven tools. The default configuration | `n3mc-lite --init`, the Method A setup (the AI runs `--init`), a plugin (`n3mc-workingmemory-mcp`, or the full-recall plugin `n3mc-workingmemory`), or `claude mcp add` (§8) |
+| Claude Code (when the user adds them) | **the hooks** (`UserPromptSubmit`, `Stop`) and the CLI `n3mc-lite` (§12, §13). Added to MCP: **full recall** | `n3mc-lite --init --hooks`, or the full-recall plugin `n3mc-workingmemory` (§8) |
+| Claude desktop app and other MCP-compatible applications | **MCP** (the thin client `n3mc-workingmemory`, §4.6) | the Claude desktop app: the AI writes its configuration file in the Method A setup; other applications: the user (§8) |
 
-- **Claude Code no longer uses MCP.** The plugin registers the hooks and no longer registers the MCP server in Claude Code; `n3mc-lite --init` never registers it either. Do not register the MCP server in Claude Code.
-- Both paths reach **the same resident server and the same Redis**: what is said in Claude Code is found from the desktop app, and what the desktop app saves is found in Claude Code.
+- **Claude Code has three configurations, all valid** (§8): (1) **MCP only** — as in v1.12.2, the model calls `search_memory` / `save_memory`. The automatic setups (`n3mc-lite --init`, Method A, the recommended plugin `n3mc-workingmemory-mcp`) register this one. (2) **MCP + hooks (full recall)** — the hooks save every message and reply and add the matching memories on every turn; the MCP tools stay available. Registered only when the user explicitly chooses it (`--init --hooks`, the full-recall plugin `n3mc-workingmemory`). (3) **Hooks only** — no MCP registration; the hooks and the CLI.
+- Every path reaches **the same resident server and the same Redis**: what is said in Claude Code is found from the desktop app, and what the desktop app saves is found in Claude Code.
 
 **What existing users see after the update**
 
 | Before (v1.12.2) | After (v2.0.0) |
 |---|---|
-| Claude Code showed the seven `mcp__…n3mc-workingmemory__*` tools | **Claude Code no longer shows the MCP tools.** The plugin does not register the MCP server any more |
-| Only what the model chose to pass to `save_memory` was saved | **Every non-empty message and reply is saved by the hooks** (fenced code blocks as `[code omitted]`), as `[user]` / `[claude]` records (§3.16) |
-| The model called `search_memory` at the start of a turn | The `UserPromptSubmit` hook searches with every message and puts the result into Claude's context under `# Recalled Memory Context` (§12) |
-| Search, list, recall and delete were MCP tools | In Claude Code the CLI gives the same: `n3mc-lite --search`, `--list`, `--recall-thread`, `--delete`, `--delete-session`, `--buffer`, `--repair` (§13). The text they print is the tool's text |
+| Claude Code showed the seven `mcp__…n3mc-workingmemory__*` tools | **The same.** The MCP registration keeps working, and a tool call goes through the thin client to the resident server (§4.6). The plugin `n3mc-workingmemory` registers the MCP server in `plugin.json` as in v1.12.2, and the hooks as well (§8) |
+| Only what the model chose to pass to `save_memory` was saved | **MCP only**: the same (§5, §11). **With the hooks**: every non-empty message and reply is saved by the hooks (fenced code blocks as `[code omitted]`), as `[user]` / `[claude]` records (§3.16); the model calls `save_memory` only when the user asks (§5 rule 2) |
+| The model called `search_memory` at the start of a turn | **MCP only**: the same (§5). **With the hooks**: the `UserPromptSubmit` hook searches with every message and puts the result into Claude's context under `# Recalled Memory Context` (§12); the model calls `search_memory` only when that block is not enough (§5 rule 1) |
+| Search, list, recall and delete were MCP tools | **The same tools.** The CLI gives the same: `n3mc-lite --search`, `--list`, `--recall-thread`, `--delete`, `--delete-session`, `--buffer`, `--repair` (§13). The text they print is the tool's text. The hooks-only configuration uses the CLI |
 | Each application started its own MCP server and loaded the model (~1.1 GB) | One resident server loads the model once (§3.15); the MCP entry is a thin client that never loads it (§4.6) |
 | No process ran between sessions | The resident server keeps running in the background after it was started |
-| pip users: register the MCP server | pip users: run `n3mc-lite --init` once to register the hooks (§12). An old `n3mc-workingmemory` registration in Claude Code is no longer used: Method A removes it, `--init` reports it and leaves it (§8) |
-| An old plugin or `.mcp.json` started `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` (no version) | **Update the plugin** (`/plugin update`). Until then, once `uvx` fetches 2.0.0, that registration starts the 2.0.0 thin client as an MCP server in Claude Code, with no hooks: the model searches and saves through the tools as in v1.12.2, now through the resident server (§4.6). `n3mc-lite --init` reports such a registration (§8) |
-| `N3MC_SESSION_ID` grouped every save of a Claude Code session into one project | Hook records carry Claude Code's own `session_id` (§3.16); `N3MC_SESSION_ID` still applies to MCP saves and searches (§4.6). Use `delete_memories_by_session` / `--delete-session` with the session id shown in a record (`--list`) |
+| pip users: register the MCP server | **The same.** `n3mc-lite --init` registers the MCP server `n3mc-workingmemory` in Claude Code (user scope, §8). For full recall, `n3mc-lite --init --hooks` adds the hooks too (§12) |
+| An old plugin or `.mcp.json` started `uvx --from n3memorycore-mcp-lite n3mc-workingmemory` (no version) | Once `uvx` fetches 2.0.x, that registration starts the 2.0.x thin client and keeps working as MCP (§4.6). As it is not pinned, it can run a different version from the other clients (§4.6 "Limits of this design"). `n3mc-lite --init` replaces that user-scope entry with an entry holding this installation's absolute path (§8); updating the plugin gives the pinned form |
+| `N3MC_SESSION_ID` grouped every save of a Claude Code session into one project | MCP: the same (§4.6). Hook records carry Claude Code's own `session_id` (§3.16). Use `delete_memories_by_session` / `--delete-session` with the session id shown in a record (`--list`) |
 | `N3MC_REDIS_URL` in an MCP client's `env` chose the Redis | The resident server uses the environment of the process that started it (§3.15). Put `redis_url` into `config.json` so every process uses the same one; a client whose own setting differs from the running server's gets the notice `redis_url_mismatch` |
 | `skip_code_blocks: true` rejected a `save_memory` with a fence | The same setting also skips every hook message or reply that contains a fence (§3.16); the default `false` stores it with `[code omitted]` |
-| The first `uvx` fetch and the model download happened when the MCP server started | They happen in the background after the first hook call: the hooks do not wait for the server (§12.3), so the first messages are saved without vectors and searched with keywords only until the model is ready |
-| `save_memory` without `agent_name` stored an empty name | MCP: `N3MC_AGENT_NAME`, else the client's `clientInfo.name`, else empty (§4.6); hooks: `claude-code` |
-| — | `--stop` writes `.claude/rules/n3mc-lite-behavior.md` in the root folder of each project where Claude Code ends a turn (§12.4, §12.9) |
-| `examples/claude_code_mcp.json` showed the MCP registration for Claude Code | Removed: Claude Code uses the hooks |
+| The first `uvx` fetch and the model download happened when the MCP server started | The resident server downloads the model in the background (§3.15). MCP: the entry answers `initialize` at once; the tools wait for the model up to 20 seconds, then answer with keywords only (§3.9, §4.6). Hooks: the hooks do not wait for the server (§12.3), so the first messages are saved without vectors and searched with keywords only until the model is ready |
+| `save_memory` without `agent_name` stored an empty name | MCP: `N3MC_AGENT_NAME`, else the client's `clientInfo.name`, else empty (§4.6); the Claude Code MCP registration sets `N3MC_AGENT_NAME=claude-code` (§8). Hooks: `claude-code` |
+| — | Hooks: `--stop` writes `.claude/rules/n3mc-lite-behavior.md` in the root folder of each project where Claude Code ends a turn (§12.4, §12.9) |
+| `examples/claude_code_mcp.json` showed the MCP registration for Claude Code | Removed: Claude Code's MCP registration is made by `n3mc-lite --init` or `claude mcp add` (§8) |
 | The Redis hint and the README said `docker run … -p 6379:6379 …` (all interfaces) | **(display change)** They say `-p 127.0.0.1:6379:6379`, so the memory is not reachable from the network. A container you already created keeps its own setting; to change it, recreate it (`docker rm -f redis-stack`, then the new `docker run`) — its memories are lost then, as on any restart (§3.4) |
 | Rule 0 and the search reminder named `n3mc-longtermmemory` as the persistent memory | **(display change)** They name `n3mc-pro`, `n3mc-pg` and `n3mc-longtermmemory` (the MCP registrations of N3MC MCP Pro, its PostgreSQL edition and the earlier MCP Pro) (§5 (1), (2)) |
 | Method A edited `claude_desktop_config.json` | The AI backs the file up and replaces only the `n3mc-workingmemory` entry (§8 "Automatic registration") |
 
-**What did not change**: the PyPI name `n3memorycore-mcp-lite`, the Python package `n3mc_mcp`, the MCP command and server name `n3mc-workingmemory` (alias `n3mc-mcp-lite`), the seven tools with the same names, arguments and output texts (except that the `search_memory` text is now kept within `context_max_chars`, §3.17), the Redis layout and settings (`redis_url`, `N3MC_REDIS_URL`), the 7-day TTL, the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the plugin name `n3mc-workingmemory`, and every search and save rule of §3. Records saved by v1.12.2 stay readable (same index, same fields).
+**When a 2.0.x user who used the hooks only updates to this version** (every change adds something; nothing that runs is stopped):
+
+| Item | After the update |
+|---|---|
+| The plugin `n3mc-workingmemory` | The hooks keep running. The plugin also registers the MCP server, so the MCP tools come back: MCP + hooks (full recall) |
+| Hooks registered by `n3mc-lite --init` | The hooks keep running (hooks only). Running `n3mc-lite --init` again adds the MCP server (the hooks stay and are registered again with the current absolute paths): MCP + hooks |
+| The model that receives the hook block | Rules 1 and 2 of the instructions (§5) keep the model from searching and saving on every turn while the hook block is present, so most searching and saving is still done by the hooks after MCP comes back |
+| `mcp__n3mc-workingmemory` added to `permissions.deny` by Method A | While it is there, Claude Code does not show the MCP tools. `n3mc-lite --init` removes the line (§8) |
+
+**What did not change**: the PyPI name `n3memorycore-mcp-lite`, the Python package `n3mc_mcp`, the MCP command and server name `n3mc-workingmemory` (alias `n3mc-mcp-lite`), the seven tools with the same names, arguments and output texts (except that the `search_memory` text is now kept within `context_max_chars`, §3.17), the Redis layout and settings (`redis_url`, `N3MC_REDIS_URL`), the 7-day TTL, the data folder `~/.n3mc-workingmemory` (`N3MC_DATA_DIR`), the plugin name `n3mc-workingmemory` (the full-recall plugin that registers the MCP server and the hooks; the MCP-only plugin is `n3mc-workingmemory-mcp`), and every search and save rule of §3. Records saved by v1.12.2 stay readable (same index, same fields).
 
 ---
 
@@ -113,7 +123,7 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 | Item                          | Requirement                                                              |
 | :---------------------------- | :----------------------------------------------------------------------- |
 | Python                        | 3.10 or higher                                                           |
-| Client                        | Claude Code (hooks), and/or the Claude desktop app or any other MCP client (MCP) |
+| Client                        | Claude Code (MCP; the user can add the hooks), and/or the Claude desktop app or any other MCP client (MCP) |
 | Redis Stack                   | Running on `localhost:6379` (or any URL set via `N3MC_REDIS_URL`)        |
 | pip packages (auto-installed) | `mcp` (**`>=1.0.0,<2.0.0`**) `redis` (`<8.0.0`) `sentence-transformers` `uuid-utils` `platformdirs` `numpy`, and `fastapi` `uvicorn` `pydantic` `psutil` (the resident server and its process checks, §3.15) |
 | OS                            | Windows 11 or Linux. macOS is not a target                               |
@@ -164,7 +174,9 @@ Re-running the `docker run` command after the container exists fails with `Confl
    4. **Ask**: in the prompt box, send "Please implement n3mcmcp-lite according to the specification `N3MemoryCore_MCP_Spec_EN.md`."
 
    The AI first checks the folder, Python and Redis ([§1](#1-vision), "Setup checks") and stops with instructions if something is missing. The AI generates the package layout, RediSearch index, the resident server, the hooks, the CLI and the MCP thin client. The staged **implement → debug → self-evaluate → quality-review** four-phase workflow is in [Appendix B](#appendix-b-recommended-ai-assisted-workflow).
-3. **Install and register (done by the AI)**: the AI runs `pip install -e .` in the project root, registers the **hooks** in Claude Code with `n3mc-lite --init`, writes the MCP entry (with absolute paths) into the Claude desktop app's configuration file if the app is installed (after a backup, replacing only that entry), and checks that everything starts ([§8 "Automatic registration after code generation"](#automatic-registration-after-code-generation-method-a--required)). You do not edit any Claude Code config file.
+
+   To add the **hooks** to Claude Code as well (full recall: every message and reply saved automatically and the matching memories added on every turn, §8), add "Please add the hooks too." to the request. Without it, Claude Code is connected through MCP only.
+3. **Install and register (done by the AI)**: the AI runs `pip install -e .` in the project root, registers the **MCP entry** in Claude Code with `n3mc-lite --init` (and, when the hooks were asked for, the **hooks** as well with `n3mc-lite --init --hooks`), writes the MCP entry (with absolute paths) into the Claude desktop app's configuration file if the app is installed (after a backup, replacing only that entry), and checks that everything starts ([§8 "Automatic registration after code generation"](#automatic-registration-after-code-generation-method-a--required)). You do not edit any Claude Code config file.
 4. **Restart the client.** The first memory search after the restart may take 30–60 seconds as the ~1.1 GB embedding model is downloaded and loaded by the resident server.
 
 #### Method B: Install the package (bonus)
@@ -177,17 +189,18 @@ If you just want to run it quickly from the published package:
      ```bash
      pip install n3memorycore-mcp-lite
      ```
-   - **uvx** (zero-install, isolated env — requires [`uv`](https://docs.astral.sh/uv/)), for the Claude desktop app:
+   - **uvx** (zero-install, isolated env — requires [`uv`](https://docs.astral.sh/uv/)), for the MCP registration of Claude Code and the Claude desktop app:
      ```bash
      uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-workingmemory
      ```
-   - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin runs the hooks through `uvx` for you, but `uv` must still be on PATH):
+   - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin runs the MCP entry through `uvx` for you, but `uv` must still be on PATH):
      ```
      /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
-     /plugin install n3mc-workingmemory@neuralnexusnote
+     /plugin install n3mc-workingmemory-mcp@neuralnexusnote
      ```
+     To add the hooks as well (full recall), install the full-recall plugin `n3mc-workingmemory@neuralnexusnote` instead. Do not enable both plugins (§8).
 3. **Connect the applications**:
-   - **Claude Code**: plugin users do nothing — the plugin registers the hooks. pip users run `n3mc-lite --init` once (§12). Do not register the MCP server in Claude Code.
+   - **Claude Code**: plugin users do nothing — the plugin registers the MCP entry (the full-recall plugin: the MCP entry and the hooks). pip users run `n3mc-lite --init` once, which registers the MCP entry in Claude Code (§8). To add the hooks too: `n3mc-lite --init --hooks` (§8, §12).
    - **Claude desktop app** (and other MCP clients): register the MCP entry in the application's config (see [§8](#8-client-configuration)).
 4. **Restart the client.** The first memory search may take 30–60 seconds as the ~1.1 GB embedding model is downloaded and loaded by the resident server.
 
@@ -199,11 +212,11 @@ Not applicable. See the [Lite: Volatile Memory](#lite-volatile-memory) section �
 
 ## 1. Vision
 
-Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector + RediSearch BM25), mathematically sound ranking, 7-day automatic garbage collection. For applications without hooks, the MCP server delivers behavioral instructions so the connected LLM auto-searches at the start of each turn and auto-saves after each meaningful exchange; in Claude Code, hooks do both (below).
+Provide a no-commitment memory endpoint for MCP clients: hybrid search (vector + RediSearch BM25), mathematically sound ranking, 7-day automatic garbage collection. For applications that connect through MCP (Claude Code included), the MCP server delivers behavioral instructions so the connected LLM auto-searches at the start of each turn and auto-saves after each meaningful exchange; in Claude Code with the hooks added, the hooks do both (below).
 
 The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Marketplace with zero risk to the user's disk; the **Pro build** keeps the memory permanently in SQLite + sqlite-vec (N3MC Pro, with an MCP entry in N3MC MCP Pro, whose tool set differs: §14).
 
-**Hooks for Claude Code.** Behavioral instructions cannot make the model save (§11). For Claude Code, which has hooks, Lite uses Free's hooks: the `UserPromptSubmit` hook saves the user's message and searches with it, the `Stop` hook saves the reply, so every exchange is saved and every message gets the matching memories without any tool call. The MCP instructions stay for applications without hooks. The search and save rules are Lite's own (§3) in both paths; only the way they are called differs.
+**MCP for Claude Code, plus hooks it can add.** Claude Code connects to the MCP entry like any other application, and the automatic setups register it (§8). Behavioral instructions cannot make the model save (§11), so in Claude Code the user can add Free's hooks (full recall): the `UserPromptSubmit` hook saves the user's message and searches with it, the `Stop` hook saves the reply, so every exchange is saved and every message gets the matching memories without any tool call. How the model uses the MCP tools while the hook block is present is set by rules 1 and 2 of the instructions (§5). The search and save rules are Lite's own (§3) in both paths; only the way they are called differs.
 
 > **⚠️ Setup checks (Method A — do these first, in this order, before writing any file)**: checks 1–3 stop the setup when they fail; check 4 fixes the problem itself. These checks exist because a setup can start in a folder that already holds a copy of an earlier setup from another PC, with Docker stopped, only a Python newer than tested (for example 3.15) installed and `.mcp.json` pointing at the other PC's Python; the implementing session then can neither build nor start the server. Stop at the first of checks 1–3 that fails and show the user what to do.
 
@@ -237,7 +250,7 @@ The Lite exists to demonstrate the N3MemoryCore MCP surface on the Claude Market
 > **⚠️ First-run download**: `sentence-transformers` downloads the `multilingual-e5-base` model (~1.1 GB) on first tool use. The server will appear unresponsive during this time — this is expected. Subsequent starts complete in seconds once cached.
 
 > **Important: Character Limits (Design Constraints)**
-> - Hook saves (Claude Code): every non-empty message and reply is saved whole, with no length or skip-pattern filter; long ones take the parent-document path below (§3.16).
+> - Hook saves (Claude Code with the hooks added): every non-empty message and reply is saved whole, with no length or skip-pattern filter; long ones take the parent-document path below (§3.16).
 > - Auto-save per entry (MCP `save_memory`): **50–200 characters recommended** (one fact per entry).
 > - Search query: **2,000 characters** (configurable via `search_query_max_chars`).
 > - Vector search: Only the first **~2,000 characters** of any record are semantically searchable (embedding model limit: 512 tokens). Beyond this, content is stored and BM25-searchable but invisible to vector similarity.
@@ -263,7 +276,7 @@ n3memorycore-mcp-lite/
 │   ├── tools.py                    # The tool handlers, nudges, _render_search, notices (§4.3, §5 (2)–(4)); run inside the resident server
 │   ├── instructions.py             # Behavioral instructions delivered at initialize (§5 (1))
 │   ├── app.py                      # Resident FastAPI server: /health /shutdown /buffer /search /repair /tools/{name} (§4.5)
-│   ├── cli.py                      # CLI `n3mc-lite`: --init --stop --hook-submit --save-claude-turn --run-server --search --buffer --list --recall-thread --delete --delete-session --repair; ensure_server, _start_server, _notify (§3.15, §12, §13)
+│   ├── cli.py                      # CLI `n3mc-lite`: --init [--hooks] --stop --hook-submit --save-claude-turn --run-server --search --buffer --list --recall-thread --delete --delete-session --repair; ensure_server, _start_server, _notify (§3.15, §12, §13)
 │   ├── lite_hook.py                # UserPromptSubmit hook entry: audit.log → `cli --hook-submit`
 │   ├── lite_stop_hook.py           # Stop hook entry: audit.log → `cli --save-claude-turn` → `cli --stop`
 │   ├── context.py                  # `# Recalled Memory Context` block, context_size, size limit (§3.17)
@@ -271,18 +284,23 @@ n3memorycore-mcp-lite/
 │   ├── processor.py                # Embedding, ranking, CJK tokenization, reranker
 │   ├── config.py                   # config.json load/save + UUID generation
 │   └── paths.py                    # data folder (~/.n3mc-workingmemory/) and its files (§7) + legacy platformdirs path for migration
-├── plugins/n3mc-workingmemory/     # Claude Code plugin (§8, §12)
-│   ├── .claude-plugin/plugin.json  # no "mcpServers"
+├── plugins/n3mc-workingmemory-mcp/ # Claude Code plugin: MCP only (the default one, §8)
+│   ├── .claude-plugin/plugin.json  # "mcpServers": n3mc-workingmemory through uvx
+│   └── hooks/
+│       ├── hooks.json              # SessionStart only
+│       └── install_permissions.py  # the same file as below; run with --mcp: permission rules for the MCP tools (§8)
+├── plugins/n3mc-workingmemory/     # Claude Code plugin: MCP + hooks, full recall (chosen by the user, §8, §12)
+│   ├── .claude-plugin/plugin.json  # the same "mcpServers"
 │   └── hooks/
 │       ├── hooks.json              # SessionStart + UserPromptSubmit + Stop
-│       └── install_permissions.py  # SessionStart: permission rules for the CLI commands (§8)
+│       └── install_permissions.py  # SessionStart: permission rules for the CLI commands and the MCP tools (§8)
 ├── .claude-plugin/marketplace.json # Marketplace entry; metadata.version = package version
 ├── tests/                          # pytest suite (§9)
 │   ├── conftest.py
 │   ├── test_database.py  test_processor.py  test_server.py  test_regressions.py
 │   └── test_hooks.py  test_api.py  test_cli.py  test_mcp_client.py  test_context_limit.py  test_coexistence.py  test_safe_path.py
 └── examples/
-    └── claude_desktop_config.json  # the desktop registration of §8 (no claude_code_mcp.json: Claude Code uses hooks)
+    └── claude_desktop_config.json  # the desktop registration of §8 (Claude Code is registered by n3mc-lite --init or claude mcp add, §8)
 ```
 
 `config.json` lives in **`~/.n3mc-workingmemory/`** (see [§7](#7-data-location)). No database file exists on disk — memory state lives entirely in Redis.
@@ -291,15 +309,15 @@ n3memorycore-mcp-lite/
 
 | Script | Maps to | Purpose |
 |---|---|---|
-| `n3mc-workingmemory` | `n3mc_mcp.__main__:run` | MCP thin client (the command the Claude desktop app starts) |
+| `n3mc-workingmemory` | `n3mc_mcp.__main__:run` | MCP thin client (the command Claude Code and the Claude desktop app start) |
 | `n3mc-mcp-lite` | `n3mc_mcp.__main__:run` | Deprecated alias of `n3mc-workingmemory` (pre-1.5 configs) |
-| `n3mc-lite` | `n3mc_mcp.cli:main` | CLI for Claude Code and humans (§13) |
+| `n3mc-lite` | `n3mc_mcp.cli:main` | Registration in Claude Code (`--init`), and the CLI for Claude Code with the hooks added and for humans (§13) |
 | `n3mc-lite-hook` | `n3mc_mcp.lite_hook:main` | UserPromptSubmit hook (§12) |
 | `n3mc-lite-stop-hook` | `n3mc_mcp.lite_stop_hook:main` | Stop hook (§12) |
 
 The resident server is started as `python -m n3mc_mcp.cli --run-server` (§3.15); `python -m n3mc_mcp.cli` is also the command form the rules file gives Claude (§12).
 
-**`pyproject.toml`**: in the published repository, keep the current file (hatchling build backend, metadata, keywords, classifiers, `[tool.hatch…]` sections) and change only the items below. **When Method A generates into an empty folder**, write this file and then apply the same items: `[build-system]` `requires = ["hatchling>=1.21.0"]`, `build-backend = "hatchling.build"`; `[project]` `name = "n3memorycore-mcp-lite"`, `description = "N3MemoryCore MCP Lite - ephemeral 7-day hybrid-search memory over Redis Stack"`, `readme = { file = "README.md", content-type = "text/markdown" }`, `license = { file = "LICENSE" }`, `requires-python = ">=3.10"`, `authors = [{ name = "NeuralNexusNote" }]`, the dependencies below; `[tool.hatch.build.targets.wheel]` `packages = ["n3mc_mcp"]`. Without the files that `readme` and `license` point to, hatchling cannot build the metadata and `pip install -e .` fails, so Method A also writes `README.md` (a short user guide written from this spec) and `LICENSE` (the full text of the Apache License 2.0). Keywords, classifiers and URLs are optional for a local installation. The plugin files (`plugins/…/plugin.json`, `.claude-plugin/marketplace.json`) belong to the published repository only; Method A does not create them.
+**`pyproject.toml`**: in the published repository, keep the current file (hatchling build backend, metadata, keywords, classifiers, `[tool.hatch…]` sections) and change only the items below. **When Method A generates into an empty folder**, write this file and then apply the same items: `[build-system]` `requires = ["hatchling>=1.21.0"]`, `build-backend = "hatchling.build"`; `[project]` `name = "n3memorycore-mcp-lite"`, `description = "N3MemoryCore MCP Lite - ephemeral 7-day hybrid-search memory over Redis Stack"`, `readme = { file = "README.md", content-type = "text/markdown" }`, `license = { file = "LICENSE" }`, `requires-python = ">=3.10"`, `authors = [{ name = "NeuralNexusNote" }]`, the dependencies below; `[tool.hatch.build.targets.wheel]` `packages = ["n3mc_mcp"]`. Without the files that `readme` and `license` point to, hatchling cannot build the metadata and `pip install -e .` fails, so Method A also writes `README.md` (a short user guide written from this spec) and `LICENSE` (the full text of the Apache License 2.0). Keywords, classifiers and URLs are optional for a local installation. The plugin files (the two plugins under `plugins/`, `.claude-plugin/marketplace.json`) belong to the published repository only; Method A does not create them.
 
 - `version = "2.0.2"`.
 - `dependencies`: the current six (`mcp>=1.0.0,<2.0.0`, `redis>=5.0.0,<8.0.0`, `sentence-transformers>=2.7.0`, `uuid-utils>=0.6.0`, `platformdirs>=4.0.0`, `numpy>=1.26.0`) plus `fastapi>=0.110`, `uvicorn>=0.27`, `pydantic>=2.0`, `psutil>=5.9` (Free's lower bounds).
@@ -307,7 +325,7 @@ The resident server is started as `python -m n3mc_mcp.cli --run-server` (§3.15)
 - `[project.scripts]`: the five scripts of the table above.
 - The classifier `Operating System :: OS Independent` becomes `Operating System :: Microsoft :: Windows` and `Operating System :: POSIX :: Linux` (macOS is not a target).
 
-`.claude-plugin/marketplace.json` `metadata.version` and `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` `version` are the package version (`2.0.2`). **The `uvx` commands are pinned to the same version**: every `uvx --from n3memorycore-mcp-lite==<version>` in this document (the plugin's hooks, the permission rules, the rules file's `{cli}`, the desktop registration) names the package version; a release changes all of them together with the two `version` fields. Without the pin, the plugin and a pip installation could run different versions, whose servers have different `code_version`s and replace each other (§4.6).
+`.claude-plugin/marketplace.json` `metadata.version` and the `version` of the two plugins, `plugins/n3mc-workingmemory-mcp/.claude-plugin/plugin.json` and `plugins/n3mc-workingmemory/.claude-plugin/plugin.json`, are the package version (`2.0.2`). `plugins` in `marketplace.json` lists the two plugins (`n3mc-workingmemory-mcp` first). **The `uvx` commands are pinned to the same version**: every `uvx --from n3memorycore-mcp-lite==<version>` in this document (the plugins' `mcpServers`, the plugin's hooks, the permission rules, the rules file's `{cli}`, the MCP registrations of Claude Code and the desktop app) names the package version; a release changes all of them together with the three `version` fields. Without the pin, the plugin and a pip installation could run different versions, whose servers have different `code_version`s and replace each other (§4.6).
 
 **Files kept as they are (not generated from this specification)**: `SECURITY.md`, `CONTRIBUTING.md`, `.github/` (issue and PR templates, `workflows/test.yml`, `workflows/pypi-publish.yml`), `server.json` (MCP registry entry), `.gitignore`, the evaluation scripts `tests/eval_*.py`, and `tests/test_cross_session.py`. Regenerating the code must not delete or rewrite them. When the CI matrix in `.github/workflows/test.yml` is edited by hand, it lists Windows and Linux only.
 
@@ -337,7 +355,7 @@ The resident server is started as `python -m n3mc_mcp.cli --run-server` (§3.15)
 > | 12 | Control characters / CJK punctuation left in the BM25 query | `Syntax error` (BM25 silently skipped) / 0 BM25 hits for `「記憶装置」は？` | Control chars → space; strip CJK and full-width punctuation too | [§3.7](#37-text-tokenization--punctuation-handling) |
 > | 13 | Redis checked only at startup / connection errors swallowed | After `docker start redis-stack` the server still says Redis is down; a Redis that stops later yields `_No memories found._` | `ensure_connected()` (PING / reconnect) before every tool; re-raise `ConnectionError` / `TimeoutError` | [§3.9](#39-startup-sequence--self-recovery) |
 > | 14 | Config in `%LOCALAPPDATA%` | The Store (MSIX) Claude desktop app redirects its MCP servers' `%LOCALAPPDATA%` → two `config.json`, two `owner_id`s; memories saved from the desktop app are invisible to terminal `claude` and vice versa | Keep the config in `~/.n3mc-workingmemory/` (not redirected); migrate once | [§7](#7-data-location) |
-> | 15 | Plugin auto-approve rules use the plain server name / hook failure only exits non-zero | Plugin users are prompted on every memory call; with no Python the only sign is `SessionStart hook error … python: command not found` | Allow `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` (+ `mcp__n3mc-workingmemory__*`); Python-free fallback prints `systemMessage` JSON and exits 0 | [§8](#auto-approve-claude-code-only) |
+> | 15 | Plugin auto-approve rules use the plain server name / hook failure only exits non-zero | Plugin users are prompted on every memory call; with no Python the only sign is `SessionStart hook error … python: command not found` | Allow each tool except the two delete tools in the form that carries the plugin name, `mcp__plugin_n3mc-workingmemory-mcp_n3mc-workingmemory__<tool>` (`--init` and a manual registration: `mcp__n3mc-workingmemory__<tool>`); Python-free fallback prints `systemMessage` JSON and exits 0 | [§8](#auto-approve-claude-code-only) |
 > | 16 | `mcp` without an upper bound | A fresh install (`uvx`, `pip`, plugin) gets `mcp` 2.x and the server dies on import: `AttributeError: 'Server' object has no attribute 'list_tools'` — `/mcp` shows only `Connection closed` | Pin `mcp>=1.0.0,<2.0.0` in `pyproject.toml` until the server is ported to the 2.x API | [Setup](#prerequisites) |
 > | 17 | Model download retried on every call / degraded search not reported | Offline first run: each `save_memory` ~24 s, each `search_memory` ~12 s; keyword-only results look normal | Retry at most once a minute; notice on every degraded `search_memory`, `detail` on `save_memory` | [§3.9](#39-startup-sequence--self-recovery) |
 > | 18 | Only `strip()` decides "empty" | `\x00`, a lone `U+200B` or `U+FEFF` is saved as a memory that shows as nothing | Reject content with no visible character (`has_visible_text`); store everything else verbatim | [§3.13](#313-encoding-safety) |
@@ -357,6 +375,7 @@ The resident server is started as `python -m n3mc_mcp.cli --run-server` (§3.15)
 > | 32 | Hooks of the plugin and of `--init` both registered | Two searches injected per message; the `[user]` and `[claude]` records of one exchange get different `turn_id`s | `--init` registers nothing while the plugin is enabled; the plugin's SessionStart hook reports `--init` hooks | [§14](#14-coexistence-with-other-n3mc-products) |
 > | 33 | Hook output longer than 10,000 characters | Claude Code moves it to a file and Claude sees a 2,000-character preview | `context_max_chars` (default 9,500) on the hook's and the MCP `search_memory`'s block | [§3.17](#317-context-size-limit) |
 > | 34 | A hook that raises or exits non-zero when Redis or the server is down | Claude Code shows a hook error on every message; the prompt is lost | `audit.log` first; direct save without a vector; a notice; exit 0 | [§12](#12-claude-code-hooks) |
+> | 35 | `mcp__n3mc-workingmemory` left in `permissions.deny` of `~/.claude/settings.json` / the MCP entry registered in two places | Claude Code shows no MCP tools / the same seven tools appear twice (plugin and user scope) | `n3mc-lite --init` removes the deny line; while a plugin registers the MCP entry, `--init` adds no user-scope entry; the plugins' SessionStart reports a double registration | [§8](#8-client-configuration) |
 
 ### 3.1 ID Hierarchy
 
@@ -511,7 +530,7 @@ n3mc_idx                    RediSearch index, ON HASH PREFIX 1 mem:
 - **Delete semantics**: `delete_memory` branches on the id:
   - Only records of the configured `owner_id` are deleted (another owner's id → `not_found`).
   - If a `doc:<uuid>` key exists with that id → delete the parent, `docsha:<sha1>`, and every chunk listed in its `chunk_ids` (older parents without `chunk_ids`: chunks whose `parent_id` matches, §3.11), in a single pipeline (cascade).
-  - Otherwise → delete `mem:<uuid>` and its sibling `mem:sha:<sha1>` — **only for a standalone record, and the guard only when it points at this record**: a child chunk (non-empty `parent_id`) owns no guard, so deleting it deletes only `mem:<uuid>`. For a standalone record, one Lua script deletes the record and deletes `mem:sha:<turn_id>:<sha1>` only when `GET` of the guard equals this id. `delete_memories_by_session` uses the same check for each standalone record. (Deleting the guard together with a chunk would remove the guard of a standalone record with the same text, so the next save of that text would be `saved` again and the record stored twice.)
+  - Otherwise → delete `mem:<uuid>` and its sibling `mem:sha:<sha1>` — **only for a standalone record, and the guard only when it points at this record**: a child chunk (non-empty `parent_id`) owns no guard, so deleting it deletes only `mem:<uuid>`. For a standalone record, one Lua script deletes the record and deletes its guard (`mem:sha:<sha1>`, or `mem:sha:<turn_id>:<sha1>` for a hook record, §3.16) only when `GET` of the guard equals this id. `delete_memories_by_session` uses the same check for each standalone record. (Deleting the guard together with a chunk would remove the guard of a standalone record with the same text, so the next save of that text would be `saved` again and the record stored twice.)
 
 ### 3.6 Ranking Formula
 
@@ -1220,7 +1239,7 @@ Seven tools are exposed via `tools/list` (6 base tools + `recall_thread` from §
 | --------------- | ----------------------------------------- | --------------------------------------------------------------------- |
 | `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | Hybrid (vector + BM25) search, time-decayed ranking with frequency boost and `b_session` match boost, lexical rerank. Chunk hits collapse to their parent document and render verbatim (see [§3.11](#311-verbatim-recall-parent-document--chunks-pattern)). Results are shaped and rendered as in [§3.14](#314-search-result-shaping) (vector floor, newest version first, relative cut, `saved=` times). **When fewer than `min_results` (default 3) rows pass the floors, the closest dropped rows are added under `#### Possibly related (weak matches — may be unrelated)`; the tool description tells the LLM: weak matches did not pass the relevance floors and are often unrelated — use one only when it is actually relevant to the question; if it is not, ignore it and do not mention it.** The `session_id` argument feeds the **same `b_session` ranking as Pro** (match=1.0 / mismatch=0.6 by default), surfacing memories saved with the same `session_id` above unrelated rows. When omitted, the server default (`N3MC_SESSION_ID` env var → per-process UUIDv4) is used as the effective session. Returns markdown. |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | Body ≤ `chunk_threshold`: exact dedup only (§3.8), then HSET + EXPIRE. Returns `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}`. Body > `chunk_threshold`: persists a **parent document** (`doc:<id>`) verbatim and writes sliding-window chunks to `mem:<id>`; returns `{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}`. If `owner_id` is provided and does not match the server config, returns `{"status":"error","saved":false,"reason":"owner_id mismatch"}`. `importance` is clamped to 0.5–2.0 and feeds `stored_importance` in ranking; a value that is not a number — including `NaN` (e.g. the string `"nan"`) — returns `{"saved": false, "status": "error", "reason": "importance must be numeric (got <value>)"}` and nothing is saved (a `NaN` would otherwise pass the clamp and be stored as `2.0`, the highest importance). When `session_id` is omitted, the server default (`N3MC_SESSION_ID` env var, or a per-process UUIDv4) is stored as a write-time tag — used as the filter key for `delete_memories_by_session` AND as the match key for subsequent `search_memory` `b_session` boosting. |
-| `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. A `limit` below 1 is treated as 1 (a negative value must not cut rows from the end of the list). Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). **Pages through the index**: fetch newest first in pages of 200 (`LIMIT <offset> 200`, sorted by `timestamp_epoch` desc) and keep paging until `limit` standalone memories of this owner are collected or the index is exhausted. (One block of `max(limit × 5, 200)` rows is not enough: after a 260-chunk document the block holds only chunks, and a standalone memory saved just before it would not be listed.) |
+| `list_memories` | `limit?: int (default 20)`                | Markdown listing that interleaves parent documents and standalone memories, newest first. A `limit` that is missing, empty or 0 is the default 20, and a negative `limit` is treated as 1 (a negative value must not cut rows from the end of the list; §5 (4)). Parents are tagged `[doc×N]`; chunks are hidden (FT.SEARCH `*` fetch then Python filter on empty `parent_id` — see §3.12). **Pages through the index**: fetch newest first in pages of 200 (`LIMIT <offset> 200`, sorted by `timestamp_epoch` desc) and keep paging until `limit` standalone memories of this owner are collected or the index is exhausted. (One block of `max(limit × 5, 200)` rows is not enough: after a 260-chunk document the block holds only chunks, and a standalone memory saved just before it would not be listed.) |
 | `delete_memory` | `id: string`                              | Only records of the configured `owner_id` (another owner's id → `{"status":"not_found","id":...}`). **The id may be given bare (`<uuid>`, as `search_memory` / `list_memories` print it) or with one leading `doc:` or `mem:` prefix; one such prefix is removed first (§3.12 bare-UUID rule), and the response's `id` is the bare UUID.** If the id is a parent (`doc:<uuid>` exists), cascade-deletes the parent, `docsha:`, and every chunk listed in its `chunk_ids` (§3.11). Otherwise `DEL mem:<uuid>`, and for a standalone record (no `parent_id`) also `DEL mem:sha:<sha1>` when the guard's value is this id, atomically (§3.5 "Delete semantics"). |
 | `delete_memories_by_session` | `session_id: string`         | Bulk-delete every standalone memory, parent document, child chunk, and sha guard tied to the given `session_id`, scoped to the configured `owner_id`. Response: `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`. When nothing matches: `{"status":"not_found", "session_id": ..., "deleted": 0}` (a re-call is a safe no-op). **Irreversible — confirm `session_id` with the user before calling.** Lite-only (see [§10 Test 6](#10-self-evaluation-evidence-report)). |
 | `repair_memory` | —                                         | `ensure_index()` and adding missing vectors (up to 200 per call); see [§3.10](#310-repair). |
@@ -1281,7 +1300,7 @@ All on `http://127.0.0.1:<server_port>`. Every endpoint returns 403 when the `Ho
 
 - **No other endpoints.** Free's `/list` is not needed (listing is the `list_memories` tool), and Free's Pro-only `/delete`, `/gc` and `/import` do not exist (deleting is the `delete_memory` / `delete_memories_by_session` tools; Redis expires records itself).
 - An unknown `{name}` returns `{"text": "Error: unknown tool '<name>'" + _NUDGE_GENERIC}` (without the reminder when `nudge=0`).
-- `nudge=0` exists because the reminders tell the model to call `save_memory`; in Claude Code the hooks save, so the CLI prints the tool's text without them.
+- `nudge=0` exists because the reminders tell the model to call `save_memory`; the CLI is used by Claude Code with the hooks added (the hooks save) and by humans, so it prints the tool's text without them.
 - `/search` and `/tools/search_memory` both run Lite's `search_memory` (§3.14). `/search` wraps the rendered text in the hook's heading (§12); `/tools/search_memory` returns the tool's own text (§3.14).
 
 ### 4.6 MCP Thin Client
@@ -1298,7 +1317,7 @@ Its mechanics are those of the MCP entry of N3MC MCP Pro v1.0.0 §4.6; its tools
 | Configuration | the same `config.json` and data folder as the server (`load_config()`, `N3MC_DATA_DIR`; §6, §7) — it needs `server_port`. **Read again at the start of every tool call**, and that reading is used for both `ensure_server` and the HTTP request: the entry runs for a whole client session, and with the settings read once at start a changed `server_port` would send every call to the old port. When the file cannot be read at that moment, the last readable settings stay in use (the settings the entry started with, if none was readable since): an unreadable read would bring a new temporary `owner_id` on every call |
 
 1. **stdout belongs to MCP.** `run()` first reconfigures stdin / stdout / stderr to UTF-8 (§3.13 (1)). Nothing but MCP messages is written to stdout; warnings, `_notify` output and library messages go to stderr.
-2. **No model, no Redis.** The module imports neither `sentence_transformers` nor `torch` (directly or through `processor.py`'s model code), and opens no Redis connection, except for the direct save below. `import_backend()` and the background model load of §3.9 are not run here. The modules of the direct save (`database.py` and `redis`, which loads the compiled `psutil`) and `psutil` are imported before `stdio_server()` starts: on Windows, importing a compiled module in a worker thread while stdio reads the stdin pipe can hang the entry (the same hazard as in §3.9).
+2. **No model, no Redis.** The module imports neither `sentence_transformers` nor `torch` (directly or through `processor.py`'s model code), and opens no Redis connection, except for the direct save below. `import_backend()` and the background model load of §3.9 are not run here. The compiled modules that the direct save loads (`psutil`, and `hiredis` when it is installed, which `redis` loads) are imported before `stdio_server()` starts: on Windows, importing a compiled module in a worker thread while stdio reads the stdin pipe can hang the entry (the same hazard as in §3.9). `redis` and `database.py` are pure Python and are imported at the direct save, not at the start: importing them takes about half a second, and `initialize` must come within 2 seconds. So the modules the thin client imports at the start (`tools.py` for the tool names and the reminders, `cli.py`) do not import `redis` at module level; `tools.py` imports it inside `ToolRunner.call`.
 3. **Starting the server.** Right after start, `run()` calls `ensure_server(cfg)` once **in a background thread**, so `initialize` is answered at once (a server start can take up to 60 s, §3.15). `_start_server` sends the child's stdout to `DEVNULL` and stderr to `server.log`, so the child never writes into the MCP stream.
 4. **`initialize` / `tools/list`** are answered locally: the instructions of §5 (1) and the seven Tool definitions of §5 (3) (`tooldefs.py`, shared with the server). They work without the server.
 5. **Input check off**: register the handler with `server.call_tool(validate_input=False)`; when the installed `mcp` refuses that argument (`TypeError`), register it with `server.call_tool()`. Newer `mcp` 1.x versions check the arguments against the schema before the handler runs, which would replace Lite's own texts (for example the `importance must be numeric` JSON of §4.3) with the SDK's.
@@ -1324,15 +1343,15 @@ Its mechanics are those of the MCP entry of N3MC MCP Pro v1.0.0 §4.6; its tools
 
 **Why save directly**: a fact the model decided to save would otherwise be lost; the hooks do the same (§3.16), and Lite saves without vectors whenever the model is unavailable (§3.9). A direct save that races with a server save of the same text after a timeout is resolved by the `SET NX` guard (§3.8): one record.
 
-#### Registering in other applications
+#### Registering in applications
 
-See §8 "Claude Desktop". Never register the thin client in Claude Code (§8 "Claude Code").
+See §8 "Claude Code (MCP)" and "Claude Desktop".
 
 #### Limits of this design
 
-- **In applications without hooks, saving is up to the model** (§11). The instructions and reminders ask it to save; full conversations are kept only in Claude Code.
+- **In applications that connect through MCP (Claude Code included), saving is up to the model** (§11). The instructions and reminders ask it to save; full conversations are kept only in Claude Code with the hooks added (§8).
 - **The resident server must be able to run** (Python with the dependencies of §2). When it cannot start, searches return the error above and saves go in without vectors.
-- **One installation for all clients.** The hooks, the CLI and the thin client must run the same code: a copy of another version has another `code_version`, and each would replace the other's server on every call (§3.15). Register the desktop app with the absolute path of the same scripts folder the hooks use, or — for plugin users — with the same `uvx --from n3memorycore-mcp-lite==2.0.2 …` form (§8). The plugin's `uvx` commands are pinned to the package version (§2), so the plugin and the desktop app run the same version as long as both use this release.
+- **One installation for all clients.** The hooks, the CLI and the thin client must run the same code: a copy of another version has another `code_version`, and each would replace the other's server on every call (§3.15). Register Claude Code and the desktop app with the absolute path of `n3mc-workingmemory` in the same scripts folder (`n3mc-lite --init` and Method A write it so), or — for plugin users — with the same `uvx --from n3memorycore-mcp-lite==2.0.2 …` form (§8). The plugin's `uvx` commands are pinned to the package version (§2), so the plugin and the desktop app run the same version as long as both use this release.
 
 ---
 
@@ -1340,7 +1359,7 @@ See §8 "Claude Desktop". Never register the thin client in Claude Code (§8 "Cl
 
 Because MCP has no equivalent of Claude Code's `UserPromptSubmit` / `Stop` hooks, the auto-save behavior is expressed as **natural-language instructions** returned in the `initialize` response. The connected LLM reads them as system guidance.
 
-These instructions are for applications that use MCP (the Claude desktop app and others). Claude Code uses the hooks and gets its guidance from the rules file `.claude/rules/n3mc-lite-behavior.md` (§12). One text is sent to every client; it does not know whether the client has hooks, so rules 1 and 2 say what to do when the context already holds the block with the line `Source: N3MC Lite (7-day working memory)` (the Lite hooks put it there; the blocks of the N3MC Free and Pro hooks have no such line): search only when the block is not enough, and save only when the user asks. A client without the block follows the MCP behaviour (search every turn, save automatically). This matters only when an old MCP registration is still present in Claude Code next to the hooks (§8).
+These instructions are for every application that connects through MCP (Claude Code, the Claude desktop app and others). Claude Code connected through MCP only follows them like any other application: it calls `search_memory` at the start of each turn (rule 1) and `save_memory` after a meaningful exchange (rules 2, 3). One text is sent to every client; it does not know whether the client has hooks, so rules 1 and 2 say what to do when the context already holds the block with the line `Source: N3MC Lite (7-day working memory)` (the Lite hooks put it there; the blocks of the N3MC Free and Pro hooks have no such line): search only when the block is not enough, and save only when the user asks. This is how Claude Code behaves with MCP + hooks (full recall, §8): the hooks do most of the saving and searching, and the model uses the tools to complement them. A client without the block follows the MCP behaviour (search every turn, save automatically). Claude Code with the hooks added also gets guidance from the rules file `.claude/rules/n3mc-lite-behavior.md` (§12.9); with MCP only, that file is not written.
 
 The instructions require the LLM to:
 
@@ -2061,7 +2080,125 @@ These files are flat in the data folder (Free keeps them in a `.memory/` subfold
 
 ## 8. Client Configuration
 
-> **Which application uses what.** Claude Code uses **the hooks only**; the Claude desktop app and other applications without hooks use **MCP only** (see "What changed in v2.0.0").
+> **Which application uses what.** Every application connects through the **MCP** entry `n3mc-workingmemory` (§4.6). In Claude Code the user can add the **hooks** to MCP (full recall). Claude Code has these three configurations, all valid (see "What changed in v2.0.0"):
+
+| Configuration | Registered in Claude Code | Saving and searching | How to register |
+|---|---|---|---|
+| (1) **MCP only** (default) | the MCP entry | the model calls `search_memory` / `save_memory` following the instructions of §5; whether it saves is up to the model (§11) | `n3mc-lite --init`, Method A, the plugin `n3mc-workingmemory-mcp`, `claude mcp add` |
+| (2) **MCP + hooks** (full recall) | the MCP entry and the hooks | the hooks save every message and reply and add the matching memories on every turn (§12); the MCP tools stay available (§5 rules 1, 2) | `n3mc-lite --init --hooks`, asking for the hooks in Method A, the full-recall plugin `n3mc-workingmemory` |
+| (3) **Hooks only** | the hooks | the same hook saving and searching as (2); other operations through the CLI `n3mc-lite` (§13) | register the hooks with `--init --hooks`, then remove the MCP registration with `claude mcp remove n3mc-workingmemory -s user`; the current form of 2.0.x users who used `--init` |
+
+The automatic setups (`n3mc-lite --init`, Method A, the recommended plugin) register (1). The hooks are added only when the user explicitly chooses them (`--init --hooks`, the full-recall plugin, asking for them in Method A).
+
+### Claude Code (MCP)
+
+Claude Code connects to the MCP entry `n3mc-workingmemory` (§4.6). The model uses the seven tools and, following the instructions of §5, calls `search_memory` at the start of each turn and `save_memory` after a meaningful exchange; whether it saves is up to the model (§11). A user who wants every message and reply saved for certain adds the hooks ("Adding the hooks to Claude Code (full recall)" below).
+
+Three ways to install; use one of them.
+
+**(a) pip and `n3mc-lite --init` (the Method A setup uses this too)**
+
+```bash
+pip install n3memorycore-mcp-lite
+n3mc-lite --init
+```
+
+`n3mc-lite --init` registers the MCP entry, with the absolute path of `n3mc-workingmemory`, in Claude Code's user scope (the top-level `mcpServers` of `~/.claude.json` — the place `claude mcp add --scope user` writes to) and adds the permission rules for the MCP tools of "Auto-approve" below ("`n3mc-lite --init`" below). Restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once); the tools appear in the next session.
+
+**(b) Plugin marketplace (requires `uv` on PATH)**
+
+```
+/plugin marketplace add NeuralNexusNote/n3mcmcp-lite
+/plugin install n3mc-workingmemory-mcp@neuralnexusnote
+```
+
+`plugins/n3mc-workingmemory-mcp/.claude-plugin/plugin.json` holds the metadata (`name` = `n3mc-workingmemory-mcp`, `version` = the package version, otherwise the same form as the full-recall plugin) and this `mcpServers`. The `plugin.json` of the full-recall plugin `n3mc-workingmemory` holds the same `mcpServers` (below).
+
+```json
+"mcpServers": {
+  "n3mc-workingmemory": {
+    "command": "uvx",
+    "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"],
+    "env": { "N3MC_AGENT_NAME": "claude-code" }
+  }
+}
+```
+
+`plugins/n3mc-workingmemory-mcp/hooks/hooks.json` registers `SessionStart` only (no `UserPromptSubmit` and no `Stop`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "<COMMAND M, below, as a JSON string>" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+COMMAND M (the shell command; in `hooks.json` it is written as a JSON string, with `"` and `\` escaped) is COMMAND A below with `--mcp` added to each script call:
+
+```text
+python "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" --mcp || py "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" --mcp || python3 "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" --mcp || echo '{"systemMessage": "<FALLBACK M>", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<FALLBACK M>"}}'
+```
+
+`<FALLBACK M>` is the text of the MCP plugin's fallback in "Auto-approve" below. `install_permissions.py` is the same file in both plugins; its behaviour with `--mcp` is in "Auto-approve" below.
+
+**(c) Register by hand (`claude mcp add`)**
+
+pip installation (the absolute path of `n3mc-workingmemory`; Windows: `where n3mc-workingmemory`, Linux: `which n3mc-workingmemory`):
+
+```powershell
+claude mcp add --transport stdio --scope user --env N3MC_AGENT_NAME=claude-code n3mc-workingmemory -- "C:\Users\<you>\AppData\Local\Programs\Python\Python312\Scripts\n3mc-workingmemory.exe"
+```
+
+No pip installation (`uvx`):
+
+```bash
+claude mcp add --transport stdio --scope user --env N3MC_AGENT_NAME=claude-code n3mc-workingmemory -- uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-workingmemory
+```
+
+- Name it `n3mc-workingmemory`: the permission rules below, the note under "Claude Desktop", and the checks of `--init` and the plugins use this name.
+- `N3MC_AGENT_NAME=claude-code`: the name stored when the model does not pass `agent_name` (§4.6) — the same name as the hook records (§3.16).
+- When the hooks or the CLI use another data folder (`N3MC_DATA_DIR`), add the same value with `--env N3MC_DATA_DIR=<path>`.
+- `N3MC_SESSION_ID` may be added to pin Claude Code's default `session_id` (§3.1).
+- After a manual registration, add the MCP tool rules of "Auto-approve" below to `~/.claude/settings.json` yourself, or approve on the first call.
+
+#### `n3mc-lite --init`
+
+`n3mc-lite --init` connects Claude Code to the memory.
+
+| Command | What it registers |
+|---|---|
+| `n3mc-lite --init` | **The MCP entry** (the steps below). When `~/.claude/settings.json` already holds own hook entries (`is_own_hook` of §12.8), it also registers the hooks again with the steps of §12.8 (refreshing the absolute paths and the permission rules, as the `--init` of the earlier versions did) and prints `N3MC Lite hooks are already registered in <settings path>, so n3mc-lite --init also refreshed them (MCP + hooks).` |
+| `n3mc-lite --init --hooks` | **The MCP entry and the hooks** (the steps below, then those of §12.8) |
+
+- `--hooks` modifies `--init` and is used with no other command; given without `--init` it is an argument error (exit code 2).
+- `--init` never removes the hooks and never removes the MCP registration. For the hooks-only configuration ((3) in the table above), run `claude mcp remove n3mc-workingmemory -s user` yourself; a later `--init` adds the MCP entry again.
+- **Why it registers the hooks again when they exist**: the `--init` of the earlier versions was the command that registered the hooks. A user who ran it before and runs `--init` again after the update keeps hooks that run from the current installation's absolute paths, and gets MCP added.
+
+The MCP steps:
+
+1. Load (create) `config.json` in the data folder (§6).
+2. Read `~/.claude/settings.json`; a missing file is read as `{}`. An unreadable file, or `hooks` / `permissions` / `permissions.allow` / `permissions.deny` of the wrong type: change nothing, print why, exit 1.
+3. Read `~/.claude.json`; a missing file is read as `{}`. An unreadable file, a top level that is not an object, or an `mcpServers` that is not an object: change nothing, print why, exit 1. Both files are checked before either is written.
+4. **Does a plugin register the MCP entry?** If `settings["enabledPlugins"]` has `n3mc-workingmemory-mcp@neuralnexusnote` or `n3mc-workingmemory@neuralnexusnote` set to `true`, the plugin registers the MCP entry: remove the `n3mc-workingmemory` entry from the top-level `mcpServers` (if any; with it, the same tools would appear twice), add nothing, print `The <plugin name> plugin is enabled and registers the N3MC Lite MCP server, so n3mc-lite --init added no MCP server.` and go on with step 6.
+5. **Register the MCP entry**: set the top-level `mcpServers["n3mc-workingmemory"]` of `~/.claude.json` to this entry. An entry of the same name is replaced whatever its form (an old unpinned `uvx` registration too); every other key and entry is kept.
+   ```json
+   {"type": "stdio", "command": "<absolute path>", "args": [], "env": {"N3MC_AGENT_NAME": "claude-code"}}
+   ```
+   - `command`: look for `n3mc-workingmemory` (`.exe` on Windows) in the same order as `resolve_cmd` (§12.8) and write the absolute path of the file found as it is, without `shell_path`: `command` is the executable itself, not a shell command (as in the Claude Desktop `command`), so it carries no quotes. When nothing is found: `command` = `sys.executable`, `args` = `["-m", "n3mc_mcp"]`.
+   - When this process has `N3MC_DATA_DIR`, add it to `env` as an absolute path.
+6. **Permission rules**: add the missing `MCP_PERMISSION_RULES` of "Auto-approve" below to `permissions.allow`. Remove `mcp__n3mc-workingmemory` and every entry starting with `mcp__n3mc-workingmemory__` from `permissions.deny`, and when one is removed print `Removed "<rule>" from permissions.deny in <settings path>: it hid the N3MC Lite MCP tools from Claude Code.` (with that line, Claude Code shows no MCP tools). The CLI permission rules are not removed.
+7. **Write only the files that changed**: copy each to `<file>.bak-n3mc-lite-<YYYYmmddHHMMSS>` (a missing file is not copied), write a temporary file in the same folder and `os.replace` it. Claude Code itself writes `~/.claude.json` often, so re-read it immediately before writing and apply the changes of steps 4–5 to what was re-read.
+8. **Registrations in other scopes** (read only): when the `mcpServers` of an entry under `projects` in `~/.claude.json`, or the current folder's `.mcp.json`, has `n3mc-workingmemory`, print `Another registration of n3mc-workingmemory was found in <file> (project <project path>). In that project Claude Code uses it instead of the one n3mc-lite --init wrote; remove it with: claude mcp remove n3mc-workingmemory -s local (run it in that project)` (for `.mcp.json`: `Another registration of n3mc-workingmemory was found in <file>. In that project Claude Code uses it instead of the one n3mc-lite --init wrote; remove the "n3mc-workingmemory" entry from <file>`). When registrations of the same name exist in several scopes, Claude Code prefers local, then project, then user.
+9. When the hook steps apply (`--hooks`, or hooks already registered), carry out §12.8 here.
+10. Print `N3MC Lite MCP server registered in <~/.claude.json path> (user scope). Restart Claude Code; the memory tools appear in the next session.` (or the message of step 4), and the message of §12.8 when the hooks were registered.
 
 ### Claude Desktop
 
@@ -2083,7 +2220,7 @@ pip installation (absolute path and `env`):
 }
 ```
 
-Plugin users (no pip installation; the hooks run through `uvx`):
+Plugin users (no pip installation; the plugin runs through `uvx`):
 
 ```json
 {
@@ -2099,32 +2236,31 @@ Plugin users (no pip installation; the hooks run through `uvx`):
 }
 ```
 
-- `command`: **the absolute path** of `n3mc-workingmemory` from the same scripts folder the hooks use (Windows: `where n3mc-workingmemory`; Linux: `which n3mc-workingmemory`). The app does not use the `PATH` of your terminal. Hooks and MCP must run the same code (§4.6 "Limits of this design").
+- `command`: **the absolute path** of `n3mc-workingmemory` from the same scripts folder that the Claude Code registration (`n3mc-lite --init`) and the hooks use (Windows: `where n3mc-workingmemory`; Linux: `which n3mc-workingmemory`). The app does not use the `PATH` of your terminal. Every client must run the same code (§4.6 "Limits of this design").
 - `env.N3MC_AGENT_NAME`: the name stored as `agent_name` when the model does not pass one (§4.6). Use one name per application.
-- When the hooks use another data folder (`N3MC_DATA_DIR`), add the same `N3MC_DATA_DIR` to `env`; otherwise the desktop app would use `~/.n3mc-workingmemory`, another `config.json` and another `server_port`.
+- When Claude Code or the hooks use another data folder (`N3MC_DATA_DIR`), add the same `N3MC_DATA_DIR` to `env`; otherwise the desktop app would use `~/.n3mc-workingmemory`, another `config.json` and another `server_port`.
 - `N3MC_SESSION_ID` may be added to pin the default `session_id` of this application (§3.1).
 - Other MCP clients on Windows or Linux are registered the same way (command, args, env).
-- **The desktop app's Code tab**: the desktop app also hands this entry to its Code tab (Claude Code) sessions. Left so, a Code tab session reaches the same memory through both the hooks and MCP, and a `save_memory` the model makes unasked stores a Code tab save under the name `claude-desktop`. To keep Claude Code on the hooks only, add `"mcp__n3mc-workingmemory"` to `permissions.deny` in `~/.claude/settings.json` (a Claude Code setting, so it does not affect the chat). The Code tab's model then no longer sees this entry's tools. In the Method A setup the AI adds this rule ("Automatic registration" below, step 5).
-- **Automatic registration (Method A setup, step 4)**: the AI does the following. It does not ask the user to register the entry by hand.
+- **The desktop app's Code tab**: the desktop app also hands this entry to its Code tab (Claude Code) sessions. This entry and Claude Code's own registration reach the same resident server and memory through the same thin client, so the memory is the same whichever tools are used; only the name stored when the model passes no `agent_name` differs (`claude-desktop` or `claude-code`). Never add `mcp__n3mc-workingmemory` to `permissions.deny` in `~/.claude/settings.json`: it would also hide the tools of Claude Code's own MCP registration. `n3mc-lite --init` removes that line when it finds it (step 6 above).
+- **Automatic registration (Method A setup, step 5)**: the AI does the following. It does not ask the user to register the entry by hand.
   1. Find the configuration file. Candidates on Windows: `%APPDATA%\Claude\claude_desktop_config.json`, `%LOCALAPPDATA%\Claude-Data\*\claude_desktop_config.json` (the Microsoft Store version; the app reads this file), and `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`; on Linux `~/.config/Claude/claude_desktop_config.json`. Of those that exist, use the one modified most recently: the app rewrites this file while it runs, and an old file it no longer reads may remain elsewhere. When none exists, take the desktop app as not installed, skip the registration and say so.
   2. Before writing, copy the file to `claude_desktop_config.json.bak-n3mc-<YYYYMMDDHHMMSS>` in the same folder.
-  3. Read it as JSON and set only the `n3mc-workingmemory` entry under `mcpServers` to the pip entry above (`command` is the absolute path of `n3mc-workingmemory`). When the hooks use `N3MC_DATA_DIR`, put the same value into `env`. Keep every other entry and key. An entry of the same name is replaced. When the file is not valid JSON or its top level is not an object, do not write it; report it.
+  3. Read it as JSON and set only the `n3mc-workingmemory` entry under `mcpServers` to the pip entry above (`command` is the absolute path of `n3mc-workingmemory`). When the Claude Code registration uses `N3MC_DATA_DIR`, put the same value into `env`. Keep every other entry and key. An entry of the same name is replaced. When the file is not valid JSON or its top level is not an object, do not write it; report it.
   4. Write to a temporary file in the same folder and replace the file with it. Read it again and check that the entry is there.
-  5. Add `"mcp__n3mc-workingmemory"` to `permissions.deny` in `~/.claude/settings.json` ("The desktop app's Code tab" above). Keep every other key and entry, and never add the rule twice.
-  6. Tell the user, in the final message, which file was written and where the backup is. The new entry does not work until the app is quit completely and started again.
+  5. Tell the user, in the final message, which file was written and where the backup is. The new entry does not work until the app is quit completely and started again.
 
-### Claude Code (hooks)
+### Adding the hooks to Claude Code (full recall)
 
-**Do not register the MCP server in Claude Code** (`claude mcp add`, `~/.claude.json`, `.mcp.json`). Claude Code gets its memory from the hooks (every message and reply saved, the matching memories put into every turn) and from the CLI `n3mc-lite` (§12, §13). Two ways to install:
+The hooks are **added** to MCP. With them, every message and reply is saved and the matching memories are added on every turn, whatever the model decides (§12); the MCP tools stay available, and so does the CLI `n3mc-lite` (§13). The hooks are added only when the user explicitly chooses them — `n3mc-lite --init --hooks`, the full-recall plugin, or asking for them in Method A. Two ways to install:
 
-**(a) Plugin marketplace (recommended — no manual config file)**
+**(a) The full-recall plugin `n3mc-workingmemory` (no manual config file)**
 
 ```
 /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
 /plugin install n3mc-workingmemory@neuralnexusnote
 ```
 
-Requires `uv` on PATH. `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` keeps its metadata and has **no `mcpServers` key**. `plugins/n3mc-workingmemory/hooks/hooks.json` registers three hooks:
+Requires `uv` on PATH. `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` holds its metadata and the same `mcpServers` as under "(b) Plugin marketplace" above. Do not enable it together with the MCP plugin `n3mc-workingmemory-mcp` (the same tools would appear twice). `plugins/n3mc-workingmemory/hooks/hooks.json` registers three hooks:
 
 ```json
 {
@@ -2167,37 +2303,53 @@ python "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || py "${CLAUDE_PLUG
 `<FALLBACK>` is the text of the fallback JSON in "Auto-approve" below (with its `\"` escapes).
 
 - `--uvx` tells the hook entries that this installation runs through `uvx`, so the rules file and the plugin's permission rules name the `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` command form (§12). Without it the `python -m n3mc_mcp.cli` form is used (pip installations).
-- The resident server is started by the hook process with its own `sys.executable` (`-m n3mc_mcp.cli --run-server`, §3.15), i.e. inside the `uvx` environment.
+- The resident server is started by the hook process or the MCP entry with its own `sys.executable` (`-m n3mc_mcp.cli --run-server`, §3.15), i.e. inside the `uvx` environment.
 - **Start-up time of `uvx` (Windows 11, uv 0.11.7, package already in the uv cache; median of 10 runs after one warm-up)**: `python -c pass` with the system Python 125 ms; `uvx --from n3memorycore-mcp-lite==2.0.2 python -c pass` 316 ms; `uvx --from n3memorycore-mcp-lite==1.12.2 python -c "import n3mc_mcp.config"` 503 ms. So `uvx` adds about 0.19 s to each hook start, and each message starts two hooks (`UserPromptSubmit` and `Stop`). Not measured: a run that must download or refresh the package, and Linux. **The plugin's hooks run through `uvx`; the added time is accepted.** The `uvx` command is pinned to the package version (§2).
 
 **(b) pip**
 
 ```bash
 pip install n3memorycore-mcp-lite
-n3mc-lite --init
+n3mc-lite --init --hooks
 ```
 
-`n3mc-lite --init` registers the two hooks in `~/.claude/settings.json` with the absolute paths of `n3mc-lite-hook` / `n3mc-lite-stop-hook` and adds the permission rules below (§12 "`--init`"). Restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once); memory starts with the next session.
+`n3mc-lite --init --hooks` registers the MCP entry ("`n3mc-lite --init`" above), registers the two hooks in `~/.claude/settings.json` with the absolute paths of `n3mc-lite-hook` / `n3mc-lite-stop-hook`, and adds the CLI permission rules below (§12 "`--init`"). Restart Claude Code (closing the window may not be enough: quit Claude from its icon under the "^" at the right end of the taskbar, or sign out of Windows once); memory starts with the next session.
 
-**Old MCP registrations (v1.12.2 and earlier)**: an `n3mc-workingmemory` entry in Claude Code (user scope in `~/.claude.json`, or a project's `.mcp.json`) is no longer used. `n3mc-lite --init` reads `~/.claude.json` — its top-level `mcpServers` object and the `mcpServers` object of each entry under `projects` — and the current folder's `.mcp.json` (read only) and, when it finds one, prints `An MCP registration of n3mc-workingmemory was found in Claude Code (<file>). Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s user` (for `.mcp.json`: `remove the "n3mc-workingmemory" entry from <file>`; an entry under `projects` is a local-scope registration that `-s user` does not remove, so for it: `An MCP registration of n3mc-workingmemory was found in Claude Code (<file>, project <project path>). Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s local (run it in that project)`). It does not edit these files. If it stays, Claude Code shows the tools again next to the hooks; the instructions then tell the model not to save every turn (§5).
+**A 2.0.x user who used the hooks and updates**: the registered hooks keep running. Users of the plugin `n3mc-workingmemory` get MCP + hooks, because the plugin also registers the MCP entry. Users who registered the hooks with `--init` stay on hooks only; running `n3mc-lite --init` adds the MCP entry (the hooks stay and are registered again).
 
-Restart the client after editing any config. Ensure Redis Stack is running before the first message — otherwise the hooks keep the text only in `audit.log` and show the "start Redis Stack" notice (§12).
+### Using MCP and the hooks together
+
+With MCP + hooks (full recall), both paths use the same resident server, the same Redis and the same `owner_id`, so a record saved through either path is found by either search. The overlap is handled as follows.
+
+- **Saving**: the hooks save every message and reply as `[user]` / `[claude]` records (§3.16). Rule 2 of the instructions (§5 (1)) tells the model not to call `save_memory` on every turn while the context holds a block with the line `Source: N3MC Lite (7-day working memory)`, and to call it only when the user asks it to remember something. A `save_memory` the model makes anyway is a separate record: it has no role prefix, and its duplicate guard is another key (MCP: `mem:sha:<sha1>` across all records, §3.8; hooks: `mem:sha:<turn_id>:…` within the exchange, §3.16), so it does not merge with a hook record of the same text. MCP has no way to enforce this (§11).
+- **Searching**: the hooks search with every message and add the block. Rule 1 tells the model to call `search_memory` only when that block is not enough. When it does, the results come from the same memory, so records already in the block can appear again.
+- **Sessions**: hook records carry Claude Code's `session_id`; records saved through MCP carry the MCP entry's session (`N3MC_SESSION_ID`, else the entry process's UUIDv4, §4.6). In `b_session` (§3.6) they count as different sessions.
+- **Name**: both store `agent_name` `claude-code` (MCP through the registration's `N3MC_AGENT_NAME`; §3.16).
+- **Guidance**: the rules file written by the hooks' `--stop` (§12.9) names the CLI commands; the MCP instructions (§5) name the tools. Both reach the same resident server and give the same rule: save only when asked.
+- **Do not register the same thing twice**: keep one registration of the MCP entry (a plugin together with a user-scope registration shows the same tools twice) and one registration of the hooks (the plugin's hooks together with the `--init --hooks` hooks run two searches per message, §14). `--init` and the plugins' SessionStart script report this.
+
+Restart the client after editing any config. Ensure Redis Stack is running before the first message — otherwise the MCP tools return the "start Redis Stack" hint (§3.9), and the hooks keep the text only in `audit.log` and show the same notice (§12).
 
 ### Automatic registration after code generation (Method A — required)
 
-**Method A ends with the hooks registered and verified by the AI. The user's only remaining step is a full restart.** Do not ask the user to edit any config file, and do not finish Phase 1 with a working package that no client uses. Do this right after `pip install -e .` succeeds:
+**Method A ends with Claude Code connected to the memory and verified by the AI. The user's only remaining step is a full restart.** Do not ask the user to edit any config file, and do not finish Phase 1 with a working package that no client uses. Do this right after `pip install -e .` succeeds:
 
 1. **Find the entry points on this PC.** Take the scripts folder of the Python that ran `pip install -e .` (`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`, or the venv's `Scripts\` / `bin/`) and check that `n3mc-lite`, `n3mc-lite-hook`, `n3mc-lite-stop-hook` and `n3mc-workingmemory` (`.exe` on Windows) exist there. Use **absolute paths**, not bare command names: Claude Code may run commands with a `PATH` that does not contain the scripts folder.
-2. **Remove stale MCP registrations from Claude Code.** Run `claude mcp remove n3mc-workingmemory -s user` (a "not found" error is fine). In the install folder, if `.mcp.json` has an `n3mc-workingmemory` entry, remove that entry and keep the other servers. If the `claude` command is not on `PATH`, remove the `n3mc-workingmemory` entry from the top-level `mcpServers` object of `~/.claude.json` instead — after copying the file to a backup, keeping every other key, and writing it atomically (temporary file in the same folder, then replace). **Why**: Claude Code uses the hooks; a registration left from a 1.x version would show the tools again and make the model save on its own next to the hooks.
-3. **Register the hooks**: run `<absolute path of n3mc-lite> --init` (§12). It writes the hooks and the permission rules into `~/.claude/settings.json`, keeping every other entry (other N3MC products' hooks included, §14). **If it reports that the plugin is enabled, stop and let the user choose**: the plugin runs the PyPI code through `uvx`, and the generated code has another `code_version` (§3.15), so the plugin's hooks and this installation's CLI and MCP entry would stop and restart each other's server on every call. Show: `The n3mc-workingmemory plugin is enabled. Choose one: (a) keep the plugin and remove this generated installation (pip uninstall n3memorycore-mcp-lite), or (b) disable the plugin (/plugin disable n3mc-workingmemory@neuralnexusnote), then run this setup step again.` Wait for the answer; on (b), run step 3 again after the user disabled the plugin.
-4. **Claude Desktop**: carry out steps 1–6 of "Automatic registration" under "Claude Desktop" above and write the pip entry, with the absolute path from step 1 filled in, into the desktop app's configuration file. Do not show the entry to the user to add by hand. When the desktop app is not installed, skip this step and say so in the final message.
-5. **Verify before telling the user to restart.**
-   - The hook gate of §10 item 7.1 prints `OK`.
+2. **Decide whether to add the hooks.** The default is **MCP only**. Add the hooks only when the user explicitly asked for them in the setup request or the conversation ("add the hooks too", "full recall", …). Do not ask the user to choose.
+3. **Check the plugins.** If `enabledPlugins` in `~/.claude/settings.json` has `n3mc-workingmemory-mcp@neuralnexusnote` or `n3mc-workingmemory@neuralnexusnote` set to `true`, stop and let the user choose: the plugin runs the PyPI code through `uvx`, and the generated code has another `code_version` (§3.15), so the plugin's MCP entry or hooks and this installation's CLI and MCP entry would stop and restart each other's server on every call. Show: `The <plugin name> plugin is enabled. Choose one: (a) keep the plugin and remove this generated installation (pip uninstall n3memorycore-mcp-lite), or (b) disable the plugin (/plugin disable <plugin name>@neuralnexusnote), then run this setup step again.` Wait for the answer; on (b), start again from step 3 after the user disabled the plugin.
+4. **Register in Claude Code.**
+   - MCP only: run `<absolute path of n3mc-lite> --init` ("`n3mc-lite --init`" above). When hooks of an earlier setup exist, `--init` registers them again too (MCP + hooks); say so in the final message.
+   - Adding the hooks: run `<absolute path of n3mc-lite> --init --hooks`.
+   - Either writes the MCP entry into `~/.claude.json` and the permission rules (and the hooks) into `~/.claude/settings.json`, keeping every other entry (other N3MC products' hooks included, §14).
+   - In the install folder, if `.mcp.json` has an `n3mc-workingmemory` entry, remove that entry and keep the other servers — after copying the file to a backup, keeping every other key, and writing it atomically (temporary file in the same folder, then replace). **Why**: in that folder a project-scope registration takes precedence over the user-scope one, and a `.mcp.json` copied from another PC may point at a path that does not exist on this PC.
+5. **Claude Desktop**: carry out steps 1–5 of "Automatic registration" under "Claude Desktop" above and write the pip entry, with the absolute path from step 1 filled in, into the desktop app's configuration file. Do not show the entry to the user to add by hand. When the desktop app is not installed, skip this step and say so in the final message.
+6. **Verify before telling the user to restart.**
+   - The MCP gate of §10 item 7.1 prints `OK`. When the hooks were added, the hook gate (item 7.5) prints `OK` too.
    - `<absolute path of n3mc-lite> --search "setup check"` prints a block that starts with `# Recalled Memory Context` (this starts the resident server; the first start may take minutes while the model downloads — a "still starting" placeholder is acceptable, then repeat until a real result or `_No memories found._` appears).
    - Start `n3mc-workingmemory` once yourself, send an MCP `initialize` followed by `tools/list` over stdio, check that the seven tools of §4.3 are listed (the answer comes within 2 seconds, §4.6), then close its stdin.
-   - If `claude` is available, `claude mcp get n3mc-workingmemory` must report that no such server exists.
+   - If `claude` is available, `claude mcp get n3mc-workingmemory` shows the user-scope registration with the absolute path from step 1.
    - If any check fails, fix it and repeat; do not hand over a setup that does not work.
-6. **Finish with one message**: so that the user does not miss the restart, follow this template. **The first line of the message must be the heading `## ⚠️ Claude Code must be restarted`.** Put nothing such as "Registration is complete" before it; what was registered and any notes come after the restart steps.
+7. **Finish with one message**: so that the user does not miss the restart, follow this template. **The first line of the message must be the heading `## ⚠️ Claude Code must be restarted`.** Put nothing such as "Registration is complete" before it; what was registered and any notes come after the restart steps.
 
    ```text
    ## ⚠️ Claude Code must be restarted
@@ -2214,15 +2366,36 @@ Restart the client after editing any config. Ensure Redis Stack is running befor
    > ⚠️ **Memory does not work until Claude Code is restarted.**
    ```
 
-   Never reduce it to the single sentence "Restart Claude Code". When the user sends "I restarted" (in any language), check that the message was saved (`python -m n3mc_mcp.cli --list` shows its `[user]` line) and that `# Recalled Memory Context` arrived in that turn, tell them briefly whether memory works, and tell them what to do next: go to Phase 2 of Appendix B and paste its prompts in order.
+   Never reduce it to the single sentence "Restart Claude Code". When the user sends "I restarted" (in any language), check that memory works, tell them briefly, and tell them what to do next: go to Phase 2 of Appendix B and paste its prompts in order. To check: the `search_memory` tool is available and, called with the query `setup check`, returns a result (or `_No memories found._`). When the hooks were added, also check that the message was saved (`python -m n3mc_mcp.cli --list` shows its `[user]` line) and that `# Recalled Memory Context` arrived in that turn.
 
-> **⚠️ Why**: a code-generation setup can end with a package installed but no working registration — for example a folder's `.mcp.json` copied from another PC that points at `C:\Users\<other PC user>\…\Python312\Scripts\n3mc-workingmemory.exe`, which does not exist on this PC, or a bare command name, which depends on `PATH`. Code generation is the primary install path for Lite, so it must end in a working setup without manual configuration. The absolute-path rule applies to the hook commands and the desktop entry.
+> **⚠️ Why**: a code-generation setup can end with a package installed but no working registration — for example a folder's `.mcp.json` copied from another PC that points at `C:\Users\<other PC user>\…\Python312\Scripts\n3mc-workingmemory.exe`, which does not exist on this PC, or a bare command name, which depends on `PATH`. Code generation is the primary install path for Lite, so it must end in a working setup without manual configuration. The absolute-path rule applies to Claude Code's MCP registration, the hook commands and the desktop entry.
 
 ### Auto-approve (Claude Code only)
 
-Claude Code has no MCP tools for this server. The hooks are run by Claude Code itself and need no permission; what needs approval is the CLI commands Claude runs when it searches on its own (§13). Without a rule, every `--search` asks the user.
+Claude Code asks for permission on each MCP tool call and each command Claude runs. Without a rule, every use of the memory asks the user.
 
-**pip (`PERMISSION_RULES`, written by `n3mc-lite --init`)** — added to `permissions.allow` in `~/.claude/settings.json` (only the missing ones; nothing is removed):
+**MCP — `MCP_PERMISSION_RULES`, written by `n3mc-lite --init`** — added to `permissions.allow` in `~/.claude/settings.json` (only the missing ones):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__n3mc-workingmemory__search_memory",
+      "mcp__n3mc-workingmemory__save_memory",
+      "mcp__n3mc-workingmemory__list_memories",
+      "mcp__n3mc-workingmemory__recall_thread",
+      "mcp__n3mc-workingmemory__repair_memory"
+    ]
+  }
+}
+```
+
+**Plugins** — the same five tools in the form that carries the plugin name (Claude Code names the tools of an MCP server registered by a plugin `mcp__plugin_<plugin>_<server>__<tool>`): the MCP plugin `mcp__plugin_n3mc-workingmemory-mcp_n3mc-workingmemory__search_memory` … `__repair_memory`; the full-recall plugin `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__search_memory` … `__repair_memory`.
+
+- **`delete_memory` and `delete_memories_by_session` are never pre-approved**: they are irreversible (§4.3), so Claude Code asks the user each time — the same confirmation the tools' descriptions ask the model to get.
+- The 1.x wildcard rules `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` and `mcp__n3mc-workingmemory__*` are not added; existing ones are left alone (nothing is removed). They pre-approve the delete tools too; a user who does not want that removes them.
+
+**The hooks' CLI (`PERMISSION_RULES`, written by `n3mc-lite --init` when it registers the hooks)** — the hooks are run by Claude Code itself and need no permission; what needs approval is the CLI commands Claude runs when it searches on its own (§13). Without a rule, every `--search` asks the user. Added to `permissions.allow` in `~/.claude/settings.json` (only the missing ones; nothing is removed):
 
 ```json
 {
@@ -2245,23 +2418,32 @@ Claude Code has no MCP tools for this server. The hooks are run by Claude Code i
 }
 ```
 
-**Plugin (`hooks/install_permissions.py`, SessionStart)** — the same six commands in the `uvx` form, `Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)` … `Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --stop*)`. The 1.x rules `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` and `mcp__n3mc-workingmemory__*` are not added; existing ones are left alone (they match nothing).
+**The full-recall plugin (`hooks/install_permissions.py`, SessionStart, without `--mcp`)** — the same six commands in the `uvx` form, `Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)` … `Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --stop*)`, plus the full-recall plugin's MCP tool rules above.
 
 - **`--delete` and `--delete-session` are never pre-approved**: they are irreversible (§4.3), so Claude Code asks the user each time — the same confirmation the tools' descriptions ask the model to get.
 - The `<python> -m n3mc_mcp.cli` form is the one the rules file gives Claude (Free §4 ②: the bash subshell Claude Code spawns does not reliably have the scripts folder on `PATH`). **`--init` writes the rules above with `<python>` = `shell_path(sys.executable)`**, the same absolute path as in the rules file, so they match what Claude runs also when the package is in a venv; the JSON above shows the form for a `python` on `PATH`. The `n3mc-lite` form is for interactive use.
 
-The plugin hook works as follows, with texts about the CLI commands:
+The plugins' script `install_permissions.py` (the same file in both plugins) works as follows. Called with `--mcp` (the MCP plugin), it adds the MCP tool rules, its texts are about the MCP tools, and its tag is `[n3mc-workingmemory-mcp]`. Called without it (the full-recall plugin), it adds the CLI command rules and the MCP tool rules, its texts are about the CLI commands, and its tag is `[n3mc-workingmemory]`.
 
 - **Writing**: re-read `settings.json` immediately before writing, merge only the missing rules, write a temporary file in the same folder and `os.replace` it; never remove entries; leave unrelated fields untouched.
-- **When `settings.json` cannot be updated**: change nothing, print one stderr line and the `systemMessage` + `additionalContext` JSON, exit 0: `[n3mc-workingmemory] Could not update ~/.claude/settings.json (<ErrorType>: …), so the memory commands were not pre-approved and Claude Code will ask for permission when Claude searches the memory. Make the file writable, or add "Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)" to permissions.allow yourself.` Nothing is reported when the rules are already present.
-- **Python fallback and visible failure**: the `hooks.json` command tries `python` → `py` → `python3`; if none works (or the script exits non-zero), a Python-free step prints one JSON object and exits 0:
+- **When `settings.json` cannot be updated**: change nothing, print one stderr line and the `systemMessage` + `additionalContext` JSON, exit 0: `[n3mc-workingmemory] Could not update ~/.claude/settings.json (<ErrorType>: …), so the memory commands were not pre-approved and Claude Code will ask for permission when Claude searches the memory. Make the file writable, or add "Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)" to permissions.allow yourself.` With `--mcp`: `[n3mc-workingmemory-mcp] Could not update ~/.claude/settings.json (<ErrorType>: …), so the memory tools were not pre-approved and Claude Code will ask for permission when Claude uses the memory. Make the file writable, or add "mcp__plugin_n3mc-workingmemory-mcp_n3mc-workingmemory__search_memory" and the other memory tools to permissions.allow yourself.` Nothing is reported when the rules are already present.
+- **Python fallback and visible failure**: the `hooks.json` command tries `python` → `py` → `python3`; if none works (or the script exits non-zero), a Python-free step prints one JSON object and exits 0. The full-recall plugin (`<FALLBACK>`):
 
 ```json
 {"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory commands may not be pre-approved and Claude Code may ask for permission when Claude searches the memory. Install Python 3, or add \"Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
 ```
 
-- **`uvx` pre-flight**: `shutil.which("uvx")`; if missing, the same kind of JSON with this bilingual install hint: `[n3mc-workingmemory] uvx was not found on PATH. The plugin's memory hooks run through "uvx --from n3memorycore-mcp-lite==<version> n3mc-lite", so they cannot run until uv is installed. Install (Windows): pipx install uv or powershell -c "irm https://astral.sh/uv/install.ps1 | iex"; (Linux): curl -LsSf https://astral.sh/uv/install.sh | sh. Docs: https://docs.astral.sh/uv/ / [n3mc-workingmemory] uvx が PATH 上に見つかりません。uv を入れるまで、記憶のフックは動きません。上のいずれかのコマンドで uv を入れてください。` Combined into one JSON object with any other message; written with `json.dumps(..., ensure_ascii=True)`.
-- **Double registration check**: if `~/.claude/settings.json` also holds hooks of a pip installation, add to the same JSON: `[n3mc-workingmemory] The N3MC Lite hooks are registered twice: by this plugin and by "n3mc-lite --init" in ~/.claude/settings.json. Every message is then searched twice. Remove the two n3mc-lite-hook / n3mc-lite-stop-hook entries from ~/.claude/settings.json, or uninstall the plugin.` (§14). The script never removes hooks itself. **How it recognizes them**: the script runs with a Python that may not have the package, so it carries its own copy of rules (a) and (b) of `is_own_hook` (§12.8) — the executable name `n3mc-lite-hook` / `n3mc-lite-stop-hook` (with or without `.exe`, any folder) or `-m n3mc_mcp.lite_hook` / `-m n3mc_mcp.lite_stop_hook` — and not rule (c), which needs the package folder.
+The MCP plugin (`<FALLBACK M>`):
+
+```json
+{"systemMessage": "[n3mc-workingmemory-mcp] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory tools may not be pre-approved and Claude Code may ask for permission when Claude uses the memory. Install Python 3, or add \"mcp__plugin_n3mc-workingmemory-mcp_n3mc-workingmemory__search_memory\" and the other memory tools to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
+```
+
+- **`uvx` pre-flight**: `shutil.which("uvx")`; if missing, the same kind of JSON with this bilingual install hint: `[n3mc-workingmemory] uvx was not found on PATH. The plugin's memory hooks run through "uvx --from n3memorycore-mcp-lite==<version> n3mc-lite", so they cannot run until uv is installed. Install (Windows): pipx install uv or powershell -c "irm https://astral.sh/uv/install.ps1 | iex"; (Linux): curl -LsSf https://astral.sh/uv/install.sh | sh. Docs: https://docs.astral.sh/uv/ / [n3mc-workingmemory] uvx が PATH 上に見つかりません。uv を入れるまで、記憶のフックは動きません。上のいずれかのコマンドで uv を入れてください。` With `--mcp`: `[n3mc-workingmemory-mcp] uvx was not found on PATH. The plugin's MCP server runs through "uvx --from n3memorycore-mcp-lite==<version> n3mc-workingmemory", so it cannot start until uv is installed. Install (Windows): pipx install uv or powershell -c "irm https://astral.sh/uv/install.ps1 | iex"; (Linux): curl -LsSf https://astral.sh/uv/install.sh | sh. Docs: https://docs.astral.sh/uv/ / [n3mc-workingmemory-mcp] uvx が PATH 上に見つかりません。uv を入れるまで、記憶の MCP サーバーは起動しません。上のいずれかのコマンドで uv を入れてください。` Combined into one JSON object with any other message; written with `json.dumps(..., ensure_ascii=True)`.
+- **Checks for the same thing registered twice** (the script never removes anything; `~/.claude.json` is only read). MCP + hooks is not reported (it is a valid configuration).
+  - Hooks twice (the full-recall plugin only): if `~/.claude/settings.json` also holds hooks of a pip installation, add to the same JSON: `[n3mc-workingmemory] The N3MC Lite hooks are registered twice: by this plugin and by "n3mc-lite --init" in ~/.claude/settings.json. Every message is then searched twice. Remove the two n3mc-lite-hook / n3mc-lite-stop-hook entries from ~/.claude/settings.json, or uninstall the plugin.` (§14).
+  - The MCP entry twice (both plugins): if the top-level `mcpServers` of `~/.claude.json` has `n3mc-workingmemory`, add `[<this plugin>] The N3MC Lite MCP server is registered twice in Claude Code: by this plugin and as n3mc-workingmemory in ~/.claude.json, so every memory tool appears twice. Keep one: claude mcp remove n3mc-workingmemory -s user, or uninstall this plugin.` The full-recall plugin, when `enabledPlugins["n3mc-workingmemory-mcp@neuralnexusnote"]` is also `true`, adds `[n3mc-workingmemory] The n3mc-workingmemory-mcp plugin is enabled too, so the N3MC Lite MCP server is registered twice and every memory tool appears twice. This plugin already registers the MCP server: disable the other one (/plugin disable n3mc-workingmemory-mcp@neuralnexusnote).` (the MCP plugin does not report this case, so that the same notice does not appear twice).
+  - **How it recognizes hooks**: the script runs with a Python that may not have the package, so it carries its own copy of rules (a) and (b) of `is_own_hook` (§12.8) — the executable name `n3mc-lite-hook` / `n3mc-lite-stop-hook` (with or without `.exe`, any folder) or `-m n3mc_mcp.lite_hook` / `-m n3mc_mcp.lite_stop_hook` — and not rule (c), which needs the package folder.
 
 > Claude Desktop has no per-tool permission gate, so none of this is needed there. Claude Code does not (as of 2026-04) accept a `permissions` field in `plugin.json`, so the plugin ships a `SessionStart` hook that patches the user's `settings.json`.
 
@@ -2421,9 +2603,9 @@ Embeddings are deterministic fakes (no model). Classes marked *Redis* need `N3MC
 | `TestWeakMatches` (*Redis*) | With one row passing the floors and `min_results: 3`, two weak rows are added after it, ordered by `filter_score` and marked `_weak`; a candidate below `vector_min_cos` is added with its actual cos; `min_results: 0` adds nothing; nothing is added when enough rows pass; a `limit` smaller than `min_results` caps the total; two chunk hits of one parent document give one weak row, and a parent already in the results is not added again; a candidate with `filter_score` below `1e-6` is never added; **a weak row's `access_count` does not change** while a normal row's is incremented; an empty or whitespace-only query adds no weak rows; the default config has `min_results: 3` |
 | `TestGuardReleasedOnAnyFailure` (*Redis*) | For a short body and a long body: a save with `turn_id: 12` fails and leaves no `mem:sha:` / `docsha:` key, and the same body then saves; lone surrogates in `agent_name` / `session_id` / `turn_id` are stripped and the record is saved; fields without surrogates are stored unchanged |
 | `TestPluginHookAsciiStdout` | With `uvx` missing, the hook's stdout is one ASCII-only line whose `systemMessage` still contains the Japanese hint after `json.loads` |
-| `TestPublicRepoHygiene` | `tests/eval_uvx_missing.py` contains no absolute user path (the folders to strip are the `PATH` entries that hold `uvx`); `metadata.version` of `.claude-plugin/marketplace.json` equals the package version |
+| `TestPublicRepoHygiene` | `tests/eval_uvx_missing.py` contains no absolute user path (the folders to strip are the `PATH` entries that hold `uvx`); `metadata.version` of `.claude-plugin/marketplace.json` and the `version` of both plugins equal the package version; `marketplace.json` lists `n3mc-workingmemory-mcp` and `n3mc-workingmemory` |
 
-`TestPluginHook` and `TestPluginHookAsciiStdout` check the CLI permission rules (`Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)` …), and that `--delete` / `--delete-session` are not among them.
+`TestPluginHook` and `TestPluginHookAsciiStdout` check the CLI permission rules (`Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)` …) and the full-recall plugin's MCP tool rules (`mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__search_memory` …), and that `--delete` / `--delete-session` / `delete_memory` / `delete_memories_by_session` are not among them. With `--mcp`, the script adds only the MCP plugin's tool rules (`mcp__plugin_n3mc-workingmemory-mcp_n3mc-workingmemory__search_memory` …), without `delete_memory` / `delete_memories_by_session`, and its fallback and `uvx` hint are the MCP texts of §8.
 
 ### Layer 5: `tests/test_hooks.py`
 
@@ -2505,11 +2687,13 @@ Temporary `HOME` only.
 
 | Test class | What it covers |
 |---|---|
-| `TestInit` | `--init` writes the two hooks with absolute forward-slash paths (quoted only when `shell_path` has to) and the `PERMISSION_RULES`; `shell_path` leaves a plain path and an 8.3 short name (`PROGRA~1`) bare, and double-quotes a path with a space, `'` or `&`, escaping `$` and `` ` ``; with the scripts folder under a folder named `O'Brien`, the hook is written quoted and recognised as ours; re-running writes nothing; a backup is made before a change; an invalid `settings.json` is left unchanged with exit status 1; our entry-point, `-m` and package-script forms are replaced, not duplicated (also written with backslashes) |
+| `TestInitMcp` | `--init` sets the top-level `mcpServers["n3mc-workingmemory"]` of `~/.claude.json` to the entry of §8 (`type` `stdio`, the absolute path of `n3mc-workingmemory` without quotes, `env` with `N3MC_AGENT_NAME` `claude-code` and, when set, `N3MC_DATA_DIR`), keeping every other key and entry; it replaces an old entry of the same name (unpinned `uvx`); it adds `MCP_PERMISSION_RULES` and not the two delete tools; it removes `mcp__n3mc-workingmemory` from `permissions.deny`; it creates `~/.claude.json` when missing; an unreadable `~/.claude.json` is left unchanged with exit status 1 (and `settings.json` is not changed either); re-running writes nothing; a backup is made before a change; registrations under `projects` and in `.mcp.json` are reported, not edited; with either plugin enabled it removes its own entry and adds nothing; it never removes hook entries |
+| `TestInitHooksChoice` | `--init` without hooks leaves `hooks` in `settings.json` unchanged; `--init --hooks` registers both the MCP entry and the hooks; with own hook entries present, `--init` adds the MCP entry, registers the hooks again with the current absolute paths and prints the `also refreshed them` message; `--hooks` without `--init` exits with status 2 |
+| `TestInit` | `--init --hooks` writes the two hooks with absolute forward-slash paths (quoted only when `shell_path` has to) and the `PERMISSION_RULES`; `shell_path` leaves a plain path and an 8.3 short name (`PROGRA~1`) bare, and double-quotes a path with a space, `'` or `&`, escaping `$` and `` ` ``; with the scripts folder under a folder named `O'Brien`, the hook is written quoted and recognised as ours; re-running writes nothing; a backup is made before a change; an invalid `settings.json` is left unchanged with exit status 1; our entry-point, `-m` and package-script forms are replaced, not duplicated (also written with backslashes) |
 | `TestInitNonStringCommand` | Hook items whose `command` is null or a number are kept, and `--init` adds its own entries without ending in an exception |
 | `TestKeepsOtherProducts` | Free's `n3mc-hook` / `n3mc-stop-hook` entries, Pro's `python ".../n3mc_hook.py"` entry and any other hook are kept and reported; Free's own matcher — its rules, written down here: the executable `n3mc-hook` / `n3mc-stop-hook` (with or without `.exe`), `-m n3memorycore.n3mc_hook` / `-m n3memorycore.n3mc_stop_hook`, or the script `n3mc_hook.py` / `n3mc_stop_hook.py` inside Free's package folder — does not match Lite's entries |
-| `TestPluginEnabled` | With `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` true, `--init` registers no hooks, adds the permission rules and prints the message of §12; the plugin's permission script reports `--init` hooks found in `settings.json` |
-| `TestNoMcpInClaudeCode` | `plugin.json` has no `mcpServers`; `hooks.json` has `SessionStart`, `UserPromptSubmit` and `Stop` with the commands of §8; `--init` never adds an MCP server to `~/.claude.json` or `.mcp.json`; an old `n3mc-workingmemory` entry there is reported, not edited |
+| `TestPluginEnabled` | With `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` true, `--init --hooks` registers neither the hooks nor the MCP entry, adds the permission rules and prints the messages of §8 and §12; the plugin's permission script reports `--init` hooks found in `settings.json` (the full-recall plugin only); with a user-scope `n3mc-workingmemory`, either plugin's script prints the "registered twice" text of §8; MCP plugin plus `--init --hooks` hooks (MCP + hooks) is not reported; the script removes nothing |
+| `TestClaudeCodePlugins` | The `plugin.json` of both plugins holds the same `mcpServers` of §8 (pinned `uvx`, `N3MC_AGENT_NAME` `claude-code`); the full-recall plugin's `hooks.json` has `SessionStart`, `UserPromptSubmit` and `Stop` with the commands of §8, and the MCP plugin's `hooks.json` has only `SessionStart` with `--mcp`; `install_permissions.py` has the same content in both plugins |
 | `TestSeparateNames` | Default port 18524, data folder `~/.n3mc-workingmemory`, rules file `n3mc-lite-behavior.md`, PID file `n3mc-lite.pid`, commands `n3mc-lite*` — none equal to Free's (`18520`, `~/.n3mc`, `n3mc-behavior.md`, `n3mc*`) or Pro's (`18521`) |
 | `TestRulesFile` | The rules file is written from the template with the `python -m n3mc_mcp.cli` form, or the `uvx` form with `--uvx`; a file equal to the other form's template is replaced (with backup); a hand-edited file is not replaced and gives `rules_md_edited:<hash>`; the first line is `<!-- n3mc-lite-behavior v1 -->` |
 
@@ -2556,7 +2740,7 @@ pytest tests/ -v -k "not TestEmbedding"
 > - Make only the data folder temporary. Even when `HOME` / `USERPROFILE` are changed, keep `HF_HOME` pointing at the real model cache (`~/.cache/huggingface`), so the model (about 1.1 GB) is not downloaded again.
 > - While fixing, run only the pytest files (§9) that concern the change; run the whole suite once, before this evaluation (as above).
 
-> **How to call the tools in items 1–6**: Claude Code has no MCP tools for this server. Run each tool through the CLI, which calls the same handler and prints the same text without the reminder (§13): `search_memory` → `python -m n3mc_mcp.cli --search` (it runs the same search of §3.14 and prints the rows inside the hook's heading); `save_memory` → `--buffer`; `list_memories` → `--list`; `delete_memories_by_session` → `--delete-session` (Claude Code asks for permission: approve it); `repair_memory` → `--repair`. Item 10 checks the MCP path itself.
+> **How to call the tools in items 1–6**: run each tool through the CLI, so that the results are recorded the same way in every configuration (Claude Code with hooks only has no MCP tools). The CLI calls the same handler and prints the same text without the reminder (§13): `search_memory` → `python -m n3mc_mcp.cli --search` (it runs the same search of §3.14 and prints the rows inside the hook's heading); `save_memory` → `--buffer`; `list_memories` → `--list`; `delete_memories_by_session` → `--delete-session` (Claude Code asks for permission: approve it); `repair_memory` → `--repair`. Items 7 (inside Claude Code) and 10 (in a temporary folder) check the MCP path itself.
 
 1. **Latency & process health**: measure separately: (a) the MCP entry's answer to `initialize` (recorded); (b) the time from the server start until `/health` answers (recorded; the library import takes about 10 s, §3.9); (c) the first search after the model has loaded (recorded); (d) the median of 10 later searches, as server-side processing (embedding + Redis KNN/BM25 + ranking, measured with a microbenchmark that calls the `processor` / `database` functions directly). **Pass: (d) ≤0.5 s on CPU.** (a)–(c) depend on the PC and are reported, not judged. Also confirm that calling any tool while Redis Stack is down does **not** crash the server — it must return the "start Redis Stack" hint. (Also confirm the PID file is created while the server runs, and that after `config.json` is edited the next call starts a new server.)
 
@@ -2589,23 +2773,30 @@ pytest tests/ -v -k "not TestEmbedding"
    5. **Idempotency check**: call `delete_memories_by_session` again with the same session_id; the server must respond `{"status": "not_found", ..., "deleted": 0}` cleanly — no errors, no crashes.
    6. **Pass criterion**: insertion count matches the server's `deleted` total, parent→chunk cascade is complete, no collateral effect on other sessions, and the second call is a safe no-op. **This is an irreversible operation. Run this test only against a dedicated test session_id; never against a production session_id.**
 
-7. **Hook integration (adapted from Free §6 test 7)**: verify within Claude Code:
-   1. **Global hook registration is in place** (mandatory gate). Run:
+7. **Registration in Claude Code**: verify within Claude Code. Do 1–4 always (MCP); do 5–7 when the hooks were added.
+   1. **The user-scope MCP registration is in place** (mandatory gate; the MCP gate). Run:
+      ```bash
+      python -c "import json,os; h=os.path.expanduser('~'); c=json.load(open(os.path.join(h,'.claude.json'),encoding='utf-8')); s=json.load(open(os.path.join(h,'.claude','settings.json'),encoding='utf-8')); e=c.get('mcpServers',{}).get('n3mc-workingmemory'); assert e, 'n3mc-workingmemory is not registered in ~/.claude.json (user scope)'; assert os.path.isfile(e.get('command','')), 'the registered command is not an existing file: %s' % e.get('command'); p=s.get('enabledPlugins',{}); assert not p.get('n3mc-workingmemory-mcp@neuralnexusnote') and not p.get('n3mc-workingmemory@neuralnexusnote'), 'an N3MC Lite plugin is enabled: it runs the PyPI code, not this installation (Method A step 3)'; pm=s.get('permissions',{}); assert 'mcp__n3mc-workingmemory' not in pm.get('deny',[]), 'mcp__n3mc-workingmemory is in permissions.deny'; assert 'mcp__n3mc-workingmemory__search_memory' in pm.get('allow',[]), 'permission rules missing'; print('OK')"
+      ```
+      Pass: prints `OK`. It requires the user-scope registration written by this installation's `--init`; an enabled plugin fails it, because the plugin runs the PyPI code instead of the generated one. If it fails, the implementation is not complete: run `n3mc-lite --init` (§8).
+   2. **Tools**: in a Claude Code session opened **outside the install folder** (e.g. `~`), have Claude call `search_memory` (with a query such as `setup check`) and confirm a result (or `_No memories found._`) comes back. Then have it save a short test sentence with `save_memory`, and confirm `search_memory` finds it and `python -m n3mc_mcp.cli --search` finds it too. Outside the install folder is essential: inside it, a `.mcp.json` registration of that folder could hide a missing user-scope registration.
+   3. **Unrequested searches and saves** (MCP only): talk for 3 turns in that session and record whether the model called `search_memory` and `save_memory` on its own (not judged: it is up to the model, §11).
+   4. `claude mcp get n3mc-workingmemory` (when available) shows the registration with the absolute path of this installation's `n3mc-workingmemory`.
+   5. **Global hook registration is in place** (mandatory gate when the hooks were added; the hook gate). Run:
       ```bash
       python -c "import json,os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'),encoding='utf-8')); h=s.get('hooks',{}); p=s.get('enabledPlugins',{}).get('n3mc-workingmemory@neuralnexusnote'); ok=lambda ev,names: any(any(n in c.get('command','').lower() for n in names) for e in h.get(ev,[]) for c in e.get('hooks',[])); assert not p, 'the plugin is enabled: its hooks run the PyPI code, not this installation (Method A step 3)'; assert ok('UserPromptSubmit',('n3mc-lite-hook','n3mc_mcp.lite_hook')), 'UserPromptSubmit hook missing'; assert ok('Stop',('n3mc-lite-stop-hook','n3mc_mcp.lite_stop_hook')), 'Stop hook missing'; assert any(r.endswith('-m n3mc_mcp.cli --search *)') for r in s.get('permissions',{}).get('allow',[])), 'permission rules missing'; print('OK')"
       ```
-      Pass: prints `OK`. It requires the hooks written by this installation's `--init`; an enabled plugin fails it, because the plugin's hooks run the PyPI code instead of the generated one. If it fails, the implementation is not complete: run `n3mc-lite --init` (§12).
-   2. **UserPromptSubmit**: from a Claude Code session opened **outside the install folder** (e.g. `~`), send a message and confirm that `# Recalled Memory Context` is in that turn's context, and that the previous reply and the message are saved (`python -m n3mc_mcp.cli --list` shows `[claude] …` and `[user] …` records). Outside the install folder is essential: inside it, a missing global registration could be hidden.
-   3. **Stop**: after the reply of that session, confirm that the reply is saved (`[claude] …`, same `turn_id` as the `[user]` record — check with `--recall-thread <turn_id>`), and that the project's `.claude/rules/n3mc-lite-behavior.md` starts with `<!-- n3mc-lite-behavior v1 -->`.
-   4. `claude mcp list` (when available) does not list `n3mc-workingmemory`.
+      Pass: prints `OK`. It requires the hooks written by this installation's `--init --hooks`; an enabled plugin fails it, because the plugin's hooks run the PyPI code instead of the generated one. If it fails, the implementation is not complete: run `n3mc-lite --init --hooks` (§12).
+   6. **UserPromptSubmit**: from a Claude Code session opened **outside the install folder** (e.g. `~`), send a message and confirm that `# Recalled Memory Context` is in that turn's context, and that the previous reply and the message are saved (`python -m n3mc_mcp.cli --list` shows `[claude] …` and `[user] …` records). Outside the install folder is essential: inside it, a missing global registration could be hidden. Confirm that the MCP tools are available in the same session too (item 2).
+   7. **Stop**: after the reply of that session, confirm that the reply is saved (`[claude] …`, same `turn_id` as the `[user]` record — check with `--recall-thread <turn_id>`), and that the project's `.claude/rules/n3mc-lite-behavior.md` starts with `<!-- n3mc-lite-behavior v1 -->`.
 
-8. **Complete recording through the hooks (adapted from Free §6 test 9)**:
+8. **Complete recording through the hooks (adapted from Free §6 test 9)** (done whether or not the hooks were added: the hook commands get the JSON directly, so no registration in Claude Code is needed):
    - Pass a 2-character reply as `last_assistant_message` to `--save-claude-turn` and a 5-character prompt to `--hook-submit` (hook JSON on stdin): both are saved, as `[claude] …` and `[user] …`.
    - A routine prompt (`ok`, `yes`, `thanks`) is saved every time it is sent, once in each exchange: hook saves reject exact duplicates only within the same `turn_id` (§3.16).
    - Every hook call writes an `audit.log` record, also when the save fails. **Check the failing save in a temporary data folder whose `redis_url` is the test Redis of §9**: `docker pause redis-stack-test` for one hook call, then `docker unpause redis-stack-test`. **Never stop or pause the user's Redis**: its persistence is off (§3.4), so a restart deletes every memory.
    - A long, uniformly formatted reply (a settings text of 12 items, about 2,000 characters) is saved as one parent document `[claude] …` with chunks `[claude i/N] …`, and `--search` returns it in full as one `[doc×N]` hit. An almost identical settings text (a few values changed) in another exchange is saved too, and both versions are shown with the newer first.
 
-9. **Fully automatic saving (adapted from Free §6 test 10)**:
+9. **Fully automatic saving (adapted from Free §6 test 10)** (only when the hooks were added; with MCP only, saving is up to the model (§11), so skip this item and say so in the report):
    1. Note the newest records with `python -m n3mc_mcp.cli --list`.
    2. Have **3 or more turns** of conversation in Claude Code. Claude must **not** call `--buffer` at any point.
    3. `--list` again: every turn has its `[user]` and its `[claude]` record, also when a message repeats an earlier one, with one `turn_id` per turn.
@@ -2617,7 +2808,7 @@ pytest tests/ -v -k "not TestEmbedding"
     4. `list_memories`, `recall_thread`, `delete_memory`, `delete_memories_by_session` and `repair_memory` return the texts of §4.3 (Layer 3).
     5. Stop the server (`/shutdown`), block its start (an occupied port), and call `save_memory`: the record is saved without a vector with the `warning` / `detail` of §4.6; `search_memory` returns `Error: memory backend unreachable. …`; the entry keeps running.
     6. Close the MCP entry: the server (when one runs) is still running (`/health`). Stop it afterwards with `/shutdown` and delete the temporary folder. On Windows the Python `mcp` stdio client used by this test may end its process tree through a Job Object when it closes, so the server may end too (§3.15). If it is gone, check that the next CLI call starts it again; if it still runs, stop it with `/shutdown` as above. Either outcome passes.
-    Do **not** register the MCP entry in Claude Code or in the real desktop app configuration for this test.
+    Do **not** register this test's MCP entry (the one with the temporary data folder) in Claude Code or in the real desktop app configuration.
 
 11. **Context size limit (like N3MC-Pro §6 test 19)**: in a temporary data folder whose `config.json` has `context_max_chars: 4000` and its own `server_port`, against the **test** Redis, save 30 records of 300–400 characters about the same subject (the same text with a few words changed in each) with `--buffer`. Run `--hook-submit` with a `UserPromptSubmit` JSON whose `prompt` asks about that subject, a manual `--search` with the same question, and the MCP `search_memory` with it. The stdout of `--hook-submit` and the `search_memory` text are each at most 4,000 as `context_size` counts it (§3.17), have fewer rows than the manual search and contain `lower-ranked match(es) omitted to keep this block within the context limit`; the manual `--search` prints every row and no such line. Then save one parent document of 20,000 characters on the same subject and repeat the hook search: the output still fits, and ends with `_(cut here to keep this block within the context limit.)_` when that document is among the first three hits.
 
@@ -2629,7 +2820,7 @@ pytest tests/ -v -k "not TestEmbedding"
 
 > **Stated up front as a design premise**: this server can persuade the LLM to save and search via MCP, but **whether the LLM actually calls those tools cannot be enforced at the MCP-protocol level**. This is not an implementation defect — it is a limit of what an MCP server is allowed to do.
 
-> **Claude Code is not limited by this.** In Claude Code the hooks save every message and reply and search with every message (§12), whatever the model decides — the guaranteed save this section describes as out of reach for MCP. This section applies to applications without hooks (the Claude desktop app and other MCP clients), which use the thin client of §4.6.
+> **Claude Code with the hooks added is not limited by this.** There the hooks save every message and reply and search with every message (§12), whatever the model decides — the guaranteed save this section describes as out of reach for MCP. This section applies to applications connected through MCP only (Claude Code with MCP only, the Claude desktop app and other MCP clients), which use the thin client of §4.6.
 
 ### The three persuasion levers an MCP server has
 
@@ -2663,15 +2854,15 @@ When you cannot rely on the LLM's voluntary discipline, **only these two paths e
 - **Pros**: deterministic — code does what code is written to do; saves are guaranteed.
 - **Cons**: you have to write that orchestration application; you step outside MCP clients (Claude Code, etc.).
 
-In short, **the convenience of "let MCP + the LLM handle it" and the guarantee of "every turn saves" sit at opposite ends of a tradeoff** — picking either side means giving up the other. The most this server can do is "pack the response with persuasion to make the LLM want to comply"; any stronger guarantee is, by spec, the user's or the client implementer's choice.
+In short, **the convenience of "let MCP + the LLM handle it" and the guarantee of "every turn saves" sit at opposite ends of a tradeoff** — picking either side means giving up the other. The most this server can do is "pack the response with persuasion to make the LLM want to comply"; any stronger guarantee is, by spec, the user's or the client implementer's choice. In Claude Code, adding the hooks — a mechanism outside MCP — makes saving certain (§8 "Adding the hooks to Claude Code (full recall)", §12).
 
 ---
 
 ## 12. Claude Code Hooks
 
-The flow is N3MC-Free's (§4, §4.5, §5 of the Free specification), with Lite's names, Lite's save rules (§3.16) and Lite's search (§3.14). It is written out here in full, because the code is generated from this document only.
+This section applies when the hooks are added to Claude Code together with the MCP entry (full recall), and to the hooks-only configuration (§8). With MCP only, no hooks are registered. The flow is N3MC-Free's (§4, §4.5, §5 of the Free specification), with Lite's names, Lite's save rules (§3.16) and Lite's search (§3.14). It is written out here in full, because the code is generated from this document only. How the overlap with MCP is handled is in §8 "Using MCP and the hooks together".
 
-> **🛑 Hook registration is a mandatory automated step.** The most common reason cross-session memory "does not work" after a successful-looking install is that the implementing AI tested the CLI and then left the `~/.claude/settings.json` hook block to the user. Method A ends with `n3mc-lite --init` (§8); the gate of §10 item 7.1 must print `OK` before the setup is reported as complete. (Plugin users get the hooks from the plugin.)
+> **🛑 Once the hooks are to be added, registering them is a mandatory automated step.** The most common reason cross-session memory "does not work" after a successful-looking install is that the implementing AI tested the CLI and then left the `~/.claude/settings.json` hook block to the user. Method A with the hooks ends with `n3mc-lite --init --hooks` (§8); the gate of §10 item 7.5 must print `OK` before the setup is reported as complete. (Users of the full-recall plugin get the hooks from the plugin.)
 
 ### 12.1 What the hooks do
 
@@ -2783,7 +2974,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 ### 12.8 `--init`
 
-`n3mc-lite --init` (pip installations; plugin users do not need it):
+These are the hook registration steps. `n3mc-lite --init --hooks`, and `n3mc-lite --init` when own hook entries already exist, carry them out after the MCP steps of §8 "`n3mc-lite --init`" (pip installations; plugin users do not need it). Both use the same `~/.claude/settings.json`, so reading and writing that file (steps 2 and 6 below) happen once each, together with the MCP steps.
 
 1. Load (create) `config.json` in the data folder (§6).
 2. Read `~/.claude/settings.json`. **A missing file is read as `{}`**: it is created in step 6, without a backup (there is nothing to back up), and `~/.claude/` is created if needed. An unreadable file, or `hooks` / `permissions` / `permissions.allow` of the wrong type: change nothing, print the reason, exit 1.
@@ -2791,7 +2982,7 @@ _If several versions of the same content appear, the one with the newest `saved`
 4. **Merge the hooks**: for `UserPromptSubmit` and `Stop`, keep every entry that is not ours (report each kept command that contains `n3mc` with `Another N3MC hook is registered for <event> and was left in place: <command>`), and append one entry `{"hooks": [{"type": "command", "command": resolve_cmd(<entry point>), "timeout": 60}]}`. A hook item whose `command` is not a string (null and the like) is not ours and is kept (it is not reported either).
 5. **Permission rules**: append the missing `PERMISSION_RULES` of §8 (the `python -m n3mc_mcp.cli` and `n3mc-lite` forms); never remove anything.
 6. **Write only when something changed**: copy the file to `settings.json.bak-n3mc-lite-<YYYYmmddHHMMSS>`, write a temporary file in the same folder, `os.replace` it.
-7. **Old MCP registration**: report an `n3mc-workingmemory` entry in `~/.claude.json` or `./.mcp.json` as §8 says (read only).
+7. (The MCP registration is handled by the MCP steps of §8; these steps do not touch `~/.claude.json` or `.mcp.json`.)
 8. Print `N3MC Lite hooks registered in <settings path>. Saving starts with the next Claude Code session.` (or the step 3 message).
 
 ```python
@@ -2882,7 +3073,7 @@ def resolve_cmd(script_name: str) -> str:
 
 ### 12.9 The rules file `.claude/rules/n3mc-lite-behavior.md`
 
-Claude Code loads `.claude/rules/*.md` of the project at session start. `--stop` keeps `<project>/.claude/rules/n3mc-lite-behavior.md` up to date (`_ensure_rules_md`; `<project>` is the project folder of §12.4 step 1, never the home folder). Free writes `n3mc-behavior.md`; the names differ so both products can be installed (§14).
+Claude Code loads `.claude/rules/*.md` of the project at session start. Only the hooks' `--stop` writes this file, so it exists only when the hooks are added (or used alone). It sits next to the MCP instructions (§5), and both point at the same resident server. `--stop` keeps `<project>/.claude/rules/n3mc-lite-behavior.md` up to date (`_ensure_rules_md`; `<project>` is the project folder of §12.4 step 1, never the home folder). Free writes `n3mc-behavior.md`; the names differ so both products can be installed (§14).
 
 **Template** (`_RULES_MD_TEMPLATE`, exactly this text with a line feed after the last line; do not rephrase it). `{cli}` is replaced by the command form of this installation: `<python> -m n3mc_mcp.cli` (pip), where `<python>` is `shell_path(sys.executable)` of the process that runs `--stop` — the absolute path of the Python that has the package, with forward slashes, quoted only when `shell_path` has to quote it (§12.8) — or `uvx --from n3memorycore-mcp-lite==<version> n3mc-lite` when `--stop` was called with `--uvx` (plugin). (A bare `python` is another Python when the package is installed in a venv.)
 
@@ -2975,7 +3166,7 @@ kept only in `audit.log`.
 
 ## 13. CLI `n3mc-lite`
 
-`n3mc-lite` (`n3mc_mcp.cli:main`, also `python -m n3mc_mcp.cli`) is Free's CLI with Lite's functions. In Claude Code, which has no MCP tools for this server, it gives the same as the tools: each tool command calls the tool's handler in the resident server (`POST /tools/<name>?nudge=0`) and prints the answer's text unchanged, followed by one line break. Exactly one command per call (argparse, mutually exclusive group). Every string argument is passed through `sanitize_surrogates` (§3.13) before any command uses it, `--search` included.
+`n3mc-lite` (`n3mc_mcp.cli:main`, also `python -m n3mc_mcp.cli`) is Free's CLI with Lite's functions. It registers Claude Code (`--init`, §8), and for Claude Code with the hooks added (the rules file names it, §12.9), for Claude Code with hooks only (no MCP tools) and for humans it gives the same as the tools: each tool command calls the tool's handler in the resident server (`POST /tools/<name>?nudge=0`) and prints the answer's text unchanged, followed by one line break. Exactly one command per call (argparse, mutually exclusive group). Every string argument is passed through `sanitize_surrogates` (§3.13) before any command uses it, `--search` included.
 
 | Command | Calls | Prints |
 |---|---|---|
@@ -2988,7 +3179,7 @@ kept only in `audit.log`.
 | `--repair` | `/tools/repair_memory` (one call: up to 200 vectors; run again while `remaining` > 0) | The `repair_memory` JSON |
 | `--stop-server` | `ensure_server`'s identity check without starting anything: when `/health` on `server_port` reports our `root`, `POST /shutdown` with it and wait until the port is free (§3.15) | `Stopped the N3MC Lite server (pid <pid>).` only when the port became free within the 15 s wait; `No N3MC Lite server of this data folder is running.` (also when another folder's server holds the port, which is never stopped); exit 0. **When the stop is not confirmed** (the shutdown request failed and the port is still taken, or the wait ended with the port in use): `Could not stop the N3MC Lite server (pid <pid>): <reason>. End the process whose command line contains n3mc_mcp.cli and --run-server.` on stderr, exit 1 (printing success after a failed stop would let the uninstall steps go on with the server running) |
 | `--hook-submit`, `--save-claude-turn`, `--stop` | §12 | §12 |
-| `--init` | §12.8 | §12.8 |
+| `--init [--hooks]` | §8 "`n3mc-lite --init`" (MCP), §12.8 (hooks) | §8, §12.8 |
 | `--run-server` | Runs the resident server in this process (§3.15): load `config.json`, warn about a `bind_host` other than `127.0.0.1`, steps 1–3 of §3.9 and the library import, then uvicorn on `bind_host:server_port` with the lifespan that starts the model load; removes the PID file on exit when it holds its own PID | nothing on stdout |
 | `--uvx` | Modifier for `--hook-submit`, `--save-claude-turn` and `--stop`: this installation runs through `uvx` (§8, §12.9) | — |
 
@@ -3018,7 +3209,8 @@ Lite can be installed on the same PC as N3MC-Free, N3MC-Pro and the MCP Pro / Po
 - **`--init` keeps the other products' hooks** (`is_own_hook`, §12.8) and reports them; the other products' `--init` keep Lite's (their matching does not match `n3mc-lite-hook` or `n3mc_mcp.lite_hook`).
 - **Server identity**: each server reports its own data folder as `root`; a CLI that finds another product's server on its port never uses or stops it (§3.15 "When the port belongs to another folder's server").
 - **Two products' hooks together**: Claude gets one `# Recalled Memory Context` block from each product every turn, each from its own memory, and each rules file names its own commands. This is the user's choice; neither product removes the other.
-- **Plugin and pip on one PC**: the plugin's hooks and hooks written by `n3mc-lite --init` would both run (two searches per message, and the `[user]` and `[claude]` records of an exchange could get different `turn_id`s because both write `turn_id_<session>.txt`). `--init` registers no hooks while the plugin is enabled (§12.8), and the plugin's SessionStart script reports hooks written by `--init` (§8).
+- **Lite's own MCP and hooks**: using Lite's MCP entry and its hooks together in one Claude Code is a valid configuration (full recall). How the overlap is handled is in §8 "Using MCP and the hooks together".
+- **Plugin and pip on one PC**: the full-recall plugin's hooks and hooks written by `n3mc-lite --init --hooks` would both run (two searches per message, and the `[user]` and `[claude]` records of an exchange could get different `turn_id`s because both write `turn_id_<session>.txt`). `--init` registers no hooks while the plugin is enabled (§12.8), and the plugin's SessionStart script reports hooks written by `--init` (§8). Likewise for the MCP entry: while a plugin registers it, `--init` adds no user-scope entry (§8).
 - **MCP coexistence**: rule 0 of the instructions (§5 (1)): when a persistent N3MC memory is connected over MCP in the same application — `n3mc-pro` (N3MC MCP Pro), `n3mc-pg` (its PostgreSQL edition) or `n3mc-longtermmemory` (the earlier MCP Pro) — Lite is the working memory.
 
 ---
@@ -3037,7 +3229,7 @@ All three extensions are additive — none of them require changes to the Redis 
 
 ## Appendix B: Recommended AI-Assisted Workflow
 
-> **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code. The AI does not advance to the next phase on its own. In Claude Code the memory is driven by the **hooks** and the CLI `n3mc-lite` (§12, §13); the MCP tools are exercised through the thin client in a test folder (§10 item 10).
+> **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code. The AI does not advance to the next phase on its own. Method A registers the MCP entry in Claude Code (and adds the hooks when they were asked for, §8). The MCP tools are exercised inside Claude Code (§10 item 7) and through the thin client in a test folder (§10 item 10).
 
 | Phase | What you do | Model |
 |---|---|---|
@@ -3048,15 +3240,15 @@ All three extensions are additive — none of them require changes to the Redis 
 
 > **⚠️ A full Claude Code restart is required before Phase 3**
 >
-> The hooks and the rules file are read by Claude Code at startup; a session that started before `n3mc-lite --init` ran has no hooks. The resident server replaces itself when its code changes (`code_version`, §3.15), so it needs no manual restart; §10-1 measures the first search after a server start, which is easiest to observe after a fresh start.
+> The MCP registration, the hooks and the rules file are read by Claude Code at startup; a session that started before `n3mc-lite --init` ran has neither the MCP tools nor the hooks. The resident server replaces itself when its code changes (`code_version`, §3.15), so it needs no manual restart; §10-1 measures the first search after a server start, which is easiest to observe after a fresh start.
 >
 > Pre-restart checklist:
 > 1. Confirm the latest code is on the import path (`pip install -e .` or reinstall).
-> 2. Confirm the hooks are registered: the gate of §10 item 7.1 prints `OK` (see [§8](#8-client-configuration), §12).
-> 3. Confirm `~/.claude/settings.json` has the CLI permission rules (`Bash(python -m n3mc_mcp.cli --search *)` …; see [§8 Auto-approve](#auto-approve-claude-code-only)), and that `claude mcp get n3mc-workingmemory` reports no such server.
+> 2. Confirm the MCP entry is registered: the gate of §10 item 7.1 prints `OK` (see [§8](#8-client-configuration)). When the hooks were added, the gate of item 7.5 prints `OK` too (see §12).
+> 3. Confirm `~/.claude/settings.json` has the MCP tool permission rules (`mcp__n3mc-workingmemory__search_memory` …; with the hooks, also the CLI rules `Bash(python -m n3mc_mcp.cli --search *)` …; see [§8 Auto-approve](#auto-approve-claude-code-only)), and that `claude mcp get n3mc-workingmemory` shows the registration with this installation's absolute path.
 > 4. Confirm Redis Stack is up (`docker ps`; if not, `docker start redis-stack` or `docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest`).
 > 5. **Fully exit and relaunch Claude Code.** On **Windows**: closing the window with × or running `/exit` can leave background processes alive — open **Task Manager** and end every `Claude` / `claude` process. To measure a fresh server start, also end the `python.exe` whose command line contains `n3mc_mcp.cli --run-server`.
-> 6. The first search after a server start takes 2–10 minutes if the multilingual-e5-base (~1.1 GB) HF cache is missing; meanwhile the hook prints a "still starting" placeholder or keyword-only results with a notice (§3.9).
+> 6. The first search after a server start takes 2–10 minutes if the multilingual-e5-base (~1.1 GB) HF cache is missing; meanwhile the MCP tools return the "still starting" error of §4.6 or keyword-only results with a notice, and the hook prints a "still starting" placeholder or keyword-only results with a notice (§3.9).
 
 ---
 
@@ -3068,11 +3260,11 @@ Set the model to **Sonnet** and paste:
 Please implement n3mcmcp-lite according to this specification.
 ```
 
-Sonnet will automatically handle code generation, hook setup, and server startup. Once complete, proceed to Phase 2 ("done" ≠ "spec-compliant", so do not stop here).
+Sonnet will automatically handle code generation, the registration in Claude Code, and server startup. To add the hooks as well (full recall), add "Please add the hooks too." to this prompt. Once complete, proceed to Phase 2 ("done" ≠ "spec-compliant", so do not stop here).
 
 > **⚠️ Fully restart Claude Code between Phase 1 and Phase 2**
 >
-> When Claude Code launched at the start of Phase 1, the hooks did not exist yet, so this session saves nothing and gets no `# Recalled Memory Context`. Before pasting the Phase 2 debugging prompts, **fully exit Claude Code and reopen it** so the hooks registered by `n3mc-lite --init` and the rules file take effect.
+> When Claude Code launched at the start of Phase 1, the MCP registration (and the hooks) did not exist yet, so this session has no memory tools and saves nothing. Before pasting the Phase 2 debugging prompts, **fully exit Claude Code and reopen it** so the MCP entry registered by `n3mc-lite --init` (and the hooks and the rules file) take effect.
 >
 > **How to fully exit on Windows**: closing the window with × or running `/exit` can leave the app running in the background.
 >
@@ -3081,7 +3273,7 @@ Sonnet will automatically handle code generation, hook setup, and server startup
 > 3. If unsure, sign out of Windows once and sign in again: Start menu → your account icon (bottom left) → **Sign out**. Restarting the PC also works.
 > 4. Open Claude Code again.
 >
-> After relaunch, send one message and check that it was saved (`python -m n3mc_mcp.cli --list` shows its `[user]` record).
+> After relaunch, send one message and check that the memory tool `search_memory` is available. When the hooks were added, also check that the message was saved (`python -m n3mc_mcp.cli --list` shows its `[user]` record).
 
 ---
 
@@ -3116,10 +3308,12 @@ implemented and fix it.
 **③ Cross-session test** (confirm data survives a server restart)
 ```
 For n3mcmcp-lite:
-Check that a message of this session was saved by the hooks
-(python -m n3mc_mcp.cli --list). Stop the resident server with python -m n3mc_mcp.cli --stop-server
-(keep Redis running), then run python -m n3mc_mcp.cli --search for that
-message: the server is started again and the record is found. Do the
+Save one short sentence with the save_memory tool in this session (if the
+hooks were added, also check that a message of this session was saved by
+the hooks), and check that python -m n3mc_mcp.cli --list shows it. Stop the
+resident server with python -m n3mc_mcp.cli --stop-server (keep Redis
+running), then run the search_memory tool and python -m n3mc_mcp.cli --search
+for that sentence: the server is started again and the record is found. Do the
 same with save_memory through the MCP thin client in a temporary data
 folder (§10 item 10). Fix anything that prevents this.
 ```
@@ -3137,8 +3331,8 @@ The model can be **Sonnet** or **Opus** — Sonnet is sufficient to verify the i
 ```
 For n3mcmcp-lite:
 Run the §10 Evidence Report from the spec. Use the CLI commands of §13
-(python -m n3mc_mcp.cli ...) for items 1-9 and the MCP client test of
-item 10, and verify items 1 through 11 in order. Score each item on a
+(python -m n3mc_mcp.cli ...) for items 1-6, 8 and 9, the MCP tools inside
+Claude Code for item 7, and the MCP client test of item 10, and verify items 1 through 11 in order. Score each item on a
 1–5 ⭐ scale and write up a short Evidence Report.
 
 Be explicit about:
@@ -3153,7 +3347,8 @@ Be explicit about:
          under one session_id → delete_memories_by_session → matches
          the inserted count, leaves other sessions untouched, second
          call returns not_found
-- §10-7..9: hook gate, [user]/[claude] records with one turn_id per turn
+- §10-7: the MCP gate and the tools inside Claude Code (with the hooks, also the hook gate)
+- §10-8..9: complete recording through the hooks, [user]/[claude] records with one turn_id per turn (9 only with the hooks)
 - §10-10: the MCP thin client in a temporary folder (no model, same texts)
 - §10-11: the context size limit with context_max_chars 4000
 
@@ -3178,7 +3373,7 @@ Switch the model to **Opus** and paste:
 Please review n3mcmcp-lite and fix anything that needs fixing.
 
 On a scale of 1–10, what score does n3mcmcp-lite earn as (a) a memory
-device (hooks for Claude Code, MCP for other apps) and (b) a RAG system? Split the evaluation:
+device (MCP for every app, plus hooks Claude Code can add) and (b) a RAG system? Split the evaluation:
 memory device (save / 7-day TTL / dedup / parent-document verbatim
 contract) vs. RAG (hybrid search / CJK bigram / lightweight reranker /
 time decay / auto importance). Generate a scorecard.

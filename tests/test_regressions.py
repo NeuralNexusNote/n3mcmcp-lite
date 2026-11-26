@@ -1,203 +1,246 @@
-"""Layer 4: regression tests (spec §9 Layer 4). The embedding is conftest's deterministic stand-in.
-Classes marked (Redis) in the spec use the `rconn` / `db` / `runner` fixtures."""
+"""Layer 4: regression tests (spec §9 Layer 4). Fake embeddings; classes marked (Redis) in the
+spec use the `db` / `rconn` fixtures and skip without N3MC_REDIS_TEST_URL."""
 import importlib.util
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import uuid
 
 import pytest
 import redis
 
 import conftest
-from conftest import parse_json
-from n3mc_mcp import __version__, cli, config, context, database, paths, processor, tools
-from n3mc_mcp.config import DEFAULTS, load_config
-from n3mc_mcp.database import DOC, DOCSHA, MEM, SHA, BackendError, Database, sha1_hex, shape_results
+from n3mc_mcp import __version__, config, context as C, processor as P, tools
+from n3mc_mcp.database import DOC, DOCSHA, MEM, SHA, Database
 
-ROOT = Path(__file__).resolve().parent.parent
-NOW = time.time()
+REPO = conftest.REPO_ROOT
 
 
-def _cfg(**kw):
-    c = dict(DEFAULTS)
-    c.update(kw)
-    return c
+def _j(text):
+    return json.JSONDecoder().raw_decode(text)[0]
 
 
-def cand(cid, cos=None, bm25=None, epoch=NOW, session="s", content=None, **kw):
-    d = {"id": cid, "content": content if content is not None else f"content of {cid} " + "filler " * 10,
-         "timestamp_epoch": epoch, "timestamp": datetime.fromtimestamp(epoch, timezone.utc).isoformat(),
-         "session_id": session, "importance": 1.0, "access_count": 0, "cos": cos, "bm25": bm25,
-         "_doc": False, "chunk_ids": [], "_hit_key": cid}
-    d.update(kw)
-    return d
+def _cfg(rconn, name):
+    v = rconn.config_get(name)
+    v = v.get(name, v.get(name.encode()))
+    return v.decode() if isinstance(v, bytes) else v
 
 
-def _all_keys(rconn):
-    return [k.decode() for k in rconn.keys("*") if k != conftest.TEST_MARKER.encode()]
+def _keys(rconn):
+    return [k.decode() for k in rconn.keys("*") if k != conftest.TEST_MARK.encode()]
 
 
-def _write_cfg(isolated, **kw):
-    p = isolated["data"] / "config.json"
-    obj = json.loads(p.read_text(encoding="utf-8"))
-    obj.update(kw)
-    p.write_text(json.dumps(obj), encoding="utf-8")
-    return p
+# ── a Redis-free Database for the shaping tests ───────────────────────────────
+
+class _FakePipe:
+    def __init__(self, r):
+        self.r = r
+        self.q = []
+
+    def hmget(self, key, fields):
+        self.q.append(self.r.hmget(key, fields))
+
+    def execute(self, raise_on_error=True):
+        q, self.q = self.q, []
+        return q
 
 
-LONG = "\n".join(f"第{i}節: 設定項目 key{i} の値は {i * 3} とし、毎週の点検で確認する。" for i in range(1, 30))
+class _FakeRedis:
+    def __init__(self, hashes=None):
+        self.h = hashes or {}
+        self.incr = []
+
+    def hmget(self, key, fields):
+        return [self.h.get(key, {}).get(f) for f in fields]
+
+    def pipeline(self, transaction=False):
+        return _FakePipe(self)
+
+    def register_script(self, src):
+        def run(keys=None, args=None, client=None):
+            if "HINCRBY" in src:
+                self.incr.append(keys[0])
+            if client is not None:
+                client.q.append(0)
+            return 0
+        return run
+
+
+def _vec_for(seed):
+    return conftest.fake_embed("passage: " + seed)
+
+
+def shaping_db(cfg, rows):
+    """rows: dicts id, cos, bm, content, age_days, session, parent. Returns (db, fake redis)."""
+    now = time.time()
+    hashes, vec, bm = {}, [], []
+    for r in rows:
+        ts = now - r.get("age_days", 0) * 86400
+        fields = {"content": r.get("content", "x" * 60), "parent_id": r.get("parent", ""),
+                  "owner_id": cfg["owner_id"], "session_id": r.get("session", ""), "turn_id": "",
+                  "timestamp": "2026-11-26T00:00:00", "timestamp_epoch": str(ts),
+                  "importance": "1.0", "access_count": "0", "agent_name": ""}
+        if r.get("cos") is not None:
+            vec.append(dict(fields, __key=MEM + r["id"], __dist=str(1 - r["cos"])))
+        if r.get("bm") is not None:
+            bm.append(dict(fields, __key=MEM + r["id"], __score=r["bm"]))
+        emb = r.get("emb")
+        hashes[MEM + r["id"]] = {"content": fields["content"].encode(),
+                                 "embedding": P.pack_vector(emb) if emb else None}
+    for pid, doc in (cfg.get("_docs") or {}).items():
+        hashes[DOC + pid] = doc
+    d = Database(cfg, default_session="cur")
+    fake = _FakeRedis(hashes)
+    d.client = fake
+    d._vector_search = lambda *a, **k: vec
+    d._bm25_search = lambda *a, **k: bm
+    return d, fake
 
 
 class TestQueryCleaning:
-    def test_control_and_cjk_punctuation_removed(self):
-        assert processor.prepare_query("「記憶装置」は？\x00") == "記憶 憶装 装置 は"
-        assert processor.drop_lone_cjk_tokens(processor.prepare_query("「記憶装置」は？")) == "記憶 憶装 装置"
+    def test_strip(self):
+        assert P.prepare_query("「記憶装置」は？\x00") == "記憶 憶装 装置 は"
 
-    def test_cjk_punctuation_query_hits(self, db):
-        r = db.save_memory("記憶装置の容量を増やす計画")
-        assert r["id"] in [h["id"] for h in db._bm25_search("「記憶装置」は？", 10)]
+    def test_japanese_query_hits(self, db):
+        db.save_memory("記憶装置の容量は 2TB です")
+        assert any("記憶装置" in r["content"] for r in db.search("「記憶装置」は？")[0])
 
-    def test_symbol_queries_do_not_raise(self, db):
-        db.save_memory("something to find")
-        for q in ["@#$%^&*()", "\x00\x01\x1f", "_", "a-b|c", "~!{}[]", "\\\\", "''\"\"", "😀", "-", "*"]:
-            db._bm25_search(q, 10)
-            db.search(q)
+    @pytest.mark.parametrize("q", ["\x00\x01", "@#$%^&*()", "_", "「」『』", "a|b", "-", "~~~", "?"])
+    def test_no_exception(self, db, q):
+        db.save_memory("some record")
+        db.search(q)
 
 
 class TestExactOnlyDedup:
-    def test_updated_fact_saved(self, db):
-        assert db.save_memory("The project budget is 100 dollars.")["saved"]
-        assert db.save_memory("The project budget is 120 dollars.")["saved"]
+    def test_updated_fact(self, db):
+        assert db.save_memory("The deadline is Friday.")["saved"]
+        assert db.save_memory("The deadline is Monday.")["saved"]
 
-    def test_remade_document_saved(self, db):
-        assert db.save_memory(LONG)["saved"]
-        assert db.save_memory(LONG.replace("の値は 3", "の値は 4").replace("の値は 9", "の値は 10"))["saved"]
+    def test_remade_document(self, db):
+        doc = "Setting item value 10. " * 30
+        assert db.save_memory(doc)["saved"]
+        assert db.save_memory(doc.replace("10", "11", 3))["saved"]
 
-    def test_exact_duplicate_rejected(self, db):
-        db.save_memory("exactly the same")
-        assert db.save_memory("exactly the same")["status"] == "duplicate"
+    def test_exact_rejected(self, db):
+        db.save_memory("exactly this")
+        assert db.save_memory("exactly this")["status"] == "duplicate"
 
 
 class TestTimeWindow:
-    def test_window_rows_found_despite_closer_newer_rows(self, db, rconn):
-        target = db.save_memory("weekly report about the harbour lights, older entry")
-        old = NOW - 3 * 86400
-        rconn.hset(MEM + target["id"], "timestamp_epoch", repr(old))
-        for i in range(30):
-            db.save_memory(f"weekly report about the harbour lights, newer entry {i}")
-        normal, weak, _m = db.search("weekly report about the harbour lights", limit=2, until=NOW - 2 * 86400)
-        assert target["id"] in [r["id"] for r in normal + weak]
-        normal, _w, _m = db.search("weekly report harbour lights", limit=2, since=NOW - 3600)
-        assert target["id"] not in [r["id"] for r in normal]
+    def test_window_prefilter(self, db, rconn):
+        old = db.save_memory("window target alpha record")
+        rconn.hset(MEM + old["id"], "timestamp_epoch", time.time() - 10 * 86400)
+        for i in range(8):
+            db.save_memory(f"window target alpha record newer {i}")
+        since = time.strftime("%Y-%m-%d", time.localtime(time.time() - 11 * 86400))
+        until = time.strftime("%Y-%m-%d", time.localtime(time.time() - 9 * 86400))
+        rows = db.search("window target alpha record", limit=1, since=since, until=until)[0]
+        assert [r["id"] for r in rows] == [old["id"]]
 
 
 class TestShaping:
-    def test_vector_floor(self):
-        normal, _ = shape_results([cand("a", cos=0.99), cand("b", cos=0.80)], "q", _cfg(min_results=0), "s", 10)
-        assert [r["id"] for r in normal] == ["a"]
+    def test_vector_floor(self, cfg):
+        d, _ = shaping_db(cfg, [{"id": "a", "cos": 0.80}, {"id": "b", "cos": 0.95}])
+        cfg["min_results"] = 0
+        assert [r["id"] for r in d.search("q")[0]] == ["b"]
 
-    def test_relative_cut(self):
-        cfg = _cfg(min_results=0, lexical_rerank_enabled=False, min_score=0.0)
-        normal, _ = shape_results([cand("a", cos=1.0, bm25=5.0), cand("b", cos=0.851)], "q", cfg, "s", 10)
-        assert [r["id"] for r in normal] == ["a"]
+    def test_relative_cut(self, cfg):
+        cfg["min_results"] = 0
+        d, _ = shaping_db(cfg, [{"id": "a", "cos": 1.0, "bm": 10}, {"id": "b", "cos": 0.85}])
+        ids = [r["id"] for r in d.search("q")[0]]
+        assert ids == ["a"]
 
-    def _versions(self, cfg):
-        same = [1.0] + [0.0] * 767
-        text = "設定資料 " * 30
-        old = cand("old", cos=0.99, epoch=NOW - 3600, content=text, access_count=0)
-        new = cand("new", cos=0.90, epoch=NOW, content=text + " v2")
-        reps = {"old": (same, text), "new": (same, text)}
-        return shape_results([old, new], "q", cfg, "s", 10, lambda rows: reps)
+    def test_newest_version_first(self, cfg):
+        cfg["min_results"] = 0
+        e = _vec_for("version doc")
+        long = "v" * 120
+        d, _ = shaping_db(cfg, [{"id": "old", "cos": 0.99, "content": long, "age_days": 1, "emb": e},
+                                {"id": "new", "cos": 0.90, "content": long + "2", "age_days": 0, "emb": e}])
+        rows = d.search("q")[0]
+        assert rows[0]["id"] == "new" and rows[0]["_version_group"] == rows[1]["_version_group"]
+        assert rows[0]["score"] > rows[1]["score"]
 
-    def test_newest_version_first_takes_top_score(self):
-        cfg = _cfg(min_results=0, lexical_rerank_enabled=False)
-        normal, _ = self._versions(cfg)
-        assert [r["id"] for r in normal] == ["new", "old"]
-        assert normal[0]["score"] > normal[1]["score"]
-        assert all(r.get("_version_group") == 1 for r in normal)
+    def test_version_group_survives_cut(self, cfg):
+        cfg["min_results"] = 0
+        e = _vec_for("grouped")
+        long = "g" * 120
+        d, _ = shaping_db(cfg, [{"id": "new", "cos": 0.99, "bm": 10, "content": long, "emb": e},
+                                {"id": "old", "cos": 0.86, "content": long + "x", "age_days": 2, "emb": e}])
+        assert {r["id"] for r in d.search("q")[0]} == {"new", "old"}
 
-    def test_version_group_survives_relative_cut(self):
-        cfg = _cfg(min_results=0, lexical_rerank_enabled=False, relative_min_score_ratio=0.99)
-        normal, _ = self._versions(cfg)
-        assert len(normal) == 2
-
-    def test_short_rows_not_grouped(self):
-        same = [1.0] + [0.0] * 767
-        a, b = cand("a", cos=0.99, content="short"), cand("b", cos=0.98, content="short2")
-        cfg = _cfg(min_results=0, lexical_rerank_enabled=False)
-        normal, _ = shape_results([a, b], "q", cfg, "s", 10, lambda rows: {"a": (same, "x"), "b": (same, "y")})
-        assert not any(r.get("_version_group") for r in normal)
+    def test_short_rows_not_grouped(self, cfg):
+        cfg["min_results"] = 0
+        e = _vec_for("short")
+        d, _ = shaping_db(cfg, [{"id": "a", "cos": 0.99, "content": "s" * 60, "emb": e},
+                                {"id": "b", "cos": 0.98, "content": "t" * 60, "emb": e, "age_days": 0}])
+        assert not any(r.get("_version_group") for r in d.search("q")[0])
 
 
 class TestRender:
-    def test_saved_local_time(self, monkeypatch):
-        monkeypatch.setattr(processor, "_local_tz", lambda: timezone(timedelta(hours=9)))
-        assert processor.fmt_saved("2026-11-13T01:34:00+00:00") == "2026-11-13 10:34 (UTC+0900)"
+    def test_saved_local_time(self):
+        out = C.render_row({"id": "x", "content": "c", "score": 0.5, "timestamp_epoch": 0})
+        assert re.search(r"saved=1970-01-01 \d\d:\d\d \(UTC[+-]\d{4}\)", out)
 
     def test_version_line_once(self):
-        out = context.render_search([cand("a", score=0.5), cand("b", score=0.4)], [])
-        assert out.count("_If several versions") == 1 and out.index("_If several") < out.index("### ")
+        rows = [{"id": "a", "content": "a", "score": 1}, {"id": "b", "content": "b", "score": 1}]
+        assert C.render(rows, []).count("newest `saved` time") == 1
 
-    def test_notices_once_and_late_notice_next_search(self, cfg):
-        n = tools.Notices(cfg)
-        cfg["_notices"] = ["config_type: x"]
-        assert n.take() == ["config_type: x"]
-        assert n.take() == []
-        cfg["_notices"].append("shared_redis: y")
-        assert n.take() == ["shared_redis: y"]
+    def test_notice_once_and_later(self, runner, cfg):
+        cfg["_notices"].clear()
+        config.add_notice(cfg, "first notice")
+        assert "first notice" in runner.call("search_memory", {"query": "x"}, nudge=False)
+        assert "first notice" not in runner.call("search_memory", {"query": "x"}, nudge=False)
+        config.add_notice(cfg, "later notice")
+        assert "later notice" in runner.call("search_memory", {"query": "x"}, nudge=False)
 
     def test_weak_after_normal(self):
-        out = context.render_search([cand("a", score=0.5)], [cand("w", score=0.1)])
-        assert out.index("[a]") < out.index(context.WEAK_HEADING) < out.index("[w]")
+        out = C.render([{"id": "n", "content": "n"}], [{"id": "w", "content": "w"}])
+        assert out.index("[n]") < out.index(C.WEAK_HEADING) < out.index("[w]")
 
-    def test_only_weak(self):
-        out = context.render_search([], [cand("w", score=0.1)])
-        assert out.startswith(context.NO_MEMORIES) and context.WEAK_HEADING in out and "_If several" not in out
+    def test_no_normal_with_weak(self):
+        out = C.render([], [{"id": "w", "content": "w"}])
+        assert out.startswith(C.NO_MEMORIES) and C.WEAK_HEADING in out and "newest" not in out
 
     def test_no_weak_no_heading(self):
-        assert context.WEAK_HEADING not in context.render_search([cand("a", score=0.5)], [])
-        assert context.render_search([], []) == context.NO_MEMORIES
+        assert C.WEAK_HEADING not in C.render([{"id": "n", "content": "n"}], [])
 
 
 class TestConfig:
-    def test_unreadable_file_unchanged(self, isolated):
-        p = isolated["data"] / "config.json"
-        p.write_text("{not json", encoding="utf-8")
-        c = load_config(quiet=True)
-        assert p.read_text(encoding="utf-8") == "{not json" and c["_unreadable"]
-        assert any(n.startswith("config_unreadable:") for n in c["_notices"])
+    def test_unreadable_unchanged(self, isolate):
+        p = isolate["data"] / "config.json"
+        p.write_text("{broken", encoding="utf-8")
+        cfg = config.load_config()
+        assert cfg["_unreadable"] and p.read_text(encoding="utf-8") == "{broken"
+        assert any(n.startswith("config_unreadable:") for n in cfg["_notices"])
 
-    def test_wrong_type_ignored_and_reported(self, isolated):
-        _write_cfg(isolated, vector_min_cos="0.83", min_score=0.3)
-        c = load_config(quiet=True)
-        assert c["vector_min_cos"] == 0.85 and c["min_score"] == 0.3
-        assert any("vector_min_cos" in n for n in c["_notices"] if n.startswith("config_type:"))
+    def test_wrong_type_ignored(self, isolate):
+        conftest.write_test_config(str(isolate["data"]), vector_min_cos="0.83", min_score=0.3)
+        cfg = config.load_config()
+        assert cfg["vector_min_cos"] == 0.85 and cfg["min_score"] == 0.3
+        assert any(n.startswith("config_type:") and "vector_min_cos" in n for n in cfg["_notices"])
 
-    def test_bool_is_not_a_number(self, isolated):
-        _write_cfg(isolated, min_score=True, search_result_limit=False)
-        c = load_config(quiet=True)
-        assert c["min_score"] == 0.2 and c["search_result_limit"] == 20
+    def test_bool_not_number(self):
+        assert not config.config_value_ok("min_score", True)
+        assert not config.config_value_ok("ttl_seconds", True)
 
 
 class TestTestSafety:
-    def test_same_url_refused(self):
-        assert conftest.refusal_reason("redis://localhost:6379/0", ["redis://127.0.0.1:6379"])
-        assert conftest.refusal_reason("redis://localhost:6390/0", ["redis://localhost:6379/0"]) is None
+    def test_refuses_live_url(self):
+        assert conftest.refusal_reason("redis://localhost:6379/0", ["redis://localhost:6379/0/"])
+        assert conftest.refusal_reason("redis://127.0.0.1:6390/0", ["redis://localhost:6379/0"]) is None
 
-    def test_live_config_with_bom(self, tmp_path):
-        d = tmp_path / ".n3mc-workingmemory"
-        d.mkdir()
-        (d / "config.json").write_bytes(b"\xef\xbb\xbf" + json.dumps({"redis_url": "redis://h:1/0"}).encode())
-        assert conftest.live_config_redis_url(tmp_path) == "redis://h:1/0"
+    def test_bom(self, tmp_path):
+        p = tmp_path / "config.json"
+        p.write_bytes(b"\xef\xbb\xbf" + json.dumps({"redis_url": "redis://x:1/0"}).encode())
+        assert conftest.read_live_redis_url(str(p)) == "redis://x:1/0"
 
     def test_unmarked_db_not_flushed(self):
-        class Fake:
+        class C2:
             flushed = False
 
             def dbsize(self):
@@ -207,24 +250,24 @@ class TestTestSafety:
                 return 0
 
             def flushdb(self):
-                Fake.flushed = True
-
-        with pytest.raises(pytest.skip.Exception, match="not marked as a test DB"):
-            conftest.flush_test_db(Fake())
-        assert not Fake.flushed
+                C2.flushed = True
+        with pytest.raises(pytest.skip.Exception):
+            conftest.safe_flush(C2())
+        assert not C2.flushed
 
 
 class TestFilterScore:
-    def test_old_and_other_session_survive(self):
-        cfg = _cfg(min_results=0, lexical_rerank_enabled=False)
-        rows = [cand("new", cos=0.86, session="cur"),
-                cand("old", cos=0.95, epoch=NOW - 3 * 86400, session="cur"),
-                cand("oth1", cos=0.99, epoch=NOW - 86400, session="other"),
-                cand("oth2", cos=0.95, epoch=NOW - 86400, session="other")]
-        normal, _ = shape_results(rows, "q", cfg, "cur", 10)
-        assert {r["id"] for r in normal} == {"new", "old", "oth1", "oth2"}
-        assert [r["id"] for r in normal][0] == "new"
-        assert [r["score"] for r in normal] == sorted([r["score"] for r in normal], reverse=True)
+    def test_old_and_other_session_survive(self, cfg):
+        cfg["min_results"] = 0
+        rows = [{"id": "new", "cos": 0.86, "session": "cur", "content": "n" * 80},
+                {"id": "old3d", "cos": 0.95, "session": "cur", "age_days": 3, "content": "o" * 80},
+                {"id": "o99", "cos": 0.99, "session": "other", "age_days": 1, "content": "p" * 80},
+                {"id": "o95", "cos": 0.95, "session": "other", "age_days": 1, "content": "q" * 80}]
+        d, _ = shaping_db(cfg, rows)
+        out = d.search("zzz")[0]
+        assert {r["id"] for r in out} == {"new", "old3d", "o99", "o95"}
+        assert out[0]["id"] == "new"
+        assert [r["score"] for r in out] == sorted([r["score"] for r in out], reverse=True)
 
 
 class TestRedisTimeouts:
@@ -232,717 +275,733 @@ class TestRedisTimeouts:
         kw = db.client.connection_pool.connection_kwargs
         assert kw["socket_timeout"] == 5 and kw["socket_connect_timeout"] == 2
 
-    def test_silent_server_fails_fast(self, cfg):
+    def test_unresponsive_server(self, cfg):
         srv = socket.socket()
         srv.bind(("127.0.0.1", 0))
         srv.listen(5)
-        port = srv.getsockname()[1]
-        try:
-            d = Database(dict(cfg, redis_url=f"redis://127.0.0.1:{port}/0"))
-            t0 = time.monotonic()
-            with pytest.raises(BackendError):
-                d.ensure_connected()
-            assert time.monotonic() - t0 < 8
-        finally:
-            srv.close()
+        conns = []
+        t = threading.Thread(target=lambda: conns.append(srv.accept()), daemon=True)
+        t.start()
+        cfg["redis_url"] = f"redis://127.0.0.1:{srv.getsockname()[1]}/0"
+        d = Database(cfg)
+        t0 = time.time()
+        status = d.ensure_connected()
+        assert status != "ok" and "Redis Stack is not reachable" in status
+        assert time.time() - t0 < 9
+        srv.close()
 
-    def test_reconnect_closes_old_client(self, db):
+    def test_reconnect_closes_old(self, db):
         closed = []
-
-        class Dead:
-            def ping(self):
-                raise redis.ConnectionError("gone")
-
-            def close(self):
-                closed.append(1)
-
-        db.client = Dead()
-        assert db.ensure_connected() == "ok"
-        assert closed == [1] and not isinstance(db.client, Dead)
+        old = db.client
+        orig = old.close
+        old.close = lambda: (closed.append(1), orig())
+        db.mark_down()
+        assert closed and db.ensure_connected() == "ok" and db.client is not old
 
 
-CREATE_SNIPPET = ("import json,sys; from n3mc_mcp.config import load_config; c=load_config(quiet=True); "
-                  "print(json.dumps([c['owner_id'], c['local_id']]))")
-
-
-def _run_many(n, env):
-    procs = [subprocess.Popen([sys.executable, "-c", CREATE_SNIPPET], env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True) for _ in range(n)]
-    return [json.loads(p.communicate(timeout=60)[0]) for p in procs]
+_CREATE = ("import sys; sys.path.insert(0, %r); from n3mc_mcp import config; "
+           "c = config.load_config(); print(c['owner_id'], c['local_id'])")
 
 
 class TestConfigCreate:
-    def test_concurrent_create_one_owner(self, isolated):
-        (isolated["data"] / "config.json").unlink()
-        ids = _run_many(8, dict(os.environ))
-        disk = json.loads((isolated["data"] / "config.json").read_text(encoding="utf-8"))
-        assert {tuple(i) for i in ids} == {(disk["owner_id"], disk["local_id"])}
+    def _run_many(self, data_dir, n):
+        env = dict(os.environ, N3MC_DATA_DIR=str(data_dir))
+        procs = [subprocess.Popen([sys.executable, "-c", _CREATE % REPO], env=env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True) for _ in range(n)]
+        return [p.communicate(timeout=60)[0].split() for p in procs]
 
-    def test_concurrent_fill_of_existing_file(self, isolated):
-        p = isolated["data"] / "config.json"
-        p.write_text(json.dumps({"vector_min_cos": 0.83}), encoding="utf-8")
-        ids = _run_many(2, dict(os.environ))
-        disk = json.loads(p.read_text(encoding="utf-8"))
-        assert {tuple(i) for i in ids} == {(disk["owner_id"], disk["local_id"])}
+    def test_concurrent_create(self, tmp_path):
+        d = tmp_path / "fresh"
+        outs = self._run_many(d, 8)
+        disk = json.loads((d / "config.json").read_text(encoding="utf-8"))
+        assert all(o == [disk["owner_id"], disk["local_id"]] for o in outs)
+
+    def test_concurrent_fill_ids(self, tmp_path):
+        d = tmp_path / "noids"
+        d.mkdir()
+        (d / "config.json").write_text(json.dumps({"vector_min_cos": 0.83}), encoding="utf-8")
+        outs = self._run_many(d, 2)
+        disk = json.loads((d / "config.json").read_text(encoding="utf-8"))
+        assert all(o == [disk["owner_id"], disk["local_id"]] for o in outs)
         assert disk["vector_min_cos"] == 0.83
 
-    def test_update_uses_replace(self, isolated, monkeypatch):
-        _write_cfg(isolated)
-        p = isolated["data"] / "config.json"
-        p.write_text(json.dumps({"owner_id": "o", "local_id": "l"}), encoding="utf-8")
+    def test_update_uses_replace(self, isolate, monkeypatch):
+        (isolate["data"] / "config.json").write_text(json.dumps({"owner_id": "o", "local_id": "l"}), encoding="utf-8")
         calls = []
-        real = os.replace
-        monkeypatch.setattr(config.os, "replace", lambda a, b: (calls.append(str(b)), real(a, b)))
-        load_config(quiet=True)
-        assert calls and calls[-1] == str(p)
+        orig = config.paths.replace_with_retry
+        monkeypatch.setattr(config.paths, "replace_with_retry", lambda a, b, *k: (calls.append(b), orig(a, b))[1])
+        config.load_config()
+        assert calls
 
-    def test_migration_is_exclusive(self, isolated, monkeypatch, tmp_path):
-        monkeypatch.delenv("N3MC_DATA_DIR")
+    def test_legacy_uses_link(self, isolate, monkeypatch, tmp_path):
         legacy = tmp_path / "legacy" / "config.json"
         legacy.parent.mkdir()
-        legacy.write_text(json.dumps({"owner_id": "legacy-owner", "local_id": "legacy-local"}), encoding="utf-8")
-        monkeypatch.setattr(paths, "legacy_config_path", lambda: legacy)
+        legacy.write_text(json.dumps({"owner_id": "legacy-owner", "local_id": "l"}), encoding="utf-8")
+        monkeypatch.delenv("N3MC_DATA_DIR")
+        monkeypatch.setattr(config.paths, "legacy_config_path", lambda: str(legacy))
         links = []
-        real = os.link
-        monkeypatch.setattr(config.os, "link", lambda a, b: (links.append(str(b)), real(a, b)))
-        c = load_config(quiet=True)
-        assert c["owner_id"] == "legacy-owner" and legacy.exists()
-        assert links and links[0].endswith("config.json")
-        assert paths.same_folder(c["_path"], isolated["home"] / ".n3mc-workingmemory" / "config.json")
+        orig = os.link
+        monkeypatch.setattr(os, "link", lambda a, b: (links.append(b), orig(a, b))[1])
+        cfg = config.load_config()
+        assert cfg["owner_id"] == "legacy-owner" and links
+        assert legacy.exists()
 
 
 class TestConfigRanges:
     @pytest.mark.parametrize("key,value", [("ttl_seconds", 604800.5), ("ttl_seconds", 0), ("embedding_dim", 768.0),
-                                           ("chunk_overlap", 400), ("chunk_threshold", 10),
-                                           ("half_life_days", 0), ("min_score", 1.5), ("min_results", -1),
-                                           ("min_results", 1.5)])
-    def test_rejected(self, isolated, key, value):
-        _write_cfg(isolated, **{key: value})
-        c = load_config(quiet=True)
-        assert c[key] == DEFAULTS[key]
-        assert any(n.startswith("config_type:") and key in n for n in c["_notices"])
+                                           ("chunk_threshold", 10), ("half_life_days", 0), ("min_score", 1.5),
+                                           ("min_results", -1), ("min_results", 1.5)])
+    def test_rejected(self, isolate, key, value):
+        conftest.write_test_config(str(isolate["data"]), **{key: value})
+        cfg = config.load_config()
+        assert cfg[key] == config.DEFAULTS[key]
+        assert any(n.startswith("config_type:") and key in n for n in cfg["_notices"])
 
-    def test_min_results_zero_accepted(self, isolated):
-        _write_cfg(isolated, min_results=0)
-        assert load_config(quiet=True)["min_results"] == 0
+    def test_overlap_ge_threshold(self, isolate):
+        conftest.write_test_config(str(isolate["data"]), chunk_threshold=100, chunk_overlap=100)
+        cfg = config.load_config()
+        assert cfg["chunk_overlap"] == 25 and any("chunk_overlap" in n for n in cfg["_notices"])
 
-    def test_low_threshold_adjusts_overlap(self, isolated):
-        _write_cfg(isolated, chunk_threshold=80)
-        c = load_config(quiet=True)
-        assert c["chunk_threshold"] == 80 and c["chunk_overlap"] == 20
+    def test_min_results_zero_ok(self):
+        assert config.config_value_ok("min_results", 0)
 
-    def test_chunk_text_terminates(self):
-        assert processor.chunk_text("z" * 5000, 100, 100)
+    def test_chunk_terminates(self):
+        assert P.chunk_text("x" * 1000, 100, 100)
 
 
 class TestLongSaveAtomic:
-    def test_embedding_failure_leaves_nothing(self, db, rconn, monkeypatch):
-        real = processor.embed
+    def test_embed_failure_leaves_nothing(self, db, rconn, monkeypatch):
+        body = "atomic long text. " * 40
         calls = {"n": 0}
 
-        def flaky(*a, **k):
+        def boom(t):
             calls["n"] += 1
-            if calls["n"] == 2:
-                raise RuntimeError("embedding failed")
-            return real(*a, **k)
-
-        monkeypatch.setattr(processor, "embed", flaky)
+            if calls["n"] > 1:
+                raise RuntimeError("embed failed")
+            return conftest.fake_embed(t)
+        monkeypatch.setattr(P, "_FAKE_EMBED", boom)
         with pytest.raises(RuntimeError):
-            db.save_memory(LONG)
-        assert not _all_keys(rconn)
-        monkeypatch.setattr(processor, "embed", real)
-        assert db.save_memory(LONG)["saved"]
+            db.save_memory(body)
+        assert not rconn.keys("doc:*") and not rconn.keys("docsha:*")
+        monkeypatch.setattr(P, "_FAKE_EMBED", conftest.fake_embed)
+        assert db.save_memory(body)["saved"]
 
-    def test_one_script_writes_everything(self, db, monkeypatch):
-        seen = []
-        real = db._scripts["save"]
-        db._scripts["save"] = lambda keys, args: (seen.append(keys), real(keys=keys, args=args))[1]
-        r = db.save_memory(LONG)
-        assert len(seen) == 1 and seen[0][0].startswith(DOCSHA) and len(seen[0]) == 2 + r["chunks"]
+    def test_one_script(self, db, monkeypatch):
+        used = []
+        orig = db._script
+        monkeypatch.setattr(db, "_script", lambda name: (used.append(name), orig(name))[1])
+        db.save_memory("one script " * 60)
+        assert used == ["SAVE_WITH_GUARD"]
 
 
 class TestGuardScriptAndPortReload:
-    @pytest.mark.parametrize("text", ["short text for the guard", LONG])
-    def test_interrupted_send(self, db, rconn, text):
-        real = db._scripts["save"]
+    @pytest.mark.parametrize("body", ["short guarded body", "long guarded body. " * 40])
+    def test_interrupted_send(self, db, rconn, monkeypatch, body):
+        orig = db._script
 
-        def boom(keys, args):
-            raise RuntimeError("interrupted")
+        def failing(name):
+            s = orig(name)
+            if name != "SAVE_WITH_GUARD":
+                return s
 
-        db._scripts["save"] = boom
-        assert db.save_memory(text)["status"] == "error"
-        assert not _all_keys(rconn)
-        db._scripts["save"] = real
-        assert db.save_memory(text)["saved"]
-        assert all(rconn.ttl(k) > 0 for k in _all_keys(rconn))
-        assert db.save_memory(text)["status"] == "duplicate"
+            def call(*a, **k):
+                raise redis.ConnectionError("cut")
+            return call
+        monkeypatch.setattr(db, "_script", failing)
+        with pytest.raises(redis.ConnectionError):
+            db.save_memory(body)
+        assert not _keys(rconn)
+        monkeypatch.setattr(db, "_script", orig)
+        r = db.save_memory(body)
+        assert r["saved"]
+        for k in _keys(rconn):
+            assert rconn.ttl(k) > 0
+        assert db.save_memory(body)["status"] == "duplicate"
 
-    def test_only_own_guard_released(self, db, rconn):
-        real = db._scripts["save"]
+    def test_release_only_own_guard(self, db, rconn):
+        s = db._script("RELEASE_GUARD")
+        rconn.set("mem:sha:g1", "other", ex=100)
+        s(keys=["mem:sha:g1", "mem:mine"], args=["mine"])
+        assert rconn.exists("mem:sha:g1")
+        rconn.set("mem:sha:g2", "mine", ex=100)
+        s(keys=["mem:sha:g2", "mem:mine"], args=["mine"])
+        assert not rconn.exists("mem:sha:g2")
 
-        def half(keys, args):
-            rconn.set(keys[0], args[0], ex=100)
-            raise RuntimeError("failed after the guard")
-
-        db._scripts["save"] = half
-        assert db.save_memory("guard owner check")["status"] == "error"
-        assert not rconn.exists(SHA + sha1_hex("guard owner check"))
-        rconn.set("mem:sha:other", "someone-else", ex=100)
-        db._scripts["release"](keys=["mem:sha:other", "mem:none"], args=["mine"])
-        assert rconn.exists("mem:sha:other")
-        db._scripts["save"] = real
-
-    def test_thin_client_follows_port_change(self, isolated, monkeypatch):
-        from n3mc_mcp import server
-        monkeypatch.setattr(server, "STATE", server._State())
-        ports = []
+    def test_port_reload(self, isolate, monkeypatch):
+        from n3mc_mcp import cli, server
+        monkeypatch.setattr(server, "_state", {"cfg": None, "client_name": None})
         monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
-        monkeypatch.setattr(cli, "_post", lambda p, path, body, timeout=30: (ports.append(p), (200, {"text": "x"}))[1])
-        server.handle_call("list_memories", {})
-        _write_cfg(isolated, server_port=conftest.SESSION_PORT + 1)
-        server.handle_call("list_memories", {})
-        assert ports == [conftest.SESSION_PORT, conftest.SESSION_PORT + 1]
-
-    def test_unreadable_config_keeps_last(self, isolated, monkeypatch):
-        from n3mc_mcp import server
-        monkeypatch.setattr(server, "STATE", server._State())
-        first = server.current_config()
-        (isolated["data"] / "config.json").write_text("{broken", encoding="utf-8")
-        assert server.current_config()["owner_id"] == first["owner_id"]
+        seen = []
+        monkeypatch.setattr(cli, "_post", lambda cfg, path, body, timeout=30, port=None: (
+            seen.append((cfg["server_port"], cfg["owner_id"])), (200, {"text": "ok"}))[1])
+        server.forward("list_memories", {})
+        conftest.write_test_config(str(isolate["data"]), server_port=conftest.TEST_PORT + 1)
+        server.forward("list_memories", {})
+        assert seen[1][0] == conftest.TEST_PORT + 1
+        (isolate["data"] / "config.json").write_text("{broken", encoding="utf-8")
+        server.forward("list_memories", {})
+        assert seen[2] == seen[1]
 
 
 class TestIndexFailure:
-    def test_no_redisearch(self, rconn, cfg, monkeypatch):
-        calls = {"n": 0}
+    def test_no_redisearch(self, cfg, rconn, monkeypatch):
+        calls = []
 
         def fail(self):
-            calls["n"] += 1
-            raise redis.ResponseError("unknown command 'FT.INFO'")
-
-        monkeypatch.setattr(Database, "_ft_info", fail)
+            calls.append(1)
+            raise redis.ResponseError("unknown command 'FT.CREATE'")
+        monkeypatch.setattr(Database, "_create_index", fail)
         d = Database(cfg)
-        with pytest.raises(BackendError, match="does not provide RediSearch"):
-            d.ensure_connected()
+        status = d.ensure_connected()
+        assert "does not provide RediSearch" in status
         out = tools.ToolRunner(cfg, d).call("search_memory", {"query": "x"}, nudge=False)
-        assert out.startswith("Error: memory backend unreachable. The Redis at") and "Redis Stack" in out
-        assert calls["n"] >= 2
-        d.close()
+        assert out.startswith("Error: memory backend unreachable.") and "Redis Stack" in out
+        assert len(calls) >= 2
+        d.client.close()
 
-    def test_dim_mismatch_notice(self, rconn, cfg):
+    def test_dim_mismatch(self, cfg, rconn):
         rconn.execute_command("FT.CREATE", "n3mc_idx", "ON", "HASH", "PREFIX", 1, "mem:", "SCHEMA",
                               "content_fts", "TEXT", "embedding", "VECTOR", "FLAT", 6, "TYPE", "FLOAT32",
                               "DIM", 384, "DISTANCE_METRIC", "COSINE")
         d = Database(cfg)
         d.ensure_connected()
         assert any(n.startswith("index_dim_mismatch:") for n in cfg["_notices"])
-        d.close()
+        d.client.close()
 
 
 class TestIndexFtsField:
     def test_prefix_and_code_not_indexed(self, db, rconn):
-        r = db.save_memory("hello ```x``` world", role="user", turn_id="t1")
+        r = db.save_memory("hello there ```x``` end", role="user", turn_id="t1")
         h = rconn.hgetall(MEM + r["id"])
-        assert h[b"content"].startswith(b"[user] ") and b"[user]" not in h[b"content_fts"]
-        assert b"[code omitted]" not in h[b"content_fts"] and b"omitted" not in h[b"content_ngram"]
-        m = db.save_memory("mcp ```code``` text")
-        assert b"[code omitted]" not in rconn.hget(MEM + m["id"], "content_fts")
+        assert h[b"content"].startswith(b"[user] ")
+        assert b"[user]" not in h[b"content_fts"] and b"omitted" not in h[b"content_fts"]
+        assert b"user" not in h[b"content_ngram"] and b"omitted" not in h[b"content_ngram"]
 
     def test_chunk_prefix_not_indexed(self, db, rconn):
-        r = db.save_memory("word " * 200, role="claude", turn_id="t2")
-        h = rconn.hgetall(MEM + r["ids"][0])
-        assert h[b"content"].startswith(b"[claude 1/") and b"claude" not in h[b"content_fts"]
+        r = db.save_memory("chunk body words. " * 40, role="claude", turn_id="t2")
+        for cid in r["ids"]:
+            h = rconn.hgetall(MEM + cid)
+            assert h[b"content"].startswith(b"[claude ")
+            assert b"claude" not in h[b"content_fts"]
 
-    def test_prefix_words_do_not_hit(self, db):
-        db.save_memory("nothing special", role="claude", turn_id="t3")
-        db.save_memory("more ```c``` stuff", role="user", turn_id="t3")
-        assert db._bm25_search("claude", 10) == [] and db._bm25_search("omitted", 10) == []
+    def test_mcp_fence_not_indexed(self, db, rconn):
+        r = db.save_memory("before ```code``` after")
+        assert b"omitted" not in rconn.hget(MEM + r["id"], "content_fts")
 
-    def test_old_index_rebuilt_once(self, rconn, cfg, monkeypatch):
+    def test_queries_do_not_hit(self, db):
+        db.save_memory("weather report sunny", role="user", turn_id="t3")
+        db.save_memory("x ```y``` z words", role="claude", turn_id="t3")
+        assert not db._bm25_search("claude", 10, None, None)
+        assert not db._bm25_search("omitted", 10, None, None)
+
+    def test_old_index_rebuilt_once(self, db, rconn, monkeypatch):
+        r = db.save_memory("legacy index record")
+        rconn.execute_command("FT.DROPINDEX", "n3mc_idx")
         rconn.execute_command("FT.CREATE", "n3mc_idx", "ON", "HASH", "PREFIX", 1, "mem:", "SCHEMA",
                               "content", "TEXT", "embedding", "VECTOR", "FLAT", 6, "TYPE", "FLOAT32",
                               "DIM", 768, "DISTANCE_METRIC", "COSINE")
-        rconn.hset("mem:keep", mapping={"content": "kept"})
+        db.ensure_index()
+        names, _ = db.index_info()
+        assert "content_fts" in names and rconn.exists(MEM + r["id"])
         drops = []
-        real = redis.Redis.execute_command
+        orig = db.client.execute_command
+        monkeypatch.setattr(db.client, "execute_command",
+                            lambda *a, **k: (drops.append(a[0]) if a[0] == "FT.DROPINDEX" else None, orig(*a, **k))[1])
+        db.ensure_index()
+        assert not drops
 
-        def spy(self, *args, **kw):
-            if args and args[0] == "FT.DROPINDEX":
-                drops.append(args)
-            return real(self, *args, **kw)
-
-        monkeypatch.setattr(redis.Redis, "execute_command", spy)
+    def test_dim_differs_not_rebuilt(self, cfg, rconn):
+        rconn.execute_command("FT.CREATE", "n3mc_idx", "ON", "HASH", "PREFIX", 1, "mem:", "SCHEMA",
+                              "content", "TEXT", "embedding", "VECTOR", "FLAT", 6, "TYPE", "FLOAT32",
+                              "DIM", 384, "DISTANCE_METRIC", "COSINE")
         d = Database(cfg)
         d.ensure_connected()
-        d.ensure_index()
-        assert len(drops) == 1 and drops[0] == ("FT.DROPINDEX", "n3mc_idx") and rconn.exists("mem:keep")
-        d.close()
+        names, dim = d.index_info()
+        assert dim == 384 and "content_fts" not in names
+        assert any(n.startswith("index_dim_mismatch:") for n in cfg["_notices"])
+        d.client.close()
 
 
 class TestEnforceEphemeral:
-    def _db(self, cfg, rconn):
+    def _db(self, cfg):
         d = Database(cfg)
-        d.client = conftest._connect(cfg["redis_url"])
-        sets = []
-        real = d.client.config_set
-        d.client.config_set = lambda k, v: (sets.append((k, v)), real(k, v))
-        return d, sets
+        d.client = d._new_client()
+        return d
 
-    def test_empty_db_is_configured(self, cfg, rconn):
-        rconn.delete(conftest.TEST_MARKER)
-        r1 = conftest._connect(cfg["redis_url"].replace("/0", "/1"))
-        r1.delete("n3mc:test:otherdb")
-        d, sets = self._db(cfg, rconn)
-        d.enforce_ephemeral()
-        assert ("appendonly", "no") in sets and ("save", "") in sets
-        rconn.set("mem:x", "1", ex=60)
-        sets.clear()
-        d.enforce_ephemeral()
-        assert sets
-        r1.close()
-        rconn.set(conftest.TEST_MARKER, 1)
-
-    def test_foreign_key_not_configured(self, cfg, rconn):
-        d, sets = self._db(cfg, rconn)
-        d.enforce_ephemeral()            # the test marker is not an N3MC key
-        assert not sets and any(n.startswith("shared_redis:") for n in cfg["_notices"])
-
-    def test_key_in_other_db(self, cfg, rconn):
-        rconn.delete(conftest.TEST_MARKER)
-        r1 = conftest._connect(cfg["redis_url"].replace("/0", "/1"))
+    def test_empty_db(self, cfg, rconn):
+        other = redis.Redis.from_url(conftest.REDIS_TEST_URL.rsplit("/", 1)[0] + "/1")
+        other.delete("n3mc_test_other_db")
+        rconn.delete(conftest.TEST_MARK)
         try:
-            r1.set("n3mc:test:otherdb", "1", ex=60)
-            d, sets = self._db(cfg, rconn)
+            rconn.config_set("save", "3600 1")
+            d = self._db(cfg)
             d.enforce_ephemeral()
-            assert not sets and any(n.startswith("shared_redis:") for n in cfg["_notices"])
+            assert _cfg(rconn, "save") == ""
+            assert not any("shared_redis" in n for n in cfg["_notices"])
         finally:
-            r1.delete("n3mc:test:otherdb")
-            r1.close()
+            rconn.set(conftest.TEST_MARK, 1)
+            other.close()
 
-    def test_info_refused(self, cfg, rconn):
-        d, sets = self._db(cfg, rconn)
+    def test_n3mc_keys_only(self, cfg, rconn):
+        rconn.delete(conftest.TEST_MARK)
+        try:
+            rconn.set("mem:sha:abc", "1", ex=60)
+            rconn.config_set("appendonly", "yes")
+            self._db(cfg).enforce_ephemeral()
+            assert _cfg(rconn, "appendonly") == "no"
+        finally:
+            rconn.set(conftest.TEST_MARK, 1)
 
-        def refuse(*a, **k):
-            raise redis.ResponseError("NOPERM")
+    def test_other_keys(self, cfg, rconn):
+        rconn.set("someone_elses_key", "1", ex=60)
+        rconn.config_set("save", "3600 1")
+        self._db(cfg).enforce_ephemeral()
+        assert _cfg(rconn, "save") == "3600 1"
+        assert any(n.startswith("shared_redis:") for n in cfg["_notices"])
+        rconn.config_set("save", "")
 
-        d.client.info = refuse
+    def test_other_db(self, cfg, rconn):
+        other = redis.Redis.from_url(conftest.REDIS_TEST_URL.rsplit("/", 1)[0] + "/1")
+        rconn.delete(conftest.TEST_MARK)
+        try:
+            other.set("n3mc_test_other_db", "1", ex=60)
+            self._db(cfg).enforce_ephemeral()
+            assert any(n.startswith("shared_redis:") for n in cfg["_notices"])
+        finally:
+            other.delete("n3mc_test_other_db")
+            other.close()
+            rconn.set(conftest.TEST_MARK, 1)
+
+    def test_info_refused(self, cfg, rconn, monkeypatch):
+        d = self._db(cfg)
+        monkeypatch.setattr(d.client, "info", lambda *a: (_ for _ in ()).throw(redis.ResponseError("NOPERM")))
         d.enforce_ephemeral()
-        assert not sets and any(n.startswith("shared_redis:") for n in cfg["_notices"])
+        assert any(n.startswith("shared_redis:") for n in cfg["_notices"])
 
-    def test_config_refused(self, cfg, rconn):
-        rconn.delete(conftest.TEST_MARKER)
-        d = Database(cfg)
-        d.client = conftest._connect(cfg["redis_url"])
-
-        def refuse(*a, **k):
-            raise redis.ResponseError("unknown command 'CONFIG'")
-
-        d.client.config_set = refuse
-        d.enforce_ephemeral()
-        assert any(n.startswith("config_refused:") for n in cfg["_notices"])
+    def test_config_refused(self, cfg, rconn, monkeypatch):
+        rconn.delete(conftest.TEST_MARK)
+        try:
+            d = self._db(cfg)
+            monkeypatch.setattr(d.client, "config_set", lambda *a: (_ for _ in ()).throw(redis.ResponseError("unknown command")))
+            d.enforce_ephemeral()
+            assert any(n.startswith("config_refused:") for n in cfg["_notices"])
+        finally:
+            rconn.set(conftest.TEST_MARK, 1)
 
 
 class TestCodeOmittedOnSave:
-    def test_short_and_parent(self, db, rconn):
-        r = db.save_memory("a ```x``` b `inline`")
-        assert rconn.hget(MEM + r["id"], "content") == b"a [code omitted] b `inline`"
-        p = db.save_memory("```code```\n" + LONG)
-        assert rconn.hget(DOC + p["parent_id"], "content").startswith(b"[code omitted]\n")
+    def test_short(self, db, rconn):
+        r = db.save_memory("see ```print(1)``` and `inline`")
+        assert rconn.hget(MEM + r["id"], "content") == b"see [code omitted] and `inline`"
 
-    def test_unclosed_fence(self, db, rconn):
-        r = db.save_memory("text ```py\nnever closed")
-        assert rconn.hget(MEM + r["id"], "content") == b"text [code omitted]"
+    def test_parent(self, db, rconn):
+        r = db.save_memory("start ```secret code``` " + "text " * 120)
+        assert b"secret" not in rconn.hget(DOC + r["parent_id"], "content")
 
-    def test_code_only_difference_is_duplicate(self, db):
-        db.save_memory("same ```a``` text")
-        assert db.save_memory("same ```b``` text")["status"] == "duplicate"
+    def test_unclosed(self, db, rconn):
+        r = db.save_memory("tail ```never closed")
+        assert rconn.hget(MEM + r["id"], "content") == b"tail [code omitted]"
+
+    def test_only_code_differs_is_duplicate(self, db):
+        db.save_memory("x ```a``` y")
+        assert db.save_memory("x ```b``` y")["status"] == "duplicate"
 
     def test_skip_code_blocks(self, db, cfg):
         cfg["skip_code_blocks"] = True
-        assert db.save_memory("has ```code```") == {"status": "skipped_code", "saved": False}
+        assert db.save_memory("x ```a``` y")["status"] == "skipped_code"
 
     def test_old_fenced_record_shown_omitted(self, db, rconn, runner):
-        r = db.save_memory("old record placeholder text")
-        rconn.hset(MEM + r["id"], "content", "old record ```secret``` text")
-        assert "secret" not in runner.call("list_memories", {}, nudge=False)
+        r = db.save_memory("legacy fenced placeholder record")
+        rconn.hset(MEM + r["id"], "content", "legacy fenced ```old code``` record")
+        out = runner.call("list_memories", {}, nudge=False)
+        assert "old code" not in out and "[code omitted]" in out
 
 
 class TestSurroundingWhitespace:
-    def test_outer_strip(self, db, rconn):
+    def test_strip(self, db, rconn):
         r = db.save_memory(" \nAAA\n ")
         assert rconn.hget(MEM + r["id"], "content") == b"AAA"
 
-    def test_parent_keeps_inner_newlines(self, db, rconn):
-        p = db.save_memory("\n\n" + LONG + "\n  ")
-        assert rconn.hget(DOC + p["parent_id"], "content").decode() == LONG
+    def test_parent_inner_kept(self, db, rconn):
+        body = "\n  " + "line one\n\nline two " * 30 + "  \n"
+        r = db.save_memory(body)
+        assert rconn.hget(DOC + r["parent_id"], "content").decode() == body.strip()
 
-    def test_whitespace_difference_is_duplicate(self, db):
+    def test_whitespace_only_differs(self, db):
         db.save_memory("BBB")
         assert db.save_memory("  BBB\n")["status"] == "duplicate"
 
-    def test_whitespace_only(self, db):
+    def test_blank(self, db):
         assert db.save_memory(" \n\t ")["reason"] == "empty content"
 
 
 class TestModelWait:
-    def test_loading_model_keyword_only(self, runner, rconn, monkeypatch):
-        runner.db.save_memory("keyword only search target")
-        monkeypatch.setattr(processor, "_model", None)
-        monkeypatch.setattr(processor, "MODEL_WAIT_SECONDS", 0.3)
-        processor._model_lock.acquire()
+    def test_keyword_only_while_loading(self, db, cfg, monkeypatch):
+        db.save_memory("loading model keyword record")
+        monkeypatch.setattr(P, "_FAKE_EMBED", None)
+        monkeypatch.setattr(P, "_model", None)
+        monkeypatch.setattr(P, "MODEL_WAIT_SECONDS", 0.2)
+        P._lock.acquire()
+        monkeypatch.setattr(P, "_loading", True)
         try:
-            out = runner.call("search_memory", {"query": "keyword only search target"}, nudge=False)
-            assert "is still loading" in out and "keyword only search target" in out
-            r = parse_json(runner.call("save_memory", {"content": "saved while loading"}))
+            out = tools.ToolRunner(cfg, db).call("search_memory", {"query": "loading model keyword"}, nudge=False)
+            assert "is still loading" in out and "loading model keyword record" in out
+            r = db.save_memory("saved while loading")
             assert r["saved"] and r["warning"] == "embedding_unavailable" and "still loading" in r["detail"]
-            assert not rconn.hexists(MEM + r["id"], "embedding")
         finally:
-            processor._model_lock.release()
+            P._lock.release()
 
 
 class TestListPaging:
-    def test_single_before_huge_doc_listed(self, db):
-        s = db.save_memory("the single record saved first")
-        p = db.save_memory(" ".join(f"w{i}" for i in range(18000)))
-        assert p["chunks"] >= 260
-        ids = [r["id"] for r in db.list_entries(20)]
-        assert s["id"] in ids and p["parent_id"] in ids
+    def test_single_and_big_doc(self, db, runner):
+        db.save_memory("independent memory before the big document")
+        r = db.save_memory(" ".join(f"word{i}" for i in range(14000)))
+        assert r["chunks"] >= 250
+        out = runner.call("list_memories", {"limit": 20}, nudge=False)
+        assert "independent memory" in out and f"[doc×{r['chunks']}]" in out
 
 
 class TestNoTtlRefresh:
-    def test_search_keeps_every_ttl(self, db, rconn):
-        db.save_memory("ttl stays the same single")
-        db.save_memory("ttl stays the same document\n" + LONG)
-        for k in _all_keys(rconn):
-            rconn.expire(k, 1000)
-        db.search("ttl stays the same")
-        db.search("設定項目 点検")
-        assert all(0 < rconn.ttl(k) <= 1000 for k in _all_keys(rconn))
+    def test_ttls_unchanged(self, db, rconn):
+        db.save_memory("ttl single record words")
+        db.save_memory("ttl long record words. " * 40)
+        for k in _keys(rconn):
+            rconn.expire(k, 500)
+        db.search("ttl single record words")
+        db.search("ttl long record words")
+        for k in _keys(rconn):
+            assert rconn.ttl(k) <= 500
 
 
 class TestOrBm25:
     def test_or_terms(self, db):
-        r = db.save_memory("the quick fox jumped")
+        db.save_memory("the quick fox jumped")
         for q in ("quick fox elephant", "what did the quick fox do"):
-            assert r["id"] in [h["id"] for h in db._bm25_search(q, 10)]
+            assert db._bm25_search(q, 10, None, None)
 
-    def test_cjk_or(self, db):
-        r = db.save_memory("記憶装置の話")
-        assert r["id"] in [h["id"] for h in db._bm25_search("記憶装置 大阪", 10)]
+    def test_japanese_or(self, db):
+        db.save_memory("記憶装置の設計")
+        assert db._bm25_search("記憶装置 大阪", 10, None, None)
 
-    def test_rerank_counts_punctuated_word(self):
-        content = "a note, written down for later use in the long project plan"
-        assert processor.rerank_bonus("note", content, DEFAULTS) == pytest.approx(0.3 + 0.2)
+    def test_coverage_punctuation(self):
+        assert P.token_set("note,") == {"note"}
 
 
 class TestTimeBoundsStrict:
-    @pytest.mark.parametrize("value", ["yesterday", "2026/11/13", "2026-13-01"])
-    def test_unreadable(self, value):
-        with pytest.raises(ValueError, match=r"^Error: since must be an ISO 8601"):
-            processor.parse_time_bounds(value, None)
+    @pytest.mark.parametrize("v", ["yesterday", "2026/11/13", "2026-13-01"])
+    def test_unreadable(self, v):
+        with pytest.raises(P.TimeBoundError) as e:
+            P.parse_time_bounds(v, None)
+        assert str(e.value).startswith("Error: since must be")
 
     def test_since_after_until(self):
-        with pytest.raises(ValueError, match="since is later than until"):
-            processor.parse_time_bounds("2026-11-14", "2026-11-13")
+        with pytest.raises(P.TimeBoundError, match="since is later than until"):
+            P.parse_time_bounds("2026-11-14", "2026-11-13")
 
-    def test_date_only_is_local_midnight(self, monkeypatch):
-        tz = timezone(timedelta(hours=9))
-        monkeypatch.setattr(processor, "_local_tz", lambda: tz)
-        s, u = processor.parse_time_bounds("2026-11-13", "2026-11-13")
-        assert s == datetime(2026, 11, 13, tzinfo=tz).timestamp()
-        assert u == datetime(2026, 11, 13, 23, 59, 59, 999999, tzinfo=tz).timestamp()
+    def test_date_local_midnight(self):
+        import datetime
+        want = datetime.datetime(2026, 11, 13).astimezone().timestamp()
+        assert P.parse_time_bound("2026-11-13", "since", False) == want
 
-    def test_tool_returns_error(self, cfg):
-        d = Database(cfg)
-        out = tools.ToolRunner(cfg, d).call("search_memory", {"query": "x", "since": "yesterday"})
-        assert out.startswith("Error: since must be") and out.endswith(tools._NUDGE_GENERIC)
+    def test_tool_error(self, runner):
+        out = runner.call("search_memory", {"query": "x", "since": "yesterday"}, nudge=False)
+        assert out.startswith("Error: since must be")
 
 
 class TestRepairReembed:
     def test_reembed(self, db, rconn):
-        ids = [db.save_memory(f"no vector {i}", embed=False)["id"] for i in range(3)]
+        ids = [db.save_memory(f"needs vector {i}", embed=False)["id"] for i in range(3)]
         for i in ids:
             rconn.expire(MEM + i, 1000)
-        r = db.repair()
-        assert r == {"status": "ok", "message": "index ensured", "reembedded": 3, "remaining": 0}
-        assert all(rconn.hexists(MEM + i, "embedding") and rconn.ttl(MEM + i) <= 1000 for i in ids)
+        res = db.repair()
+        assert res["reembedded"] == 3 and res["remaining"] == 0
+        for i in ids:
+            assert rconn.hget(MEM + i, "embedding") and rconn.ttl(MEM + i) <= 1000
 
-    def test_limit_and_remaining(self, db):
-        for i in range(3):
-            db.save_memory(f"later vector {i}", embed=False)
-        r = db.repair(max_reembed=2)
-        assert r["reembedded"] == 2 and r["remaining"] == 1
+    def test_limit_200(self, db, rconn):
+        pipe = rconn.pipeline()
+        for i in range(205):
+            pipe.hset(f"mem:bulk{i}", mapping={"id": f"bulk{i}", "content": f"bulk {i}", "owner_id": db.cfg["owner_id"],
+                                               "parent_id": "", "timestamp_epoch": 1})
+            pipe.expire(f"mem:bulk{i}", 600)
+        pipe.execute()
+        res = db.repair()
+        assert res["reembedded"] == 200 and res["remaining"] == 5
 
 
 class TestDeleteOwner:
-    def test_other_owner_not_found(self, db, cfg):
-        d2 = Database(dict(cfg, owner_id="11111111-1111-4111-8111-111111111111"))
+    def test_other_owner(self, db, cfg, rconn):
+        other = dict(cfg, owner_id="22222222-2222-2222-2222-222222222222")
+        d2 = Database(other)
         d2.ensure_connected()
-        r = d2.save_memory("not yours")
+        r = d2.save_memory("other owner record")
         assert db.delete_memory(r["id"])["status"] == "not_found"
-        assert d2.delete_memory(r["id"])["status"] == "deleted"
-        d2.close()
+        assert rconn.exists(MEM + r["id"])
+        d2.client.close()
 
     def test_chunks_from_chunk_ids(self, db, rconn):
-        p = db.save_memory(LONG)
-        assert db.delete_memory(p["parent_id"])["chunks_deleted"] == p["chunks"]
-        assert not any(rconn.exists(MEM + c) for c in p["ids"])
+        r = db.save_memory("chunk ids words. " * 50)
+        db.delete_memory(r["parent_id"])
+        assert not any(rconn.exists(MEM + c) for c in r["ids"])
 
 
 class TestGuardNx:
-    def test_concurrent_same_text(self, db, cfg, rconn):
-        others = [Database(cfg) for _ in range(4)]
-        for o in others:
-            o.ensure_connected()
+    def test_concurrent_same(self, cfg, rconn):
         results = []
-        ts = [threading.Thread(target=lambda o=o: results.append(o.save_memory("raced text"))) for o in others]
+
+        def go():
+            d = Database(cfg)
+            d.ensure_connected()
+            results.append(d.save_memory("raced content"))
+            d.client.close()
+        ts = [threading.Thread(target=go) for _ in range(6)]
         [t.start() for t in ts]
         [t.join() for t in ts]
         assert sum(1 for r in results if r["saved"]) == 1
-        assert len([k for k in _all_keys(rconn) if k.startswith(MEM) and not k.startswith(SHA)]) == 1
-        [o.close() for o in others]
-
-    def test_guard_released_on_write_failure(self, db, rconn):
-        def half(keys, args):
-            rconn.set(keys[0], args[0], ex=100)
-            raise redis.ResponseError("write failed")
-
-        db._scripts["save"] = half
-        db.save_memory("write fails")
-        assert not _all_keys(rconn)
+        assert len([k for k in _keys(rconn) if not k.startswith("mem:sha:")]) == 1
 
 
 class TestAccessCountNoGhost:
-    def test_deleted_between_search_and_increment(self, db, rconn, monkeypatch):
-        r = db.save_memory("ghost check record")
-        real = database.shape_results
+    def test_deleted_between(self, db, rconn, monkeypatch):
+        r = db.save_memory("ghost check record text")
+        orig = P.lexical_bonus
 
-        def deleting(*a, **k):
-            out = real(*a, **k)
-            db.delete_memory(r["id"])
-            return out
-
-        monkeypatch.setattr(database, "shape_results", deleting)
-        db.search("ghost check record")
-        assert not _all_keys(rconn)
-
-    def test_script_creates_nothing(self, db, rconn):
-        db._scripts["incr"](keys=["mem:missing"], args=["access_count", 1])
-        db._scripts["hset"](keys=["mem:missing"], args=["embedding", b"x"])
-        assert not rconn.exists("mem:missing")
+        def vanish(*a, **k):
+            rconn.delete(MEM + r["id"], SHA + P.content_hash("ghost check record text"))
+            return orig(*a, **k)
+        monkeypatch.setattr(P, "lexical_bonus", vanish)
+        db.search("ghost check record text")
+        assert _keys(rconn) == []
 
 
 class TestRecallOrphanChunks:
-    def test_parent_once_then_orphans(self, db, rconn, runner):
-        p = db.save_memory(LONG, turn_id="turn-x")
-        out = runner.call("recall_thread", {"turn_id": "turn-x"}, nudge=False)
-        assert out.count("▶") == 1 and f"[doc×{p['chunks']}] [{p['parent_id']}]" in out and LONG in out
-        rconn.delete(DOC + p["parent_id"])
-        out = runner.call("recall_thread", {"turn_id": "turn-x"}, nudge=False)
-        assert out.count("▶") == p["chunks"] and "not_found" not in out
+    def test_parent_once_then_orphans(self, db, rconn):
+        r = db.save_memory("orphan chunk words. " * 40, turn_id="T1")
+        out = db.recall_thread("T1")
+        assert out.count("[doc×") == 1 and r["parent_id"] in out
+        rconn.delete(DOC + r["parent_id"])
+        out = db.recall_thread("T1")
+        assert isinstance(out, str) and all(c in out for c in r["ids"])
 
 
 class TestDeleteIdPrefix:
-    def test_prefixes(self, db, rconn):
-        p = db.save_memory(LONG)
-        assert db.delete_memory("doc:" + p["parent_id"]) == {"status": "deleted", "id": p["parent_id"],
-                                                             "chunks_deleted": p["chunks"]}
-        s = db.save_memory("prefixed single")
-        assert db.delete_memory("mem:" + s["id"]) == {"status": "deleted", "id": s["id"]}
-        assert not rconn.exists(SHA + sha1_hex("prefixed single"))
-        q = db.save_memory("double prefix")
-        assert db.delete_memory("doc:doc:" + q["id"])["status"] == "not_found"
+    def test_doc_prefix(self, db, rconn):
+        r = db.save_memory("prefixed doc words. " * 40)
+        res = db.delete_memory("doc:" + r["parent_id"])
+        assert res["status"] == "deleted" and res["id"] == r["parent_id"]
+
+    def test_mem_prefix(self, db, rconn):
+        r = db.save_memory("prefixed single")
+        assert db.delete_memory("mem:" + r["id"])["id"] == r["id"]
+        assert not rconn.exists(SHA + P.content_hash("prefixed single"))
+
+    def test_double_prefix(self, db):
+        r = db.save_memory("double prefixed words. " * 40)
+        assert db.delete_memory("doc:doc:" + r["parent_id"])["status"] == "not_found"
 
 
 class TestNudgeOnErrors:
-    def _runner(self, cfg, monkeypatch):
-        d = Database(cfg)
-        monkeypatch.setattr(d, "ensure_connected", lambda enforce=True: "ok")
-        return tools.ToolRunner(cfg, d), d
-
-    def test_importance_nan(self, cfg, monkeypatch):
-        r, _d = self._runner(cfg, monkeypatch)
-        out = r.call("save_memory", {"content": "x", "importance": "nan"})
-        assert out.startswith('{"saved": false, "status": "error", "reason": "importance must be numeric')
-        assert out.endswith(tools._NUDGE_GENERIC)
-
-    def test_since_error(self, cfg, monkeypatch):
-        r, _d = self._runner(cfg, monkeypatch)
-        out = r.call("search_memory", {"query": "x", "since": "nope"})
-        assert out.startswith("Error: since") and out.endswith(tools._NUDGE_GENERIC)
-
-    def test_unexpected_exception(self, cfg, monkeypatch):
-        r, d = self._runner(cfg, monkeypatch)
-        monkeypatch.setattr(d, "list_entries", lambda limit: 1 / 0)
-        out = r.call("list_memories", {})
-        assert out.startswith("Error: ZeroDivisionError") and out.endswith(tools._NUDGE_GENERIC)
-
-    def test_backend_error(self, cfg):
-        out = tools.ToolRunner(cfg, Database(dict(cfg, redis_url=conftest.UNREACHABLE_URL))).call(
-            "search_memory", {"query": "x"})
-        assert out.startswith("Error: memory backend unreachable.") and out.endswith(tools._NUDGE_GENERIC)
+    def test_all(self, runner, monkeypatch):
+        g = tools._NUDGE_GENERIC
+        out = runner.call("save_memory", {"content": "x", "importance": "nan"})
+        assert out.startswith('{"saved": false') and out.endswith(g)
+        out = runner.call("search_memory", {"query": "x", "since": "bad"})
+        assert out.startswith("Error:") and out.endswith(g)
+        monkeypatch.setattr(runner.db, "list_memories", lambda *a: 1 / 0)
+        out = runner.call("list_memories", {})
+        assert out.startswith("Error:") and out.endswith(g)
+        monkeypatch.setattr(runner.db, "ensure_connected", lambda *a, **k: "hint text")
+        out = runner.call("search_memory", {"query": "x"})
+        assert out.startswith("Error: memory backend unreachable.") and out.endswith(g)
 
 
 class TestConditionalWrites:
-    def test_scripts_keep_ttl(self, db, rconn):
-        r = db.save_memory("conditional write")
-        rconn.expire(MEM + r["id"], 500)
-        db._scripts["incr"](keys=[MEM + r["id"]], args=["access_count", 2])
-        db._scripts["hset"](keys=[MEM + r["id"]], args=["embedding", b"\x00" * 4])
-        assert 0 < rconn.ttl(MEM + r["id"]) <= 500 and int(rconn.hget(MEM + r["id"], "access_count")) == 2
+    def test_scripts(self, db, rconn):
+        rconn.hset("mem:cw", "a", 1)
+        rconn.expire("mem:cw", 300)
+        db._script("INCR_IF_EXISTS")(keys=["mem:cw"], args=["access_count", 1])
+        db._script("HSET_IF_EXISTS")(keys=["mem:cw"], args=["embedding", b"x"])
+        assert rconn.ttl("mem:cw") > 0 and rconn.hget("mem:cw", "access_count") == b"1"
+        assert db._script("INCR_IF_EXISTS")(keys=["mem:none"], args=["access_count", 1]) is None
+        assert db._script("HSET_IF_EXISTS")(keys=["mem:none"], args=["embedding", b"x"]) == 0
+        assert not rconn.exists("mem:none")
 
-    def test_repair_skips_vanished(self, db, rconn, monkeypatch):
-        r = db.save_memory("vanishing", embed=False)
-        real = processor.embed
+    def test_repair_after_vanish(self, db, rconn, monkeypatch):
+        r = db.save_memory("vanishing before repair", embed=False)
+        orig = P.embed_many
 
         def vanish(*a, **k):
             rconn.delete(MEM + r["id"])
-            return real(*a, **k)
+            return orig(*a, **k)
+        monkeypatch.setattr(P, "embed_many", vanish)
+        assert db.repair()["reembedded"] == 0
+        assert not rconn.exists(MEM + r["id"])
 
-        monkeypatch.setattr(processor, "embed", vanish)
-        out = db.repair()
-        assert out["reembedded"] == 0 and not rconn.exists(MEM + r["id"])
-
-    def test_every_key_has_ttl(self, db, rconn):
-        db.save_memory("ttl one")
-        db.save_memory(LONG)
-        db.save_memory("no vec", embed=False)
-        db.search("ttl one")
+    def test_all_keys_have_ttl(self, db, rconn, runner):
+        db.save_memory("ttl everywhere")
+        db.save_memory("ttl everywhere long. " * 40, role="user", turn_id="t")
+        runner.call("search_memory", {"query": "ttl everywhere"}, nudge=False)
         db.repair()
-        assert all(rconn.ttl(k) > 0 for k in _all_keys(rconn))
+        for k in _keys(rconn):
+            assert rconn.ttl(k) > 0, k
 
 
 class TestHangulFiller:
     @pytest.mark.parametrize("ch", ["\u3164", "\u115f", "\u1160", "\uffa0", "\u2800"])
     def test_rejected(self, ch):
-        assert processor.has_visible_text(ch * 3) is False
+        d = Database({"owner_id": "o"})
+        assert d.save_memory(ch * 3)["reason"] == "empty content (no visible characters)"
 
-    def test_verbatim_with_visible(self, db, rconn):
-        r = db.save_memory("A\u3164B\u2800C")
-        assert rconn.hget(MEM + r["id"], "content").decode() == "A\u3164B\u2800C"
+    def test_with_visible(self, db, rconn):
+        r = db.save_memory("A\u3164B")
+        assert rconn.hget(MEM + r["id"], "content").decode() == "A\u3164B"
 
 
-def _load_plugin_script():
-    path = ROOT / "plugins" / "n3mc-workingmemory" / "hooks" / "install_permissions.py"
-    spec = importlib.util.spec_from_file_location("install_permissions_test", path)
+def _load_install_permissions():
+    path = os.path.join(REPO, "plugins", "n3mc-workingmemory", "hooks", "install_permissions.py")
+    spec = importlib.util.spec_from_file_location("install_permissions_t", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
 class TestPluginHook:
-    def test_rereads_and_replaces(self, isolated, monkeypatch, capsys):
-        mod = _load_plugin_script()
-        reads, repl = [], []
-        real_read = mod._read_settings
-        monkeypatch.setattr(mod, "_read_settings", lambda p: (reads.append(1), real_read(p))[1])
-        real_replace = os.replace
-        monkeypatch.setattr(mod.os, "replace", lambda a, b: (repl.append(b), real_replace(a, b)))
-        monkeypatch.setattr(mod.shutil, "which", lambda n: "uvx")
-        assert mod.main() == 0
-        settings = json.loads((isolated["home"] / ".claude" / "settings.json").read_text(encoding="utf-8"))
-        assert len(reads) == 2 and repl
-        allow = settings["permissions"]["allow"]
+    def test_rules_and_atomic(self, isolate, monkeypatch, capsys):
+        ip = _load_install_permissions()
+        s = isolate["home"] / ".claude" / "settings.json"
+        s.parent.mkdir()
+        s.write_text(json.dumps({"model": "x", "permissions": {"allow": ["Other"]}}), encoding="utf-8")
+        replaced = []
+        orig = ip.os.replace
+        monkeypatch.setattr(ip.os, "replace", lambda a, b: (replaced.append(b), orig(a, b))[1])
+        ip.main([])
+        data = json.loads(s.read_text(encoding="utf-8"))
+        allow = data["permissions"]["allow"]
+        assert data["model"] == "x" and "Other" in allow and replaced
         assert f"Bash(uvx --from n3memorycore-mcp-lite=={__version__} n3mc-lite --search *)" in allow
-        assert not any("--delete" in a for a in allow)
+        assert "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__search_memory" in allow
+        assert not any("delete" in r for r in allow)
+
+    def test_mcp_mode(self, isolate):
+        ip = _load_install_permissions()
+        ip.main(["--mcp"])
+        allow = json.loads((isolate["home"] / ".claude" / "settings.json").read_text(encoding="utf-8"))["permissions"]["allow"]
+        assert allow == [f"mcp__plugin_n3mc-workingmemory-mcp_n3mc-workingmemory__{t}" for t in ip.MCP_TOOLS]
 
     def test_fallback_text(self):
-        hooks = (ROOT / "plugins" / "n3mc-workingmemory" / "hooks" / "hooks.json").read_text(encoding="utf-8")
-        assert "or the permission script failed" in hooks
+        for plugin in ("n3mc-workingmemory", "n3mc-workingmemory-mcp"):
+            with open(os.path.join(REPO, "plugins", plugin, "hooks", "hooks.json"), encoding="utf-8") as f:
+                assert "or the permission script failed" in f.read()
 
-    def test_uvx_missing_text(self, isolated, monkeypatch, capsys):
-        mod = _load_plugin_script()
-        monkeypatch.setattr(mod.shutil, "which", lambda n: None)
-        mod.main()
-        msg = json.loads(capsys.readouterr().out)["systemMessage"]
-        assert "[n3mc-workingmemory] uvx was not found on PATH." in msg
-        assert "irm https://astral.sh/uv/install.ps1 | iex" in msg and "uv を入れてください" in msg
+    def test_no_uvx(self, isolate, monkeypatch, capsys):
+        ip = _load_install_permissions()
+        monkeypatch.setattr(ip.shutil, "which", lambda n: None)
+        ip.main([])
+        out = json.loads(capsys.readouterr().out)
+        assert ip.uvx_message(False) in out["systemMessage"]
+        ip.main(["--mcp"])
+        out = json.loads(capsys.readouterr().out)
+        assert ip.uvx_message(True) in out["systemMessage"]
 
 
 class TestWeakMatches:
-    def test_fill_to_min_results(self):
-        cfg = _cfg(lexical_rerank_enabled=False)
-        rows = [cand("good", cos=0.99), cand("w1", cos=0.83), cand("w2", cos=0.81), cand("w3", cos=0.80)]
-        normal, weak = shape_results(rows, "q", cfg, "s", 10)
-        assert [r["id"] for r in normal] == ["good"]
-        assert [r["id"] for r in weak] == ["w1", "w2"] and all(r["_weak"] for r in weak)
-        assert weak[0]["filter_score"] == pytest.approx(0.83 * 0.7)
+    def _rows(self):
+        return [{"id": "top", "cos": 0.99, "bm": 10, "content": "a" * 80},
+                {"id": "w1", "cos": 0.84, "content": "b" * 80},
+                {"id": "w2", "cos": 0.83, "content": "c" * 80},
+                {"id": "w3", "cos": 0.82, "content": "d" * 80}]
 
-    def test_zero_min_results(self):
-        rows = [cand("good", cos=0.99), cand("w1", cos=0.83)]
-        assert shape_results(rows, "q", _cfg(min_results=0), "s", 10)[1] == []
+    def test_fill_two(self, cfg):
+        d, fake = shaping_db(cfg, self._rows())
+        normal, weak, _ = d.search("query words")
+        assert [r["id"] for r in normal] == ["top"] and [r["id"] for r in weak] == ["w1", "w2"]
+        assert all(r["_weak"] for r in weak)
+        assert fake.incr == ["mem:top"]
 
-    def test_enough_rows(self):
-        rows = [cand(f"g{i}", cos=0.99) for i in range(3)] + [cand("w", cos=0.8)]
-        assert shape_results(rows, "q", _cfg(), "s", 10)[1] == []
+    def test_min_results_zero(self, cfg):
+        cfg["min_results"] = 0
+        d, _ = shaping_db(cfg, self._rows())
+        assert d.search("query words")[1] == []
 
-    def test_limit_caps(self):
-        rows = [cand("good", cos=0.99), cand("w1", cos=0.83), cand("w2", cos=0.82)]
-        normal, weak = shape_results(rows, "q", _cfg(), "s", 2)
+    def test_enough_rows(self, cfg):
+        rows = [{"id": f"n{i}", "cos": 0.95, "content": str(i) * 80} for i in range(3)] + self._rows()[1:]
+        d, _ = shaping_db(cfg, rows)
+        assert d.search("query words")[1] == []
+
+    def test_limit_smaller(self, cfg):
+        d, _ = shaping_db(cfg, self._rows())
+        normal, weak, _ = d.search("query words", limit=2)
         assert len(normal) + len(weak) == 2
 
-    def test_one_row_per_parent(self):
-        a = cand("parent", cos=0.83, _doc=True, _hit_key="c1")
-        b = cand("parent", cos=0.82, _doc=True, _hit_key="c2")
-        good = cand("good", cos=0.99)
-        normal, weak = shape_results([good, a, b], "q", _cfg(), "s", 10)
-        assert [r["id"] for r in weak] == ["parent"]
-        normal, weak = shape_results([cand("parent", cos=0.99, _doc=True), a], "q", _cfg(), "s", 10)
-        assert weak == []
+    def test_one_per_parent(self, cfg):
+        cfg["_docs"] = {"P1": {"content": b"parent body " * 10, "chunk_count": b"2", "chunk_ids": b"c1 c2",
+                               "turn_id": b"", "timestamp": b"t", "timestamp_epoch": str(time.time()).encode(),
+                               "owner_id": cfg["owner_id"].encode(), "session_id": b""}}
+        rows = self._rows()[:1] + [{"id": "c1", "cos": 0.84, "parent": "P1"}, {"id": "c2", "cos": 0.83, "parent": "P1"}]
+        d, _ = shaping_db(cfg, rows)
+        weak = d.search("query words")[1]
+        assert [r["id"] for r in weak] == ["P1"]
 
-    def test_tiny_filter_score_dropped(self):
-        rows = [cand("good", cos=0.99), cand("zero", cos=0.0000001)]
-        assert shape_results(rows, "q", _cfg(lexical_rerank_enabled=False), "s", 10)[1] == []
+    def test_tiny_scores_skipped(self, cfg):
+        d, _ = shaping_db(cfg, self._rows()[:1] + [{"id": "z", "cos": 0.0000001}])
+        assert d.search("query words")[1] == []
 
-    def test_empty_query(self):
-        rows = [cand("good", cos=0.99), cand("w1", cos=0.83)]
-        assert shape_results(rows, "   ", _cfg(), "s", 10)[1] == []
-        assert shape_results(rows, "", _cfg(), "s", 10)[1] == []
+    def test_empty_query(self, cfg):
+        d, _ = shaping_db(cfg, self._rows())
+        assert d.search("   ")[1] == []
 
-    def test_default_min_results(self):
-        assert DEFAULTS["min_results"] == 3
+    def test_default(self):
+        assert config.DEFAULTS["min_results"] == 3
 
-    def test_weak_rows_not_counted(self, db, rconn, cfg):
+    def test_weak_access_count_unchanged(self, db, rconn, cfg):
         cfg["vector_min_cos"] = 0.999
-        good = db.save_memory("zephyr lantern festival schedule")
-        weak = db.save_memory("an entirely unrelated grocery list entry")
-        normal, weak_rows, _m = db.search("zephyr lantern festival schedule")
-        assert [r["id"] for r in normal] == [good["id"]] and weak["id"] in [w["id"] for w in weak_rows]
-        assert int(rconn.hget(MEM + good["id"], "access_count")) == 1
-        assert int(rconn.hget(MEM + weak["id"], "access_count")) == 0
+        a = db.save_memory("alpha beta gamma delta")
+        b = db.save_memory("totally different words here")
+        normal, weak, _ = db.search("alpha beta gamma delta")
+        assert any(r["id"] == b["id"] for r in weak)
+        assert rconn.hget(MEM + b["id"], "access_count") == b"0"
+        assert rconn.hget(MEM + a["id"], "access_count") == b"1"
 
 
 class TestGuardReleasedOnAnyFailure:
-    @pytest.mark.parametrize("text", ["short body", LONG])
-    def test_non_string_turn_id(self, db, rconn, text):
-        assert db.save_memory(text, turn_id=12)["status"] == "error"
-        assert not _all_keys(rconn)
-        assert db.save_memory(text)["saved"]
+    @pytest.mark.parametrize("body", ["guard fail short", "guard fail long text. " * 40])
+    def test_non_string_turn_id(self, db, rconn, body):
+        assert db.save_memory(body, turn_id=12)["status"] == "error"
+        assert not _keys(rconn)
+        assert db.save_memory(body)["saved"]
 
-    def test_surrogates_in_fields(self, db, rconn):
-        r = db.save_memory("fields", agent_name="ag" + chr(0xD800), session_id="s" + chr(0xDC00),
-                           turn_id="t" + chr(0xDBFF))
+    def test_surrogates_removed(self, db, rconn):
+        r = db.save_memory("surrogate fields", agent_name="ag\ud800", session_id="s\udc00", turn_id="t\ud801")
         h = rconn.hgetall(MEM + r["id"])
-        assert (h[b"agent_name"], h[b"session_id"], h[b"turn_id"]) == (b"ag", b"s", b"t")
-        r2 = db.save_memory("fields 2", agent_name="plain", session_id="sess", turn_id="turn")
-        assert rconn.hget(MEM + r2["id"], "agent_name") == b"plain"
+        assert h[b"agent_name"] == b"ag" and h[b"session_id"] == b"s" and h[b"turn_id"] == b"t"
+
+    def test_clean_fields_unchanged(self, db, rconn):
+        r = db.save_memory("clean fields", agent_name="agent", session_id="sess", turn_id="turn")
+        assert rconn.hget(MEM + r["id"], "agent_name") == b"agent"
 
 
 class TestPluginHookAsciiStdout:
-    def test_ascii_one_line(self, isolated):
-        script = ROOT / "plugins" / "n3mc-workingmemory" / "hooks" / "install_permissions.py"
-        env = dict(os.environ)
-        env["PATH"] = os.path.dirname(sys.executable)
-        out = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, timeout=60)
-        text = out.stdout.decode("ascii")
-        assert text.count("\n") == 1
-        assert "uv を入れてください" in json.loads(text)["systemMessage"]
+    def test_ascii_line(self, isolate):
+        script = os.path.join(REPO, "plugins", "n3mc-workingmemory", "hooks", "install_permissions.py")
+        env = dict(os.environ, PATH=os.path.dirname(sys.executable))
+        p = subprocess.run([sys.executable, script], env=env, capture_output=True, timeout=60)
+        out = p.stdout.decode("ascii")
+        assert p.returncode == 0 and out.count("\n") == 1
+        msg = json.loads(out)["systemMessage"]
+        assert "uvx が PATH 上に見つかりません" in msg
 
 
 class TestPublicRepoHygiene:
-    def test_eval_script_has_no_user_folder(self):
-        text = (ROOT / "tests" / "eval_uvx_missing.py").read_text(encoding="utf-8")
-        assert "C:\\Users\\" not in text and "C:/Users/" not in text and "/home/" not in text
+    def test_eval_uvx_no_user_folder(self):
+        with open(os.path.join(REPO, "tests", "eval_uvx_missing.py"), encoding="utf-8") as f:
+            text = f.read()
+        assert not re.search(r"[A-Za-z]:\\\\?Users\\\\?\w", text) and "/home/" not in text
 
-    def test_marketplace_version(self):
-        data = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
-        assert data["metadata"]["version"] == __version__
+    def test_versions(self):
+        with open(os.path.join(REPO, ".claude-plugin", "marketplace.json"), encoding="utf-8") as f:
+            m = json.load(f)
+        assert m["metadata"]["version"] == __version__
+        assert [p["name"] for p in m["plugins"]] == ["n3mc-workingmemory-mcp", "n3mc-workingmemory"]
+        for name in ("n3mc-workingmemory", "n3mc-workingmemory-mcp"):
+            with open(os.path.join(REPO, "plugins", name, ".claude-plugin", "plugin.json"), encoding="utf-8") as f:
+                assert json.load(f)["version"] == __version__

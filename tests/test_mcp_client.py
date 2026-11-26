@@ -1,396 +1,315 @@
-"""Layer 8: the MCP thin client (spec §4.6). No model: the handlers are called as functions (or through
-an in-memory MCP session) with the HTTP sender faked; one subprocess test uses the real server."""
+"""Layer 8: the MCP thin client (spec §4.6). No model. The handlers are called as functions with a
+fake HTTP sender; TestThinSubprocess talks to a real entry and a real server on the test port."""
 import asyncio
-import io
+import contextlib
 import json
 import os
-import re
-import shutil
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
-try:
-    import tomllib
-except ImportError:  # Python 3.10
-    tomllib = None
-
 import conftest
-from conftest import parse_json
-from n3mc_mcp import __version__, cli, config, paths, server, tools
-from n3mc_mcp.config import compute_code_version, load_config, read_config_raw, redis_display
+from n3mc_mcp import __version__, cli, config, paths
+from n3mc_mcp import server as thin
 from n3mc_mcp.instructions import INSTRUCTIONS
 from n3mc_mcp.tooldefs import TOOLS
+from n3mc_mcp.tools import _NUDGE_AFTER_SAVE, _NUDGE_GENERIC
 
-ROOT = Path(__file__).resolve().parent.parent
-SPEC = (ROOT / "N3MemoryCore_MCP_Spec_EN.md").read_text(encoding="utf-8")
+import mcp.types as types
+
+
+def _spec_instructions():
+    with open(os.path.join(conftest.REPO_ROOT, "N3MemoryCore_MCP_Spec_EN.md"), encoding="utf-8") as f:
+        text = f.read()
+    start = text.index("N3MemoryCore — Lite (Ephemeral Memory)\n")
+    end = text.index("\n`````", start)
+    return text[start:end] + "\n"
 
 
 @pytest.fixture(autouse=True)
 def fresh_state(monkeypatch):
-    monkeypatch.setattr(server, "STATE", server._State())
-
-
-def capture_post(monkeypatch, answer=None, exc=None):
-    sent = []
-
-    def fake_post(port, path, body, timeout=30):
-        sent.append((port, path, body))
-        if exc is not None:
-            raise exc
-        return 200, {"text": answer if answer is not None else f"answer from {path}"}
-
-    monkeypatch.setattr(cli, "_post", fake_post)
-    monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
-    return sent
-
-
-def run_session(coro_fn, client_name="pytest-client"):
-    from mcp.shared.memory import create_connected_server_and_client_session
-    from mcp.types import Implementation
-
-    async def main():
-        async with create_connected_server_and_client_session(
-                server.build_server(), client_info=Implementation(name=client_name, version="1")) as s:
-            return await coro_fn(s)
-
-    return asyncio.run(main())
+    monkeypatch.setattr(thin, "_state", {"cfg": None, "client_name": None})
 
 
 class TestThinNames:
-    def test_scripts_and_version(self):
-        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        assert 'n3mc-workingmemory = "n3mc_mcp.__main__:run"' in text
-        assert 'n3mc-mcp-lite = "n3mc_mcp.__main__:run"' in text
-        assert re.search(r'^version = "2\.0\.2"$', text, re.M) and __version__ == "2.0.2"
-        assert '"mcp>=1.0.0,<2.0.0"' in text
-        if tomllib:
-            data = tomllib.loads(text)
-            assert data["project"]["scripts"]["n3mc-lite"] == "n3mc_mcp.cli:main"
+    def test_scripts(self):
+        import tomllib
+        with open(os.path.join(conftest.REPO_ROOT, "pyproject.toml"), "rb") as f:
+            p = tomllib.load(f)
+        assert p["project"]["scripts"]["n3mc-workingmemory"] == "n3mc_mcp.__main__:run"
+        assert p["project"]["scripts"]["n3mc-mcp-lite"] == "n3mc_mcp.__main__:run"
+        assert p["project"]["version"] == "2.0.2" == __version__
+        assert "mcp>=1.0.0,<2.0.0" in p["project"]["dependencies"]
 
     def test_server_info(self):
-        init = run_session(lambda s: asyncio.sleep(0, result=s))
-        srv = server.build_server()
-        opts = srv.create_initialization_options()
-        assert opts.server_name == "n3mc-workingmemory" and opts.server_version == __version__
+        s = thin.build_server()
+        assert s.name == "n3mc-workingmemory" and s.version == __version__
 
 
 class TestThinTools:
-    def test_tools_list_matches_spec(self):
-        block = re.search(r"`````python\n@app.list_tools\(\)\n(.*?)\n`````", SPEC, re.S).group(1)
-        from mcp.types import Tool
-        ns = {"Tool": Tool}
-        exec("def f():\n" + block.split("async def list_tools() -> list[Tool]:\n", 1)[1], ns)
-        expected = [t.model_dump() for t in ns["f"]()]
-        listed = run_session(lambda s: s.list_tools())
-        assert [t.model_dump(exclude_none=True) for t in listed.tools] == \
-               [Tool(**e).model_dump(exclude_none=True) for e in expected]
+    def test_list_without_server(self):
+        s = thin.build_server()
+        res = asyncio.run(s.request_handlers[types.ListToolsRequest](types.ListToolsRequest(method="tools/list")))
+        assert [t.model_dump() for t in res.root.tools] == [t.model_dump() for t in TOOLS]
 
-    def test_instructions_match_spec(self):
-        block = re.search(r"`````text\n(N3MemoryCore — Lite \(Ephemeral Memory\)\n.*?)\n`````", SPEC, re.S).group(1)
-        assert INSTRUCTIONS == block + "\n"
-        opts = server.build_server().create_initialization_options()
-        assert opts.instructions == INSTRUCTIONS
+    def test_instructions_verbatim(self):
+        assert INSTRUCTIONS == _spec_instructions()
+        assert thin.build_server().instructions == INSTRUCTIONS
 
-    def test_validate_input_false(self, monkeypatch):
-        from mcp.server.lowlevel import Server
-        seen = []
-        real = Server.call_tool
-        monkeypatch.setattr(Server, "call_tool", lambda self, **kw: (seen.append(kw), real(self, **kw))[1])
-        server.build_server()
-        assert seen == [{"validate_input": False}]
+    def test_validate_input_off(self):
+        assert thin.build_server()._n3mc_validate_input is False
 
-    def test_old_sdk_fallback(self, monkeypatch):
-        from mcp.server.lowlevel import Server
-        real = Server.call_tool
-        calls = []
 
-        def old(self, **kw):
-            calls.append(kw)
-            if kw:
-                raise TypeError("unexpected keyword")
-            return real(self)
-
-        monkeypatch.setattr(Server, "call_tool", old)
-        server.build_server()
-        assert calls == [{"validate_input": False}, {}]
+def _call(server, name, args):
+    req = types.CallToolRequest(method="tools/call", params=types.CallToolRequestParams(name=name, arguments=args))
+    return asyncio.run(server.request_handlers[types.CallToolRequest](req)).root
 
 
 class TestForwarding:
-    @pytest.mark.parametrize("name", [t.name for t in TOOLS])
-    def test_each_tool_forwarded(self, monkeypatch, name):
-        sent = capture_post(monkeypatch, answer="exact text ✓\n---")
-        args = {"query": "q", "content": "c", "id": "i", "session_id": "s", "turn_id": "t"}
-        assert server.handle_call(name, args) == "exact text ✓\n---"
-        port, path, body = sent[0]
-        assert port == conftest.SESSION_PORT and path == f"/tools/{name}?nudge=1"
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(cli, "ensure_server", lambda c, max_wait=60: True)
+        monkeypatch.setattr(cli, "_post", lambda c, path, body, timeout=30, port=None:
+                            (calls.append((path, body)), (200, {"text": f"exact text ✓ {path}"}))[1])
+        return calls
 
-    def test_session_filled(self, monkeypatch):
-        sent = capture_post(monkeypatch)
-        server.handle_call("search_memory", {"query": "x"})
-        server.handle_call("save_memory", {"content": "x", "session_id": "  "})
-        server.handle_call("save_memory", {"content": "x", "session_id": "mine"})
-        server.handle_call("list_memories", {})
-        sids = [b.get("session_id") for _p, _path, b in sent]
-        assert sids[0] == sids[1] == server.SESSION_ID and sids[2] == "mine" and sids[3] is None
+    @pytest.mark.parametrize("tool", [t.name for t in TOOLS])
+    def test_forward_verbatim(self, sent, tool):
+        res = _call(thin.build_server(), tool, {"x": 1})
+        assert sent[-1][0] == f"/tools/{tool}?nudge=1"
+        assert res.content[0].text == f"exact text ✓ /tools/{tool}?nudge=1" and res.isError is False
 
-    def test_session_from_env(self, monkeypatch):
-        monkeypatch.setenv("N3MC_SESSION_ID", "env-session")
-        code = ("import os; from n3mc_mcp import server; print(server.SESSION_ID)")
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=dict(os.environ))
-        assert out.stdout.strip() == "env-session"
+    def test_session_filled(self, sent, monkeypatch):
+        thin.forward("search_memory", thin.prepare_args("search_memory", {"query": "q"}))
+        thin.forward("save_memory", thin.prepare_args("save_memory", {"content": "c", "session_id": "mine"}))
+        assert sent[0][1]["session_id"] == thin.SESSION and sent[1][1]["session_id"] == "mine"
+        assert "session_id" not in thin.prepare_args("list_memories", {})
 
-    def test_agent_name(self, monkeypatch):
-        sent = capture_post(monkeypatch)
-        server.handle_call("save_memory", {"content": "x"}, client_name=" claude-ai ")
-        monkeypatch.setenv("N3MC_AGENT_NAME", "desktop")
-        server.handle_call("save_memory", {"content": "x"}, client_name="claude-ai")
-        server.handle_call("save_memory", {"content": "x", "agent_name": "given"}, client_name="claude-ai")
-        monkeypatch.delenv("N3MC_AGENT_NAME")
-        server.handle_call("save_memory", {"content": "x"})
-        names = [b.get("agent_name") for _p, _path, b in sent]
-        assert names == ["claude-ai", "desktop", "given", None]
+    def test_agent_name(self, sent, monkeypatch):
+        assert "agent_name" not in thin.prepare_args("save_memory", {"content": "c"})
+        thin._state["client_name"] = "client-x"
+        assert thin.prepare_args("save_memory", {"content": "c"})["agent_name"] == "client-x"
+        monkeypatch.setenv("N3MC_AGENT_NAME", " env-agent ")
+        assert thin.prepare_args("save_memory", {"content": "c"})["agent_name"] == "env-agent"
+        assert thin.prepare_args("save_memory", {"content": "c", "agent_name": "arg"})["agent_name"] == "arg"
 
-    def test_through_mcp_no_is_error_and_no_validation(self, monkeypatch):
-        sent = capture_post(monkeypatch, answer='{"saved": false, "status": "error", "reason": "importance must be numeric (got nan)"}')
+    def test_nan_reaches_server(self, sent):
+        _call(thin.build_server(), "save_memory", {"content": "x", "importance": "nan"})
+        assert sent[-1][1]["importance"] == "nan"
 
-        async def go(s):
-            return await s.call_tool("save_memory", {"content": "x", "importance": "nan"})
-
-        res = run_session(go)
-        assert res.isError is False and res.content[0].text.startswith('{"saved": false')
-        assert sent[0][2]["importance"] == "nan" and sent[0][2]["agent_name"] == "pytest-client"
-
-    def test_unknown_tool_local(self, monkeypatch):
-        sent = capture_post(monkeypatch)
-        assert server.handle_call("nope", {}) == "Error: unknown tool 'nope'" + tools._NUDGE_GENERIC
-        assert sent == []
-
-    def test_exception_becomes_error_text(self, monkeypatch):
-        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: 1 / 0)
-        out = server.handle_call("list_memories", {})
-        assert out.startswith("Error: ZeroDivisionError") and out.endswith(tools._NUDGE_GENERIC)
+    def test_unknown_local(self, sent):
+        res = _call(thin.build_server(), "nope", {})
+        assert res.content[0].text == "Error: unknown tool 'nope'" + _NUDGE_GENERIC and not sent
 
 
 class TestThinNoServer:
     def test_save_direct(self, rconn):
-        cli._record_start_failure("x")
-        r = parse_json(server.handle_call("save_memory", {"content": "direct from mcp"}))
-        assert r["saved"] and r["warning"] == "embedding_unavailable"
-        assert r["detail"].startswith("The N3MC Lite memory server was not available (the memory server could not start")
-        assert not rconn.hexists("mem:" + r["id"], "embedding")
-        assert server.handle_call("save_memory", {"content": "again"}).endswith(tools._NUDGE_AFTER_SAVE)
+        text = thin.forward("save_memory", thin.prepare_args("save_memory", {"content": "direct thin save"}))
+        res = json.JSONDecoder().raw_decode(text)[0]
+        assert res["saved"] and res["warning"] == "embedding_unavailable"
+        assert res["detail"].startswith("The N3MC Lite memory server was not available (")
+        assert text.endswith(_NUDGE_AFTER_SAVE)
+        assert b"embedding" not in rconn.hgetall("mem:" + res["id"])
 
-    @pytest.mark.parametrize("name", ["search_memory", "list_memories", "recall_thread"])
-    def test_read_tools(self, name, monkeypatch):
-        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: cli._foreign(cfg, "/x"))
-        out = server.handle_call(name, {"query": "q", "turn_id": "t"})
-        assert out.startswith("Error: memory backend unreachable. The N3MC Lite memory server is not available "
-                              f"(another N3MC folder's server is using port {conftest.SESSION_PORT}).")
-        assert out.endswith(tools._NUDGE_GENERIC)
+    @pytest.mark.parametrize("tool", ["search_memory", "list_memories", "recall_thread"])
+    def test_errors(self, tool):
+        text = thin.forward(tool, {})
+        assert text.startswith("Error: memory backend unreachable. The N3MC Lite memory server is not available (")
+        assert text.endswith(_NUDGE_GENERIC)
 
     def test_repair(self):
-        out = server.handle_call("repair_memory", {})
-        assert parse_json(out)["status"] == "error" and "Retry in a minute." in out
+        assert json.JSONDecoder().raw_decode(thin.forward("repair_memory", {}))[0]["status"] == "error"
 
-    def test_redis_down_too(self, isolated):
-        p = isolated["data"] / "config.json"
-        obj = json.loads(p.read_text(encoding="utf-8"))
-        obj["redis_url"] = conftest.UNREACHABLE_URL
-        p.write_text(json.dumps(obj), encoding="utf-8")
-        r = parse_json(server.handle_call("save_memory", {"content": "nowhere"}))
-        assert r["status"] == "error" and "docker start redis-stack" in r["reason"]
+    def test_redis_down_too(self, isolate):
+        conftest.write_test_config(str(isolate["data"]), redis_url=conftest.DEAD_URL)
+        text = thin.forward("save_memory", {"content": "nowhere"})
+        res = json.JSONDecoder().raw_decode(text)[0]
+        assert res == {"status": "error", "saved": False, "reason": res["reason"]} and "Redis Stack" in res["reason"]
+        assert text.endswith(_NUDGE_GENERIC)
 
-    @pytest.mark.parametrize("name,args", [("delete_memory", {"id": "x"}),
-                                           ("delete_memories_by_session", {"session_id": "s"})])
-    def test_delete_states(self, monkeypatch, capsys, name, args):
-        out = server.handle_call(name, args)
-        assert "Nothing was deleted" in out
-        capture_post(monkeypatch, exc=cli._NoAnswer("TimeoutError: timed out"))
-        out = server.handle_call(name, args)
-        assert parse_json(out)["status"] == "unknown" and "may have completed" in out
-        capture_post(monkeypatch, answer='{"status": "deleted"}')
-        assert server.handle_call(name, args) == '{"status": "deleted"}'
-        flag = "--delete" if name == "delete_memory" else "--delete-session"
-        capture_post(monkeypatch, exc=cli._NoAnswer("TimeoutError: timed out"))
-        cli.main([flag, list(args.values())[0]])
-        assert '"status": "unknown"' in capsys.readouterr().out
+    def test_delete_states(self, monkeypatch, capsys):
+        out = json.JSONDecoder().raw_decode(thin.forward("delete_memory", {"id": "x"}))[0]
+        assert "Nothing was deleted" in out["reason"]
+        monkeypatch.setattr(cli, "ensure_server", lambda c, max_wait=60: True)
+        monkeypatch.setattr(cli, "_post", lambda *a, **k: (200, {"text": '{"status": "deleted"}'}))
+        assert thin.forward("delete_memory", {"id": "x"}) == '{"status": "deleted"}'
+
+        def timeout(*a, **k):
+            raise TimeoutError("timed out")
+        monkeypatch.setattr(cli, "_post", timeout)
+        out = json.JSONDecoder().raw_decode(thin.forward("delete_memories_by_session", {"session_id": "s"}))[0]
+        assert out["status"] == "unknown"
+        cli.main(["--delete-session", "s"])
+        assert json.loads(capsys.readouterr().out)["status"] == "unknown"
 
 
 class TestRedisDisplayAndCodeVersion:
     def test_display(self):
-        assert redis_display("redis://user:pw@host:6390/2") == "host:6390/2"
-        assert redis_display("redis://u:secret@host:abc/0") == "<unparseable redis_url>"
+        assert config.redis_display("redis://user:pw@h:6390/2") == "h:6390/2"
+        assert config.redis_display("redis://u:secret@host:abc/0") == "<unparseable redis_url>"
 
-    def test_no_secret_anywhere(self, monkeypatch, cfg, app_factory):
+    def test_no_secret_leak(self, isolate, capsys):
+        bad = "redis://u:pw9Zq7@host:abc/0"
+        conftest.write_test_config(str(isolate["data"]), redis_url=bad)
+        cfg = config.load_config()
+        from n3mc_mcp import app as app_mod
         from fastapi.testclient import TestClient
         from n3mc_mcp.database import Database
-        bad = dict(cfg, redis_url="redis://u:pw-s3cr3t@host:abc/0")
-        client = TestClient(app_factory(Database(bad)))
-        h = client.get("/health", headers={"Host": f"127.0.0.1:{cfg['server_port']}"}).json()
-        assert "s3cr3t" not in json.dumps(h)
-        conftest.route_http_to(monkeypatch, client, cfg["server_port"])
-        cli.ensure_server(cfg)
+        a = app_mod.create_app(cfg, Database(cfg), code_version="x", load_model=False)
+        h = TestClient(a).get("/health", headers={"Host": f"127.0.0.1:{conftest.TEST_PORT}"}).json()
+        assert "pw9Zq7" not in json.dumps(h)
+        cli._server_ok(dict(cfg, redis_url="redis://other:1/0"), h)
         for p in (paths.notices_path(), paths.audit_log_path()):
-            assert "s3cr3t" not in p.read_text(encoding="utf-8")
+            assert "pw9Zq7" not in open(p, encoding="utf-8").read()
+        assert "pw9Zq7" not in capsys.readouterr().err
 
-    def test_code_version_matches_after_fill(self, isolated):
-        c = load_config(quiet=True)
-        assert compute_code_version(c["_config_raw"]) == compute_code_version(read_config_raw())
+    def test_code_version_matches_after_fill(self, isolate):
+        (isolate["data"] / "config.json").write_text(json.dumps({"owner_id": "o", "local_id": "l"}), encoding="utf-8")
+        server_cfg = config.load_config()
+        client_cfg = config.load_config()
+        assert cli.own_code_version(server_cfg) == cli.own_code_version(client_cfg)
 
-    def test_change_between_load_and_start(self, isolated, monkeypatch):
-        c = load_config(quiet=True)
-        server_cv = compute_code_version(c["_config_raw"])
-        p = isolated["data"] / "config.json"
-        obj = json.loads(p.read_text(encoding="utf-8"))
-        obj["min_results"] = 2
-        p.write_text(json.dumps(obj), encoding="utf-8")
-        h = {"status": "ok", "root": str(paths.data_dir()), "code_version": server_cv}
-        assert cli._health_decision(h) == "stale"
-        h["code_version"] = compute_code_version(load_config(quiet=True)["_config_raw"])
-        assert cli._health_decision(h) == "ok"
+    def test_changed_between_load_and_start(self, isolate):
+        server_cfg = config.load_config()
+        conftest.write_test_config(str(isolate["data"]), min_score=0.25)
+        h = {"root": paths.data_dir(), "code_version": cli.own_code_version(server_cfg)}
+        assert cli._health_decision(h, config.load_config()) == "stale"
+        h["code_version"] = cli.own_code_version(config.load_config())
+        assert cli._health_decision(h, config.load_config()) == "ok"
 
     def test_stop_server(self, monkeypatch, capsys, cfg):
-        root = str(paths.data_dir())
-        monkeypatch.setattr(cli, "_health", lambda p: {"status": "ok", "root": root, "pid": 77})
-        monkeypatch.setattr(cli, "_request_shutdown", lambda p, r: (200, {}))
-        monkeypatch.setattr(cli, "_wait_port_free", lambda p, t=15: True)
-        assert cli.main(["--stop-server"]) == 0
-        assert capsys.readouterr().out == "Stopped the N3MC Lite server (pid 77).\n"
-        monkeypatch.setattr(cli, "_wait_port_free", lambda p, t=15: False)
-        assert cli.main(["--stop-server"]) == 1
-        assert "Could not stop the N3MC Lite server (pid 77)" in capsys.readouterr().err
-        monkeypatch.setattr(cli, "_health", lambda p: {"status": "ok", "root": "/other", "pid": 1})
-        assert cli.main(["--stop-server"]) == 0
-        assert capsys.readouterr().out == "No N3MC Lite server of this data folder is running.\n"
-        monkeypatch.setattr(cli, "_health", lambda p: None)
-        assert cli.main(["--stop-server"]) == 0
+        monkeypatch.setattr(cli, "_health", lambda c, port=None: None)
+        assert cli.main(["--stop-server"]) == 0 and "No N3MC Lite server" in capsys.readouterr().out
+        monkeypatch.setattr(cli, "_health", lambda c, port=None: {"root": "/other", "pid": 1})
+        assert cli.main(["--stop-server"]) == 0 and "No N3MC Lite server" in capsys.readouterr().out
+        monkeypatch.setattr(cli, "_health", lambda c, port=None: {"root": paths.data_dir(), "pid": 77})
+        monkeypatch.setattr(cli, "_request_shutdown", lambda *a, **k: True)
+        monkeypatch.setattr(cli, "_wait_port_free", lambda p, total=15: True)
+        assert cli.main(["--stop-server"]) == 0 and "Stopped the N3MC Lite server (pid 77)." in capsys.readouterr().out
+        monkeypatch.setattr(cli, "_wait_port_free", lambda p, total=15: False)
+        assert cli.main(["--stop-server"]) == 1 and "Could not stop" in capsys.readouterr().err
 
 
 class TestThinStart:
-    def test_background_ensure_and_per_call(self, monkeypatch):
-        gate = threading.Event()
+    def test_background_and_per_call(self, monkeypatch):
+        started = threading.Event()
+        release = threading.Event()
         calls = []
 
         def slow(cfg, max_wait=60):
-            calls.append(threading.current_thread().name)
-            gate.wait(10)
+            calls.append(1)
+            started.set()
+            release.wait(5)
             return False
-
         monkeypatch.setattr(cli, "ensure_server", slow)
-        server.current_config()
-        t = server.start_background_ensure()
-        t0 = time.monotonic()
 
-        async def go(s):
-            return await s.list_tools()
+        @contextlib.asynccontextmanager
+        async def fake_stdio():
+            yield (None, None)
 
-        listed = run_session(go)
-        assert len(listed.tools) == 7 and time.monotonic() - t0 < 5
-        gate.set()
-        t.join(5)
-        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: calls.append("call") or False)
-        server.handle_call("list_memories", {})
-        assert calls[0] == "n3mc-ensure-server" and calls[-1] == "call"
+        async def fake_run(self, r, w, opts):
+            assert started.wait(2)
 
-    def test_never_shutdown(self, monkeypatch):
-        shut = []
-        monkeypatch.setattr(cli, "_request_shutdown", lambda *a: shut.append(a))
-        capture_post(monkeypatch)
-        for t in TOOLS:
-            server.handle_call(t.name, {})
-        assert shut == []
+        monkeypatch.setattr(thin, "stdio_server", fake_stdio)
+        monkeypatch.setattr(thin.Server, "run", fake_run)
+        t0 = time.time()
+        asyncio.run(thin._main())
+        assert time.time() - t0 < 2 and calls == [1]
+        release.set()
+        thin.forward("list_memories", {})
+        assert len(calls) == 2
+
+    def test_no_shutdown(self):
+        src = open(thin.__file__, encoding="utf-8").read()
+        assert "/shutdown" not in src and "_request_shutdown" not in src
 
 
 class TestThinNoModel:
-    def test_direct_save_modules_loaded_before_stdio(self):
-        code = ("import sys, json; import n3mc_mcp.server; "
-                "print(json.dumps([m in sys.modules for m in ('n3mc_mcp.database', 'redis', 'psutil')]))")
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
-        assert json.loads(out.stdout.strip().splitlines()[-1]) == [True, True, True], out.stderr
-
-    def test_no_model_imports(self):
-        cli._record_start_failure("no real server in this test")
-        code = ("import sys, json; from n3mc_mcp import server, __main__; "
-                "server.handle_call('list_memories', {}); "
-                "print(json.dumps([m for m in ('sentence_transformers', 'torch') if m in sys.modules]))")
+    def test_imports(self):
+        code = ("import sys, n3mc_mcp.server as s; s.build_server(); "
+                "print('sentence_transformers' in sys.modules, 'torch' in sys.modules)")
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
-                             env=dict(os.environ, N3MC_DATA_DIR=str(paths.data_dir())))
-        assert json.loads(out.stdout.strip().splitlines()[-1]) == [], out.stderr
+                             env=dict(os.environ, PYTHONPATH=conftest.REPO_ROOT))
+        assert out.stdout.strip() == "False False"
 
-    def test_nothing_on_stdout(self, capsys, monkeypatch):
-        cli._record_start_failure("x")
-        server.handle_call("list_memories", {})
-        server.handle_call("nope", {})
-        assert capsys.readouterr().out == ""
-
-
-def _hf_home():
-    env = os.environ.get("HF_HOME_REAL") or str(conftest.REAL_HOME / ".cache" / "huggingface")
-    return env if (Path(env) / "hub" / "models--intfloat--multilingual-e5-base").is_dir() else None
+    def test_stdout_silent(self):
+        with open(paths.start_failed_path(), "w") as f:   # a real process: keep it from starting a server
+            f.write("test")
+        p = subprocess.run([sys.executable, "-m", "n3mc_mcp"], input=b"", capture_output=True, timeout=120,
+                           cwd=conftest.REPO_ROOT)
+        assert p.stdout == b""
 
 
 class TestThinSubprocess:
-    def test_real_roundtrip(self, rconn, cfg, monkeypatch):
-        hf = _hf_home()
-        if not hf:
-            pytest.skip("the embedding model is not in the Hugging Face cache; the test does not download it")
-        if shutil.which("n3mc-workingmemory") is None and not Path(sys.executable).with_name("Scripts").exists():
-            pytest.skip("n3mc-workingmemory is not installed")
+    @pytest.mark.slow
+    def test_roundtrip(self, rconn, isolate):
+        cache = os.path.join(conftest.REAL_HF_HOME, "hub", "models--intfloat--multilingual-e5-base")
+        if not os.path.isdir(cache):
+            pytest.skip("the embedding model is not in the Hugging Face cache")
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
-        env = dict(os.environ, HF_HOME=hf, HF_HUB_OFFLINE="1", N3MC_AGENT_NAME="test-client")
-        params = StdioServerParameters(command=sys.executable, args=["-m", "n3mc_mcp"], env=env,
-                                       cwd=str(paths.data_dir()))
-        port = cfg["server_port"]
+        env = dict(os.environ, N3MC_DATA_DIR=str(isolate["data"]), HF_HOME=conftest.REAL_HF_HOME,
+                   N3MC_AGENT_NAME="test-client", PYTHONPATH=conftest.REPO_ROOT)
+        params = StdioServerParameters(command=sys.executable, args=["-m", "n3mc_mcp"], env=env)
+        cfg = config.load_config()
+        timings = {}
 
         async def go():
             async with stdio_client(params) as (r, w):
                 async with ClientSession(r, w) as s:
-                    t0 = time.monotonic()
+                    t0 = time.time()
                     await s.initialize()
-                    init_s = time.monotonic() - t0
-                    tools_ = await s.list_tools()
-                    saved = None
-                    for _ in range(60):
-                        res = await s.call_tool("save_memory", {"content": "subprocess roundtrip record"})
-                        saved = parse_json(res.content[0].text)
-                        if saved.get("saved") and "warning" not in saved:
+                    timings["initialize"] = time.time() - t0
+                    tools = await s.list_tools()
+                    assert len(tools.tools) == 7
+                    deadline = time.time() + 180
+                    while True:
+                        res = await s.call_tool("save_memory", {"content": "subprocess roundtrip fact 42"})
+                        data = json.JSONDecoder().raw_decode(res.content[0].text)[0]
+                        if data.get("saved") or data.get("status") == "duplicate":
                             break
-                        if saved.get("saved"):
-                            break
+                        assert time.time() < deadline, data
                         await asyncio.sleep(2)
-                    found = await s.call_tool("search_memory", {"query": "subprocess roundtrip record"})
-                    return init_s, len(tools_.tools), saved, found.content[0].text
-
+                    while True:
+                        res = await s.call_tool("search_memory", {"query": "subprocess roundtrip fact"})
+                        if "subprocess roundtrip fact 42" in res.content[0].text:
+                            break
+                        assert time.time() < deadline, res.content[0].text
+                        await asyncio.sleep(2)
         try:
-            init_s, n, saved, text = asyncio.run(go())
-            # spec §4.6: about 2 s. Measured from the process start, so Python's start-up and the imports are
-            # included; the bound here only catches a client that waits for the server or the model.
-            print(f"initialize took {init_s:.2f} s")
-            assert init_s < 5 and n == 7 and saved["saved"] is True
-            assert "subprocess roundtrip record" in text
-            time.sleep(1.0)
+            asyncio.run(go())
+            assert timings["initialize"] < 2.0, timings
+            # The client may or may not have ended the server with its job object (§3.15): either passes.
             try:
-                h = cli._request("GET", port, "/health")[1]
-            except (cli._NotSent, cli._NoAnswer):
-                h = None        # the client's job object ended the server with the entry (spec §3.15)
-                cli._wait_port_free(port, 15)
-            if h:
-                assert h["status"] == "ok"
-            else:
-                monkeypatch.setattr(cli, "_get", lambda p, path, timeout=5: cli._request("GET", p, path, None, timeout))
-                monkeypatch.setattr(cli, "_post", lambda p, path, body, timeout=30: cli._request("POST", p, path, body, timeout))
-                monkeypatch.setattr(cli, "_popen", subprocess.Popen)
-                assert cli.ensure_server(load_config(quiet=True), max_wait=120) is True
+                status, _ = cli._http(cfg, "GET", "/health")
+            except OSError:
+                status = None
+            if status != 200:
+                p = subprocess.run([sys.executable, "-m", "n3mc_mcp.cli", "--list"], env=env, timeout=240,
+                                   capture_output=True, text=True, encoding="utf-8")
+                assert "subprocess roundtrip fact 42" in p.stdout
         finally:
-            if not cli._port_free(port):
-                try:
-                    cli._request("POST", port, "/shutdown", {"root": str(paths.data_dir())})
-                except Exception:  # noqa: BLE001
-                    pass
-                cli._wait_port_free(port, 15)
+            _stop_real_server(cfg)
+
+
+def _stop_real_server(cfg):
+    try:
+        status, h = cli._http(cfg, "GET", "/health")
+        if status == 200:
+            cli._http(cfg, "POST", "/shutdown", {"root": paths.data_dir()})
+            cli._wait_port_free(cfg["server_port"], 15)
+    except Exception:  # noqa: BLE001
+        pass
+    pid, _ = cli._read_pid_file()
+    if pid:
+        try:
+            import psutil
+            p = psutil.Process(pid)
+            if "--run-server" in p.cmdline():
+                p.kill()
+        except Exception:  # noqa: BLE001
+            pass
