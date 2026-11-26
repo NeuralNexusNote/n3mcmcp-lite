@@ -1,12 +1,16 @@
-"""The tool handlers, the reminders and the search rendering (spec §4.3, §4.4, §5 (2)-(4)).
-They run inside the resident server (POST /tools/<name>, §4.5); the CLI calls them with nudge=0."""
-import json
-import threading
+"""The tool handlers, the reminders, the time bounds and the texts for an unavailable server
+(spec §4.3, §4.3.1, §4.4, §4.6, §5 (2)–(4)). The handlers run inside the resident server.
 
-from . import config as _config
-from . import context as C
-from . import paths
-from . import processor as P
+This module does not import redis at the top: the MCP thin client imports it for the tool names and the
+reminders (spec §4.6 item 2). ToolRunner.call imports what it needs.
+"""
+import json
+import math
+import re
+from datetime import datetime, time as dtime
+
+from . import context
+from .processor import purify, sanitize_surrogates
 
 _NUDGE_AFTER_SEARCH = (
     "\n\n---\n_Reminder: before closing this turn, call `save_memory` "
@@ -34,137 +38,273 @@ _NUDGE_GENERIC = (
 TOOL_NAMES = ("search_memory", "save_memory", "list_memories", "delete_memory",
               "delete_memories_by_session", "repair_memory", "recall_thread")
 
-REPAIR_BUSY = {"status": "ok", "message": "repair already running", "reembedded": 0, "remaining": 0}
+
+def nudge_for(name: str, is_error: bool = False) -> str:
+    if name == "search_memory" and not is_error:
+        return _NUDGE_AFTER_SEARCH
+    if name == "save_memory" and not is_error:
+        return _NUDGE_AFTER_SAVE
+    return _NUDGE_GENERIC
 
 
-def _json(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False)
+def _json(d) -> str:
+    return json.dumps(d, ensure_ascii=False)
+
+
+# ── Time bounds (§4.3.1) ─────────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+class TimeBoundError(ValueError):
+    pass
+
+
+def _bound_error(name, value):
+    return TimeBoundError(f"Error: {name} must be an ISO 8601 date or datetime, e.g. 2026-11-13 or "
+                          f"2026-11-13T09:00:00+09:00 (got '{value}')")
+
+
+def parse_time_bound(value, name: str, end: bool = False):
+    """Epoch seconds, or None for "no bound". Raises TimeBoundError with the Error: text."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _bound_error(name, value)
+    s = value.strip()
+    if not s:
+        return None
+    try:
+        if _DATE_RE.match(s):
+            d = datetime.strptime(s, "%Y-%m-%d").date()
+            dt = datetime.combine(d, dtime(23, 59, 59, 999999) if end else dtime(0, 0, 0))
+        else:
+            if len(s) < 11 or s[10] not in ("T", " ", "t"):
+                raise ValueError("not an ISO 8601 date or datetime")
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00").replace("z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.astimezone()   # the server's local time
+        ts = dt.timestamp()
+        if not math.isfinite(ts):
+            raise ValueError("not finite")
+        return ts
+    except (ValueError, OSError, OverflowError):
+        raise _bound_error(name, value) from None
+
+
+def parse_bounds(since, until):
+    lo = parse_time_bound(since, "since")
+    hi = parse_time_bound(until, "until", end=True)
+    if lo is not None and hi is not None and lo > hi:
+        raise TimeBoundError("Error: since is later than until")
+    return lo, hi
+
+
+# ── Argument checks that need no Redis (§4.3; the thin client's direct save, §4.6) ─
+
+def check_importance(value):
+    """(importance or None, error dict or None)."""
+    if value is None or value == "":
+        return None, None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or (isinstance(value, float) and math.isnan(value)):
+        return None, {"saved": False, "status": "error", "reason": f"importance must be numeric (got {value})"}
+    return value, None
+
+
+def validate_save_args(cfg, args):
+    owner = args.get("owner_id")
+    if owner not in (None, "") and owner != cfg.get("owner_id"):
+        return {"status": "error", "saved": False, "reason": "owner_id mismatch"}
+    _imp, err = check_importance(args.get("importance"))
+    return err
+
+
+# ── Texts when the resident server is not available (§4.6) ───────────────────
+
+REASON_STARTING = "the memory server is still starting (the first start downloads the embedding model, ~1.1 GB)"
+REASON_STALE = "an old N3MC Lite memory server could not be stopped"
+
+
+def reason_could_not_start(log_path):
+    return f"the memory server could not start; see {log_path}"
+
+
+def reason_foreign(port):
+    return f"another N3MC folder's server is using port {port}"
+
+
+def unavailable_text(name: str, reason: str, sent: bool = False) -> str:
+    """The answer of a tool (not save_memory) when the server is not available; without reminder."""
+    if name in ("search_memory", "list_memories", "recall_thread"):
+        return (f"Error: memory backend unreachable. The N3MC Lite memory server is not available ({reason}). "
+                "It is started automatically; retry in a minute.")
+    if name in ("delete_memory", "delete_memories_by_session"):
+        if sent:
+            return _json({"status": "unknown", "reason": (
+                f"The request reached the N3MC Lite memory server but no answer came back ({reason}). "
+                "The delete may have completed; check with list_memories or search_memory before deleting again.")})
+        return _json({"status": "error", "reason": f"The N3MC Lite memory server is not available ({reason}). "
+                      "Nothing was deleted; retry in a minute."})
+    if name == "repair_memory":
+        return _json({"status": "error", "message": f"The N3MC Lite memory server is not available ({reason}). "
+                      "Retry in a minute."})
+    return f"Error: unknown tool '{name}'"
+
+
+def direct_save_detail(reason: str) -> str:
+    return (f"The N3MC Lite memory server was not available ({reason}), so this entry was saved without a "
+            "vector. It is found by keywords now and gets its vector from repair_memory once the server runs.")
+
+
+# ── List texts (§5 (4)) ──────────────────────────────────────────────────────
+
+def render_list(rows) -> str:
+    if not rows:
+        return "_No memories stored._"
+    blocks = []
+    for r in rows:
+        tag = (r.get("tag") + " ") if r.get("tag") else ""
+        body = purify(r.get("content", ""))
+        if r.get("_doc"):
+            body = body[:200] + ("…" if len(body) > 200 else "")
+        blocks.append(f"**{tag}[{r['id']}]** {str(r.get('timestamp', ''))[:19]}\n{body}")
+    return context.HIT_SEP.join(blocks)
+
+
+def render_thread(rows) -> str:
+    blocks = []
+    for r in rows:
+        mark = "▶ " if r.get("_target") else "  "
+        tag = (r.get("tag") + " ") if r.get("tag") else ""
+        blocks.append(f"{mark}**{tag}[{r['id']}]** {str(r.get('timestamp', ''))[:19]}\n{purify(r.get('content', ''))}")
+    return context.HIT_SEP.join(blocks)
+
+
+def _int_arg(value, default):
+    if value is None or value == "" or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def backend_error_text(name: str, hint: str) -> str:
-    """The backend error of §3.9 item 2, without a reminder."""
     if name in ("search_memory", "list_memories", "recall_thread"):
         return f"Error: memory backend unreachable. {hint}"
     if name == "save_memory":
         return _json({"status": "error", "saved": False, "reason": hint})
-    if name == "repair_memory":
-        return _json({"status": "error", "message": hint})
-    return _json({"status": "error", "reason": hint})
+    if name in ("delete_memory", "delete_memories_by_session"):
+        return _json({"status": "error", "reason": hint})
+    return _json({"status": "error", "message": hint})
 
 
 class ToolRunner:
-    def __init__(self, cfg: dict, db, repair_lock: threading.Lock = None):
+    """Runs the tool handlers on one Database. notices: a callable that returns the notice messages to
+    show on the next successful search (the server's _take_notices); by default the process notices of
+    cfg["_notices"], each once."""
+
+    def __init__(self, cfg, db, notices=None):
         self.cfg = cfg
         self.db = db
-        self.repair_lock = repair_lock or threading.Lock()
+        self._notices = notices
+        self._shown = set()
 
-    # ── notices (§3.15 "Where notices are shown") ─────────────────────────────
-
-    def take_notices(self, model_msg: str = "") -> list:
-        out = _config.take_process_notices(self.cfg)
-        try:
-            out += paths.take_due_notices()
-        except Exception:  # noqa: BLE001
-            pass
-        if model_msg:
-            out.append(model_msg)
+    def take_notices(self):
+        if self._notices is not None:
+            return list(self._notices())
+        out = []
+        for n in list(self.cfg.get("_notices") or []):
+            if n not in self._shown:
+                self._shown.add(n)
+                out.append(n)
         return out
 
-    # ── search ────────────────────────────────────────────────────────────────
+    def call(self, name, args=None, nudge=True) -> str:
+        if name not in TOOL_NAMES:
+            return f"Error: unknown tool '{name}'" + (_NUDGE_GENERIC if nudge else "")
+        if not isinstance(args, dict):
+            args = {}
+        args = sanitize_surrogates(args)
+        import redis
+        is_error = False
+        try:
+            check = self.db.ensure_connected()
+            if check != "ok":
+                text, is_error = backend_error_text(name, check), True
+            elif name == "search_memory":
+                try:
+                    # §3.17: the MCP search text, reminder included, stays within context_max_chars.
+                    return self.search_text(args, tail=_NUDGE_AFTER_SEARCH if nudge else "",
+                                            max_chars=int(self.cfg.get("context_max_chars", 9500)))
+                except TimeBoundError as e:
+                    text, is_error = str(e), True
+            else:
+                text, is_error = getattr(self, "_t_" + name)(args)
+        except (redis.ConnectionError, redis.TimeoutError):
+            self.db.mark_disconnected()
+            from .config import backend_hint
+            text, is_error = backend_error_text(name, backend_hint(self.db.url)), True
+        except Exception as e:  # noqa: BLE001
+            text, is_error = f"Error: {e}", True
+        if nudge:
+            text += nudge_for(name, is_error)
+        return text
 
-    def search_rows(self, args: dict, wait_model: bool = True):
+    # each handler returns (text, is_error)
+
+    def search_text(self, args, head="", tail="", max_chars=None, no_model_wait=False):
+        """The search text, or raises TimeBoundError. Notices are taken only on success."""
+        since, until = parse_bounds(args.get("since"), args.get("until"))
         query = args.get("query")
         if not isinstance(query, str):
             query = "" if query is None else str(query)
-        return self.db.search(query, limit=args.get("limit"), session_id=args.get("session_id"),
-                              since=args.get("since"), until=args.get("until"), wait_model=wait_model)
+        normal, weak, msg = self.db.search(query, limit=_int_arg(args.get("limit"), None),
+                                           session_id=args.get("session_id") if isinstance(args.get("session_id"), str) else None,
+                                           since=since, until=until, no_model_wait=no_model_wait)
+        notices = self.take_notices()
+        if msg:
+            notices = notices + [msg]
+        return context.render_search(normal, weak, notices, head=head, tail=tail, max_chars=max_chars)
 
-    def search_block(self, args: dict, max_chars=None, wait_model: bool = True) -> str:
-        """The `# Recalled Memory Context` block of /search (§12.7). Raises TimeBoundError and
-        redis.ConnectionError / TimeoutError."""
-        normal, weak, msg = self.search_rows(args, wait_model)
-        notices = self.take_notices(msg)
-        head = C.hook_head(args.get("query") if isinstance(args.get("query"), str) else "",
-                           int(self.cfg.get("search_query_max_chars", 2000)))
-        return C.render(normal, weak, notices, head=head, tail="", max_chars=max_chars)
-
-    # ── dispatch ──────────────────────────────────────────────────────────────
-
-    def call(self, name: str, args, nudge: bool = True, no_model_wait: bool = False) -> str:
-        # redis is imported here, not at the top: the MCP thin client imports this module for its
-        # names and reminders and must not load redis before initialize (§4.6 item 2).
-        import redis
-
-        if not isinstance(args, dict):
-            args = {}
-        args = P.sanitize_surrogates(args)
-        generic = _NUDGE_GENERIC if nudge else ""
-        if name not in TOOL_NAMES:
-            return f"Error: unknown tool '{name}'" + generic
-        status = self.db.ensure_connected()
-        if status != "ok":
-            return backend_error_text(name, status) + generic
+    def _t_search_memory(self, args):
         try:
-            text, ok = getattr(self, "_t_" + name)(args, no_model_wait)
-        except P.TimeBoundError as e:
-            return str(e) + generic
-        except (redis.ConnectionError, redis.TimeoutError):
-            self.db.mark_down()
-            return backend_error_text(name, self.db.hint()) + generic
-        except Exception as e:  # noqa: BLE001
-            return f"Error: {e}" + generic   # §4.4: the message, as in 1.x
-        if not nudge:
-            return text
-        if not ok:
-            return text + _NUDGE_GENERIC
-        if name == "search_memory":
-            return text + _NUDGE_AFTER_SEARCH
-        if name == "save_memory":
-            return text + _NUDGE_AFTER_SAVE
-        return text + _NUDGE_GENERIC
+            text = self.search_text(args, tail="", max_chars=None)
+        except TimeBoundError as e:
+            return str(e), True
+        return text, False
 
-    # Each handler returns (text, ok). Search applies its own tail (it counts toward the limit).
+    def _t_save_memory(self, args):
+        imp, err = check_importance(args.get("importance"))
+        if err:
+            return _json(err), True
+        r = self.db.save_memory(args.get("content"), agent_name=args.get("agent_name"),
+                                owner_id=args.get("owner_id"), importance=imp,
+                                session_id=args.get("session_id"), turn_id=args.get("turn_id"))
+        return _json(r), r.get("status") == "error"
 
-    def _t_search_memory(self, args, no_model_wait):
-        normal, weak, msg = self.search_rows(args, wait_model=not no_model_wait)
-        notices = self.take_notices(msg)
-        text = C.render(normal, weak, notices, head="", tail=_NUDGE_AFTER_SEARCH,
-                        max_chars=int(self.cfg.get("context_max_chars", 9500)))
-        # The tail is part of the limited text; call() adds it again, so strip it here.
-        return text[: len(text) - len(_NUDGE_AFTER_SEARCH)], True
+    def _t_list_memories(self, args):
+        limit = _int_arg(args.get("limit"), 20) or 20
+        limit = max(1, limit)
+        return render_list(self.db.list_memories(limit)), False
 
-    def _t_save_memory(self, args, no_model_wait):
-        res = self.db.save_memory(args.get("content"), agent_name=args.get("agent_name"),
-                                  owner_id=args.get("owner_id"), importance=args.get("importance", 1.0),
-                                  session_id=args.get("session_id"), turn_id=args.get("turn_id"),
-                                  no_model_wait=no_model_wait)
-        return _json(res), res.get("status") != "error"
+    def _t_delete_memory(self, args):
+        return _json(self.db.delete_memory(args.get("id"))), False
 
-    def _t_list_memories(self, args, no_model_wait):
-        return self.db.list_memories(args.get("limit", 20)), True
+    def _t_delete_memories_by_session(self, args):
+        r = self.db.delete_by_session(args.get("session_id"))
+        return _json(r), r.get("status") == "error"
 
-    def _t_recall_thread(self, args, no_model_wait):
-        res = self.db.recall_thread(args.get("turn_id"), args.get("before", 2), args.get("after", 2))
-        if isinstance(res, dict):
-            return _json(res), res.get("status") != "error"
-        return res, True
+    def _t_repair_memory(self, args):
+        r = self.db.repair()
+        return _json(r), r.get("status") == "error"
 
-    def _t_delete_memory(self, args, no_model_wait):
-        res = self.db.delete_memory(args.get("id"))
-        return _json(res), res.get("status") != "error"
-
-    def _t_delete_memories_by_session(self, args, no_model_wait):
-        res = self.db.delete_by_session(args.get("session_id"))
-        return _json(res), res.get("status") != "error"
-
-    def _t_repair_memory(self, args, no_model_wait):
-        res = self.repair()
-        return _json(res), res.get("status") != "error"
-
-    def repair(self) -> dict:
-        if not self.repair_lock.acquire(blocking=False):
-            return dict(REPAIR_BUSY)
-        try:
-            return self.db.repair()
-        finally:
-            self.repair_lock.release()
+    def _t_recall_thread(self, args):
+        turn_id = args.get("turn_id")
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            return _json({"status": "error", "reason": "turn_id required"}), True
+        rows = self.db.recall_thread(turn_id, _int_arg(args.get("before"), 2), _int_arg(args.get("after"), 2))
+        if not rows:
+            return _json({"status": "not_found", "turn_id": turn_id}), False
+        return render_thread(rows), False

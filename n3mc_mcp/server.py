@@ -1,6 +1,5 @@
-"""MCP thin client `n3mc-workingmemory` (spec §4.6): answers initialize and tools/list itself and
-forwards every tools/call to the resident server. No model, and no Redis except the direct save
-when the server is not available. stdout carries MCP messages only."""
+"""MCP thin client `n3mc-workingmemory`: stdio, initialize / tools/list answered here, every tools/call
+forwarded to the resident server (spec §4.1, §4.2, §4.6). No model, no Redis (except the direct save)."""
 import os as _os
 import sys as _sys
 
@@ -25,145 +24,159 @@ for _stream_name in ("stdin", "stdout", "stderr"):
         except Exception:  # noqa: BLE001
             pass
 
-import asyncio  # noqa: E402
+import json  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
 import uuid  # noqa: E402
 
-# The compiled modules the direct save loads are imported before stdio starts (§4.6 item 2).
-# redis and database.py are pure Python and are imported at the direct save, so that
-# initialize stays within 2 seconds.
-import psutil  # noqa: E402,F401
-
-try:
-    import hiredis  # noqa: E402,F401
-except ImportError:
-    pass
-
-import mcp.types as types  # noqa: E402
-from mcp.server.lowlevel import Server  # noqa: E402
-from mcp.server.stdio import stdio_server  # noqa: E402
-
 from n3mc_mcp import __version__  # noqa: E402
-from n3mc_mcp import cli  # noqa: E402
-from n3mc_mcp import config as _config  # noqa: E402
 from n3mc_mcp.instructions import INSTRUCTIONS  # noqa: E402
-from n3mc_mcp.tooldefs import TOOLS  # noqa: E402
-from n3mc_mcp.tools import TOOL_NAMES, _NUDGE_AFTER_SAVE, _NUDGE_GENERIC  # noqa: E402
+from n3mc_mcp.tools import TOOL_NAMES, _NUDGE_GENERIC, nudge_for, unavailable_text  # noqa: E402
 
 SERVER_NAME = "n3mc-workingmemory"
-# The entry's own default session: N3MC_SESSION_ID, else one UUIDv4 for this process (§4.6 6.2).
-SESSION = os.environ.get("N3MC_SESSION_ID") or str(uuid.uuid4())
+TOOL_TIMEOUT = 300
 
-_state = {"cfg": None, "client_name": None}
-
-
-def current_cfg() -> dict:
-    """config.json, read again on every call; an unreadable file keeps the last good settings."""
-    cfg = _config.load_config()
-    if cfg.get("_unreadable") and _state["cfg"] is not None:
-        return _state["cfg"]
-    if not cfg.get("_unreadable") or _state["cfg"] is None:
-        _state["cfg"] = cfg
-    return cfg
+# The session of this entry process: N3MC_SESSION_ID, else one UUIDv4 made at start (§4.6 item 6.2).
+PROCESS_SESSION = os.environ.get("N3MC_SESSION_ID", "").strip() or str(uuid.uuid4())
 
 
-def prepare_args(name: str, args) -> dict:
-    args = dict(args) if isinstance(args, dict) else {}
-    if name in ("search_memory", "save_memory"):
-        sid = args.get("session_id")
-        if not isinstance(sid, str) or not sid.strip():
-            args["session_id"] = SESSION
-    if name == "save_memory":
-        an = args.get("agent_name")
-        if not isinstance(an, str) or not an.strip():
-            if isinstance(an, str):
-                args["agent_name"] = ""   # blank: never stored as spaces (§4.6 6.3)
-            for cand in (os.environ.get("N3MC_AGENT_NAME"), _state["client_name"]):
-                if isinstance(cand, str) and cand.strip():
-                    args["agent_name"] = cand.strip()
-                    break
-    return args
+class ThinClient:
+    """The tools/call logic, without the MCP transport (so that tests call it as a function)."""
 
+    def __init__(self, cfg=None):
+        from n3mc_mcp.config import load_config
+        self.cfg = cfg if cfg is not None else load_config()
+        self.last_good = None if self.cfg.get("_config_unreadable") else self.cfg
+        self.client_name = ""
 
-def forward(name: str, args: dict) -> str:
-    """One tools/call: ensure_server, POST /tools/<name>?nudge=1, or the §4.6 answers."""
-    cfg = current_cfg()
-    ok = cli.ensure_server(cfg)
-    sent = False
-    if ok:
+    def reload(self):
+        from n3mc_mcp.config import load_config
+        cfg = load_config()
+        if cfg.get("_config_unreadable"):
+            cfg = self.last_good or self.cfg
+        else:
+            self.last_good = cfg
+        self.cfg = cfg
+        return cfg
+
+    def fill_args(self, name, args):
+        args = dict(args) if isinstance(args, dict) else {}
+        if name in ("search_memory", "save_memory"):
+            s = args.get("session_id")
+            if not (isinstance(s, str) and s.strip()):
+                args["session_id"] = PROCESS_SESSION
+        if name == "save_memory":
+            a = args.get("agent_name")
+            if not (isinstance(a, str) and a.strip()):
+                val = ""
+                for cand in (os.environ.get("N3MC_AGENT_NAME", ""), self.client_name or ""):
+                    if isinstance(cand, str) and cand.strip():
+                        val = cand.strip()
+                        break
+                args["agent_name"] = val
+            else:
+                args["agent_name"] = a.strip()
+        return args
+
+    def handle(self, name, args) -> str:
+        from n3mc_mcp import cli
+        if name not in TOOL_NAMES:
+            return f"Error: unknown tool '{name}'" + _NUDGE_GENERIC
+        cfg = self.reload()
+        args = self.fill_args(name, args)
+        ok = cli.ensure_server(cfg)
+        if not ok:
+            return self.unavailable(cfg, name, args, cli.last_unavailable_reason(), sent=False)
         try:
-            status, data = cli._post(cfg, f"/tools/{name}?nudge=1", args, 300.0)
-            if status == 200 and isinstance(data, dict) and isinstance(data.get("text"), str):
-                return data["text"]
-            reason, sent = f"HTTPError: HTTP {status}", True
-        except Exception as e:  # noqa: BLE001
-            reason, sent = cli.classify_request_error(e)
-    elif cli._FOREIGN_SERVER_ROOT is not None:
-        reason = cli.reason_foreign(cfg)
-    else:
-        reason = cli.unavailable_reason(cfg)
-    if name == "save_memory":
-        text, saved_ok = cli.direct_save_text(cfg, args, reason)
-        return text + (_NUDGE_AFTER_SAVE if saved_ok else _NUDGE_GENERIC)
-    return cli.unavailable_text(name, reason, sent) + _NUDGE_GENERIC
+            status, r = cli._post(cfg["server_port"], f"/tools/{name}?nudge=1", args, timeout=TOOL_TIMEOUT)
+        except cli.NotSent as e:
+            return self.unavailable(cfg, name, args, str(e), sent=False)
+        except cli.NoAnswer as e:
+            return self.unavailable(cfg, name, args, str(e), sent=True)
+        if status == 200 and isinstance(r, dict) and isinstance(r.get("text"), str):
+            return r["text"]
+        return self.unavailable(cfg, name, args, f"HTTP {status}", sent=True)
+
+    def unavailable(self, cfg, name, args, reason, sent):
+        from n3mc_mcp import cli
+        if name == "save_memory":
+            r = cli.save_without_server(cfg, args, reason, PROCESS_SESSION)
+            is_err = r.get("status") == "error"
+            return json.dumps(r, ensure_ascii=False) + nudge_for(name, is_err)
+        return unavailable_text(name, reason, sent=sent) + _NUDGE_GENERIC
 
 
-async def handle_call(name: str, arguments) -> list:
-    if name not in TOOL_NAMES:
-        return [types.TextContent(type="text", text=f"Error: unknown tool '{name}'" + _NUDGE_GENERIC)]
-    try:
-        text = await asyncio.to_thread(forward, name, prepare_args(name, arguments))
-    except Exception as e:  # noqa: BLE001
-        print(f"n3mc-workingmemory: {name} failed ({type(e).__name__}: {e})", file=sys.stderr)
-        text = f"Error: {e}" + _NUDGE_GENERIC   # §4.6 6.6, as in 1.x
-    return [types.TextContent(type="text", text=text)]
+def _preimport():
+    """Compiled modules of the direct save are imported before stdio starts (§4.6 item 2)."""
+    for mod in ("psutil", "hiredis"):
+        try:
+            __import__(mod)
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def build_server() -> Server:
-    server = Server(SERVER_NAME, version=__version__, instructions=INSTRUCTIONS)
+def build_server(thin: ThinClient):
+    import asyncio
+    from mcp.server.lowlevel import Server
+    from mcp.types import TextContent
+    from n3mc_mcp.tooldefs import TOOLS
 
-    @server.list_tools()
+    app = Server(SERVER_NAME, version=__version__, instructions=INSTRUCTIONS)
+
+    @app.list_tools()
     async def list_tools():
-        return TOOLS
+        return list(TOOLS)
 
     async def call_tool(name, arguments):
         try:
-            params = server.request_context.session.client_params
-            if params is not None and params.clientInfo is not None:
-                _state["client_name"] = params.clientInfo.name
+            ctx = app.request_context
+            ci = getattr(getattr(ctx.session, "client_params", None), "clientInfo", None)
+            if ci is not None and getattr(ci, "name", None):
+                thin.client_name = ci.name
         except Exception:  # noqa: BLE001
             pass
-        return await handle_call(name, arguments)
+        try:
+            text = await asyncio.to_thread(thin.handle, name, arguments)
+        except Exception as e:  # noqa: BLE001
+            print(f"[n3mc-lite] {name}: {type(e).__name__}: {e}", file=sys.stderr)
+            text = f"Error: {e}" + _NUDGE_GENERIC
+        return [TextContent(type="text", text=text)]
 
     try:
-        decorator = server.call_tool(validate_input=False)
-        server._n3mc_validate_input = False
+        app.call_tool(validate_input=False)(call_tool)
     except TypeError:
-        decorator = server.call_tool()
-        server._n3mc_validate_input = None
-    decorator(call_tool)
-    return server
+        app.call_tool()(call_tool)
+    return app
 
 
-def _background_start(cfg) -> None:
+async def _main():
+    from mcp.server.stdio import stdio_server
+    from n3mc_mcp import cli
+    thin = ThinClient()
+    app = build_server(thin)
+    threading.Thread(target=_safe_ensure, args=(cli, thin.cfg), name="n3mc-ensure-server", daemon=True).start()
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(read_stream, write_stream, app.create_initialization_options())
+
+
+def _safe_ensure(cli, cfg):
     try:
         cli.ensure_server(cfg)
     except Exception as e:  # noqa: BLE001
-        print(f"n3mc-workingmemory: could not start the memory server ({type(e).__name__}: {e})", file=sys.stderr)
+        print(f"[n3mc-lite] ensure_server: {type(e).__name__}: {e}", file=sys.stderr)
 
 
-async def _main() -> None:
-    cfg = current_cfg()
-    threading.Thread(target=_background_start, args=(cfg,), name="n3mc-ensure-server", daemon=True).start()
-    server = build_server()
-    options = server.create_initialization_options()
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, options)
-
-
-def run() -> None:
+def run():
+    for name in ("stdin", "stdout", "stderr"):
+        s = getattr(sys, name, None)
+        if s is not None and hasattr(s, "reconfigure"):
+            try:
+                s.reconfigure(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                pass
+    _preimport()
+    import asyncio
     try:
         asyncio.run(_main())
     except KeyboardInterrupt:

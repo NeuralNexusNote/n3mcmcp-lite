@@ -24,6 +24,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `database.py` are imported at the direct save.
 - Four errors in the specification (the regular expression of §12.9, the SCAN
   description of §3.12, the test list of §2, the import order of §4.6).
+- The specification states the success answer of `delete_memory`
+  (`{"status": "deleted", "id", "chunks_deleted"}` for a parent document,
+  `{"status": "deleted", "id"}` otherwise, as in 1.x), and no longer says that
+  any body up to 19 characters over `chunk_threshold` gives one chunk: that
+  holds only when the rest after the cut at a soft break is shorter than 20
+  characters.
+- The code, the plugin and the tests are generated again from the
+  specification: the plugin `n3mc-workingmemory` registers the hooks only (no
+  MCP server in Claude Code), and the plugin `n3mc-workingmemory-mcp` is
+  removed from the marketplace.
 - Lowering only `chunk_threshold` to 100 or less no longer reports a
   `config_type` notice about `chunk_overlap` on every start; the missing
   `chunk_overlap` is written as the value in effect.

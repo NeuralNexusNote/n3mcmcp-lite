@@ -1,5 +1,4 @@
-"""Stop hook entry (spec §12.1): audit.log first, then `python -m n3mc_mcp.cli --save-claude-turn`,
-then `python -m n3mc_mcp.cli --stop`, both with the same stdin. Always exits 0."""
+"""Stop hook entry: audit.log first, then `cli --save-claude-turn`, then `cli --stop` (spec §12.1)."""
 import os as _os
 import sys as _sys
 
@@ -25,18 +24,28 @@ for _stream_name in ("stdin", "stdout", "stderr"):
             pass
 
 import sys  # noqa: E402
+import time  # noqa: E402
 
-from n3mc_mcp import lite_hook  # noqa: E402
+from n3mc_mcp.lite_hook import CHILD_TIMEOUT, audit_first, read_stdin, run_step  # noqa: E402
 
 HOOK_NAME = "Stop"
-STEPS = (["--save-claude-turn"], ["--stop"])
 
 
-def main(argv=None) -> int:
-    lite_hook.run_hook(HOOK_NAME, STEPS, argv)
+def main() -> int:
+    try:
+        raw = read_stdin()
+        audit_first(HOOK_NAME, raw)
+        uvx = ["--uvx"] if "--uvx" in sys.argv[1:] else []
+        deadline = time.monotonic() + CHILD_TIMEOUT
+        run_step(["--save-claude-turn", *uvx], raw, deadline, forward_stdout=False)
+        run_step(["--stop", *uvx], raw, deadline, forward_stdout=False)
+    except Exception as e:  # noqa: BLE001
+        try:
+            print(f"[n3mc-lite] stop hook: {type(e).__name__}: {e}", file=sys.stderr)
+        except Exception:  # noqa: BLE001
+            pass
     return 0
 
 
 if __name__ == "__main__":
-    main()
-    sys.exit(0)
+    sys.exit(main())

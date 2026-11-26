@@ -1,6 +1,5 @@
-"""The seven MCP Tool definitions of spec §5 (3), shared by the thin client and the
-resident server. Written exactly as the specification gives them."""
-
+"""The seven MCP Tool definitions of spec §5 (3), shared by the thin client and the resident server.
+Written as the specification gives them: the connected model reads these texts."""
 from mcp.types import Tool
 
 TOOLS = [
@@ -217,6 +216,7 @@ TOOLS = [
             "required": ["turn_id"],
         },
     ),
+
 ]
 
-TOOL_NAMES = [t.name for t in TOOLS]
+TOOL_NAMES = tuple(t.name for t in TOOLS)
