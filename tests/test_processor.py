@@ -72,24 +72,22 @@ class TestFinalScore:
         assert P.final_score(1.0, 1.0, 1.0, 1.0, 0.6) == pytest.approx(0.6)
 
     def test_b_local_clamped_low(self):
-        assert P.b_local(0.1, 0, False, 0.02, 0.5) == 0.5
+        assert P.b_local(0.1) == 0.5
 
     def test_b_local_clamped_high(self):
-        assert P.b_local(1.9, 100, True, 0.02, 0.5) == 2.0
+        assert P.b_local(2.5) == 2.0
 
 
-class TestAccessCountBoost:
-    def test_boost_added(self):
-        assert P.b_local(1.0, 10, True, 0.02, 0.5) == pytest.approx(1.2)
+class TestBLocal:
+    def test_importance_only(self):
+        assert P.b_local(1.3) == pytest.approx(1.3)
 
-    def test_boost_capped(self):
-        assert P.b_local(1.0, 1000, True, 0.02, 0.5) == pytest.approx(1.5)
-
-    def test_disabled(self):
-        assert P.b_local(1.0, 1000, False, 0.02, 0.5) == pytest.approx(1.0)
+    def test_unreadable(self):
+        assert P.b_local("x") == 1.0
+        assert P.b_local(None) == 1.0
 
     def test_nan_importance(self):
-        assert P.b_local(float("nan"), 0, False, 0.02, 0.5) == 1.0
+        assert P.b_local(float("nan")) == 1.0
 
 
 class TestLexicalRerank:

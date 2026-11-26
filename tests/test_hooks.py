@@ -339,3 +339,51 @@ class TestHookExitStatus:
                             capture_output=True, env=env, timeout=120)
         assert (work / ".claude" / "rules" / "n3mc-lite-behavior.md").exists()
         assert cp.returncode == 0
+
+
+class TestTranscriptUnicodeLineBreaks:
+    """JSONL lines end at LF only: U+2028 / U+2029 / U+0085 inside a reply do not cut it."""
+
+    SEPS = (" ", " ", "\u0085")
+
+    def _write(self, tmp_path, objs, newline="\n", prefix=b""):
+        p = tmp_path / "t.jsonl"
+        body = newline.join(json.dumps(o, ensure_ascii=False) for o in objs) + newline
+        p.write_bytes(prefix + body.encode("utf-8"))
+        return p
+
+    def _u(self, text):
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def _a(self, text):
+        return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+    @pytest.mark.parametrize("sep", SEPS)
+    def test_raw_separator_kept(self, tmp_path, sep):
+        p = self._write(tmp_path, [self._u("q1"), self._a(f"A{sep}B"), self._u("q2")])
+        assert sep.encode("utf-8") in p.read_bytes()
+        assert cli._last_assistant_from_transcript(str(p), "q2") == f"A{sep}B"
+
+    def test_crlf_lines(self, tmp_path):
+        p = self._write(tmp_path, [self._u("q1"), self._a("crlf reply"), self._u("q2")], newline="\r\n")
+        assert cli._last_assistant_from_transcript(str(p), "q2") == "crlf reply"
+
+    def test_escaped_lf_still_works(self, tmp_path):
+        p = self._write(tmp_path, [self._u("q1"), self._a("line 1\nline 2"), self._u("q2")])
+        assert cli._last_assistant_from_transcript(str(p), "q2") == "line 1\nline 2"
+
+    def test_cut_first_line_and_broken_lines_skipped(self, tmp_path, monkeypatch):
+        p = self._write(tmp_path, [self._u("q1"), self._a("tail reply"), self._u("q2")],
+                        prefix=b'{"type": "assistant", "message": {"content": "cut' + b"\n" + b"not json\n")
+        monkeypatch.setattr(cli, "TRANSCRIPT_TAIL_BYTES", p.stat().st_size - 10)
+        assert cli._last_assistant_from_transcript(str(p), "q2") == "tail reply"
+
+    @pytest.mark.parametrize("sep", SEPS)
+    def test_saved_once_with_previous_turn(self, server, rconn, tmp_path, sep):
+        _submit("q1")
+        turn1 = open(paths.turn_id_path("sess-1"), encoding="utf-8").read()
+        reply = f"first part{sep}second part"
+        p = self._write(tmp_path, [self._u("q1"), self._a(reply), self._u("q2")])
+        _submit("q2", transcript=p)
+        recs = [r for r in _records(rconn) if r["content"] == ("[claude] " + reply).encode("utf-8")]
+        assert len(recs) == 1 and recs[0]["turn_id"].decode() == turn1

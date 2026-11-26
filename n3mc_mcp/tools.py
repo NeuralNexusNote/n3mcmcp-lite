@@ -304,7 +304,11 @@ class ToolRunner:
         turn_id = args.get("turn_id")
         if not isinstance(turn_id, str) or not turn_id.strip():
             return _json({"status": "error", "reason": "turn_id required"}), True
-        rows = self.db.recall_thread(turn_id, _int_arg(args.get("before"), 2), _int_arg(args.get("after"), 2))
+        sid = args.get("session_id")
+        rows = self.db.recall_thread(turn_id, _int_arg(args.get("before"), 2), _int_arg(args.get("after"), 2),
+                                     session_id=sid if isinstance(sid, str) else None)
+        if isinstance(rows, dict):
+            return _json(rows), False
         if not rows:
             return _json({"status": "not_found", "turn_id": turn_id}), False
         return render_thread(rows), False

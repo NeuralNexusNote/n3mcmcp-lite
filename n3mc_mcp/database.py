@@ -53,13 +53,6 @@ end
 return 0
 """
 
-_INCR_IF_EXISTS = """
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  return redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
-end
-return false
-"""
-
 _HSET_IF_EXISTS = """
 if redis.call('EXISTS', KEYS[1]) == 1 then
   redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
@@ -74,8 +67,15 @@ if redis.call('GET', KEYS[2]) == ARGV[1] then redis.call('DEL', KEYS[2]) end
 return n
 """
 
+_DEL_GUARD_IF_OWNED = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
 _RETURN_FIELDS = ["content", "timestamp", "timestamp_epoch", "owner_id", "local_id", "agent_name",
-                  "session_id", "turn_id", "importance", "access_count", "parent_id"]
+                  "session_id", "turn_id", "importance", "parent_id"]
 
 
 # ── Small helpers ────────────────────────────────────────────────────────────
@@ -677,9 +677,7 @@ class Database:
     def _score(self, row, cos, kw, effective_session, now):
         cfg = self.cfg
         decay = processor.time_decay(row.get("timestamp_epoch"), cfg.get("half_life_days", 3), now=now)
-        bl = processor.b_local(row.get("importance") or 1.0, _f(row.get("access_count"), 0.0),
-                               cfg.get("access_count_enabled", False), cfg.get("access_count_weight", 0.02),
-                               cfg.get("access_count_max_boost", 0.5))
+        bl = processor.b_local(row.get("importance") or 1.0)
         bs = (cfg.get("b_session_match", 1.0) if (effective_session and row.get("session_id") == effective_session)
               else cfg.get("b_session_mismatch", 0.6))
         base = cos * 0.7 + kw * 0.3
@@ -843,13 +841,6 @@ class Database:
                 taken.add(r["id"])
                 r["_weak"] = True
                 weak.append(r)
-        top_k = int(cfg.get("ttl_refresh_top_k", 5))
-        if top_k > 0 and normal:
-            script = self._script("incr", _INCR_IF_EXISTS)
-            pipe = self._require().pipeline(transaction=False)
-            for r in normal[:top_k]:
-                script(keys=[MEM_PREFIX + r.get("_chunk_id", r["id"])], args=["access_count", 1], client=pipe)
-            pipe.execute()
         normal = normal[:limit]
         return normal, weak, msg
 
@@ -913,7 +904,10 @@ class Database:
                                   "chunk_count": int(_f(vals[7], 0)), "chunk_ids": _s(vals[8]).split()}))
         return out
 
-    def recall_thread(self, turn_id, before=2, after=2):
+    def recall_thread(self, turn_id, before=2, after=2, session_id=None):
+        """Rows of the turn plus `before` / `after` rows of the same session (§4.3.1). A list of rows; [] when
+        nothing matches; {"status": "ambiguous", ...} when the turn_id is in several sessions and no
+        session_id was given."""
         recs = self._all_records()
         doc_ids = {k[len(DOC_PREFIX):] for k, _ in recs if k.startswith(DOC_PREFIX)}
         entries = []
@@ -924,10 +918,19 @@ class Database:
                 if f["parent_id"] and f["parent_id"] in doc_ids:
                     continue
                 entries.append({"id": key[len(MEM_PREFIX):], "tag": "", **f})
+        session_id = session_id.strip() if isinstance(session_id, str) else ""
+        targets = [e for e in entries if e["turn_id"] == turn_id and (not session_id or e["session_id"] == session_id)]
+        if not targets:
+            return []
+        sessions = sorted({e["session_id"] for e in targets})
+        if len(sessions) > 1:
+            return {"status": "ambiguous", "turn_id": turn_id, "session_ids": sessions,
+                    "reason": "this turn_id is in several sessions; call recall_thread again with one of "
+                              "session_ids as session_id"}
+        session = sessions[0]
+        entries = [e for e in entries if e["session_id"] == session]
         entries.sort(key=lambda e: (e["timestamp_epoch"], e["id"]))
         idx = [i for i, e in enumerate(entries) if e["turn_id"] == turn_id]
-        if not idx:
-            return []
         lo = max(0, idx[0] - max(0, int(before)))
         hi = min(len(entries), idx[-1] + max(0, int(after)) + 1)
         out = []
@@ -989,7 +992,7 @@ class Database:
             pipe.delete(DOC_PREFIX + bare)
             for cid in chunk_ids:
                 pipe.delete(MEM_PREFIX + cid)
-            self._script("delguard", _DEL_WITH_GUARD)(keys=["__n3mc_none__", gkey], args=[bare], client=pipe)
+            self._script("delguardonly", _DEL_GUARD_IF_OWNED)(keys=[gkey], args=[bare], client=pipe)
             pipe.execute()
             return {"status": "deleted", "id": bare, "chunks_deleted": len(chunk_ids)}
         vals = c.hmget(MEM_PREFIX + bare, ["owner_id", "content", "turn_id", "parent_id"])
@@ -1031,8 +1034,8 @@ class Database:
         pipe = c.pipeline(transaction=True)
         for pid, f in docs.items():
             pipe.delete(DOC_PREFIX + pid)
-            self._script("delguard", _DEL_WITH_GUARD)(keys=["__n3mc_none__", doc_guard_key(f["content"], f["turn_id"])],
-                                                     args=[pid], client=pipe)
+            self._script("delguardonly", _DEL_GUARD_IF_OWNED)(keys=[doc_guard_key(f["content"], f["turn_id"])],
+                                                             args=[pid], client=pipe)
         for cid in doc_chunks:
             pipe.delete(MEM_PREFIX + cid)
         for cid in orphan_chunks:

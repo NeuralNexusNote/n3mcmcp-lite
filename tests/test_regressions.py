@@ -876,10 +876,8 @@ class TestConditionalWrites:
     def test_scripts(self, db, rconn):
         rconn.hset("mem:cw", "a", 1)
         rconn.expire("mem:cw", 500)
-        db._script("incr", D._INCR_IF_EXISTS)(keys=["mem:cw"], args=["access_count", 1])
         db._script("hset", D._HSET_IF_EXISTS)(keys=["mem:cw"], args=["embedding", b"x"])
-        assert rconn.ttl("mem:cw") <= 500 and rconn.hget("mem:cw", "access_count") == b"1"
-        db._script("incr", D._INCR_IF_EXISTS)(keys=["mem:none"], args=["access_count", 1])
+        assert rconn.ttl("mem:cw") <= 500 and rconn.hget("mem:cw", "embedding") == b"x"
         db._script("hset", D._HSET_IF_EXISTS)(keys=["mem:none"], args=["embedding", b"x"])
         assert not rconn.exists("mem:none")
 
@@ -932,7 +930,7 @@ class TestWeakMatches:
         assert [r["id"] for r in weak] == [ids["wk mid"]["id"], ids["wk low"]["id"]]
         assert weak[0]["filter_score"] >= weak[1]["filter_score"]
         assert int(rconn.hget("mem:" + ids["wk mid"]["id"], "access_count")) == 0
-        assert int(rconn.hget("mem:" + ids["wk strong"]["id"], "access_count")) == 1
+        assert int(rconn.hget("mem:" + ids["wk strong"]["id"], "access_count")) == 0
 
     def test_min_results_zero(self, db, cfg, monkeypatch):
         cfg["min_results"] = 0
@@ -1042,3 +1040,124 @@ class TestLocalhostIpv4First:
         assert d.ensure_connected(ephemeral=False) == "ok"
         assert time.monotonic() - t < 1.0
         d.client.close()
+
+
+class TestParentDeleteTouchesOnlyItsKeys:
+    """The delete of a parent document removes the parent, its chunks and its own guard, and no other key."""
+
+    FOREIGN = (b"__n3mc_none__", b"other:data")
+
+    def _foreign(self, rconn):
+        for k in self.FOREIGN:
+            rconn.set(k, b"foreign")
+
+    def _doc_keys(self, rconn, r):
+        return [b"doc:" + r["parent_id"].encode()] + [b"mem:" + c.encode() for c in r["ids"]]
+
+    def test_delete_memory(self, db, rconn):
+        self._foreign(rconn)
+        r = db.save_memory("parent delete sentence. " * 40)
+        guard = D.doc_guard_key(rconn.hget("doc:" + r["parent_id"], "content").decode())
+        assert rconn.get(guard) == r["parent_id"].encode()
+        out = db.delete_memory(r["parent_id"])
+        assert out == {"status": "deleted", "id": r["parent_id"], "chunks_deleted": r["chunks"]}
+        assert not any(rconn.exists(k) for k in self._doc_keys(rconn, r))
+        assert not rconn.exists(guard)
+        assert all(rconn.get(k) == b"foreign" for k in self.FOREIGN)
+
+    def test_delete_by_session(self, db, rconn):
+        self._foreign(rconn)
+        r = db.save_memory("session parent sentence. " * 40, session_id="S-del")
+        keep = db.save_memory("other session parent sentence. " * 40, session_id="S-keep")
+        out = db.delete_by_session("S-del")
+        assert out["documents_deleted"] == 1 and out["chunks_deleted"] == r["chunks"]
+        assert not any(rconn.exists(k) for k in self._doc_keys(rconn, r))
+        assert all(rconn.exists(k) for k in self._doc_keys(rconn, keep))
+        assert all(rconn.get(k) == b"foreign" for k in self.FOREIGN)
+
+    def test_guard_of_another_id_kept(self, db, rconn):
+        text = "guard of another id sentence. " * 40
+        r = db.save_memory(text, session_id="S-g")
+        guard = D.doc_guard_key(rconn.hget("doc:" + r["parent_id"], "content").decode())
+        rconn.set(guard, b"another-parent-id")
+        db.delete_memory(r["parent_id"])
+        assert rconn.get(guard) == b"another-parent-id"
+        r2 = db.save_memory("guard of another id, session path. " * 40, session_id="S-g2")
+        guard2 = D.doc_guard_key(rconn.hget("doc:" + r2["parent_id"], "content").decode())
+        rconn.set(guard2, b"another-parent-id")
+        db.delete_by_session("S-g2")
+        assert rconn.get(guard2) == b"another-parent-id"
+
+    def test_single_record_guard_still_deleted(self, db, rconn):
+        self._foreign(rconn)
+        s = db.save_memory("single guarded")
+        guard = D.single_guard_key("single guarded")
+        assert rconn.get(guard) == s["id"].encode()
+        db.delete_memory(s["id"])
+        assert not rconn.exists(guard) and not rconn.exists("mem:" + s["id"])
+        assert db.save_memory("single guarded")["status"] == "saved"
+        assert all(rconn.get(k) == b"foreign" for k in self.FOREIGN)
+
+
+class TestRecallThreadSessions:
+    """recall_thread lists only the session of the turn; a turn_id in several sessions is not merged."""
+
+    def _save(self, db, text, session, turn, role=None):
+        r = db.save_memory(text, session_id=session, turn_id=turn, role=role)
+        assert r["status"] == "saved"
+        time.sleep(0.005)
+        return r
+
+    def test_other_session_in_between_not_shown(self, db):
+        self._save(db, "A question", "SA", "tA", "user")
+        self._save(db, "B remark", "SB", "tB", "user")
+        self._save(db, "A answer", "SA", "tA", "claude")
+        rows = db.recall_thread("tA", 0, 0)
+        assert [r["content"] for r in rows] == ["[user] A question", "[claude] A answer"]
+        assert all(r["_target"] for r in rows)
+
+    def test_before_after_count_same_session_only(self, db):
+        self._save(db, "A earlier", "SA", "tA0", "user")
+        self._save(db, "B earlier", "SB", "tB0", "user")
+        self._save(db, "A question", "SA", "tA", "user")
+        self._save(db, "B remark", "SB", "tB", "user")
+        self._save(db, "A answer", "SA", "tA", "claude")
+        self._save(db, "B later", "SB", "tB2", "user")
+        self._save(db, "A later", "SA", "tA2", "user")
+        rows = db.recall_thread("tA", 1, 1)
+        assert [r["content"] for r in rows] == ["[user] A earlier", "[user] A question", "[claude] A answer",
+                                                "[user] A later"]
+        assert [r["_target"] for r in rows] == [False, True, True, False]
+
+    def test_same_turn_id_in_two_sessions(self, db, runner):
+        self._save(db, "first session text", "S1", "turn-1")
+        self._save(db, "second session text", "S2", "turn-1")
+        out = db.recall_thread("turn-1", 0, 0)
+        assert out["status"] == "ambiguous" and out["session_ids"] == ["S1", "S2"]
+        j = parse_json(runner.call("recall_thread", {"turn_id": "turn-1"}, nudge=False))
+        assert j["status"] == "ambiguous" and j["session_ids"] == ["S1", "S2"]
+        rows = db.recall_thread("turn-1", 0, 0, session_id="S2")
+        assert [r["content"] for r in rows] == ["second session text"]
+        t = runner.call("recall_thread", {"turn_id": "turn-1", "session_id": "S1"}, nudge=False)
+        assert "first session text" in t and "second session text" not in t
+        assert db.recall_thread("turn-1", session_id="S9") == []
+
+    def test_unique_turn_and_parent_folding(self, db, rconn, runner):
+        r = self._save(db, "folded parent sentence. " * 40, "SA", "tD")
+        rows = db.recall_thread("tD")
+        assert len(rows) == 1 and rows[0]["tag"].startswith("[doc×")
+        rconn.delete("doc:" + r["parent_id"])
+        assert len(db.recall_thread("tD")) == r["chunks"]
+        assert parse_json(runner.call("recall_thread", {"turn_id": "nope"}, nudge=False)) == \
+            {"status": "not_found", "turn_id": "nope"}
+
+
+class TestRemovedCounterSettings:
+    def test_ignored_without_notice(self, isolate):
+        p = _write_cfg(isolate, access_count_enabled=True, access_count_weight="bad", access_count_max_boost=-1,
+                       ttl_refresh_top_k=-5)
+        c = CF.load_config()
+        assert not any(n.startswith("config_type") for n in c["_notices"])
+        assert json.loads(p.read_text(encoding="utf-8"))["ttl_refresh_top_k"] == -5
+        for k in ("access_count_enabled", "access_count_weight", "access_count_max_boost", "ttl_refresh_top_k"):
+            assert k not in CF.DEFAULTS and k in CF.IGNORED_KEYS

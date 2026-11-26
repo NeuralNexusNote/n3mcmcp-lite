@@ -268,20 +268,17 @@ def keyword_relevance(bm25, max_bm25, threshold) -> float:
     return s / max(1.0, abs(float(max_bm25 or 0.0)))
 
 
-def b_local(importance, access_count, enabled, weight, max_boost) -> float:
+def b_local(importance) -> float:
+    """The stored importance, clamped to 0.5-2.0 (1.0 when unreadable). A search writes nothing to a record:
+    no hit counter is kept (writing to an indexed hash makes RediSearch index it again, and the stale entries
+    lower the BM25 of every term in it until its GC runs)."""
     try:
         imp = float(importance)
     except (TypeError, ValueError):
         imp = 1.0
     if math.isnan(imp):
         imp = 1.0
-    boost = 0.0
-    if enabled:
-        try:
-            boost = min(float(max_boost), float(access_count or 0) * float(weight))
-        except (TypeError, ValueError):
-            boost = 0.0
-    return max(0.5, min(2.0, imp + boost))
+    return max(0.5, min(2.0, imp))
 
 
 def final_score(cos, kw, decay, blocal, bsession) -> float:

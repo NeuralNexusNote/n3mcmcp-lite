@@ -184,26 +184,44 @@ class TestCjkBigramExpand:
         assert cjk_bigram_expand("記") == "記"
 
 
-class TestAccessCount:
-    def test_incremented(self, db, rconn):
-        r = db.save_memory("access count target words")
-        db.search("access count target words")
-        assert int(rconn.hget("mem:" + r["id"], "access_count")) == 1
+class TestSearchWritesNothing:
+    """A search writes nothing to a record: no hit counter, so RediSearch never indexes a hit again and
+    the BM25 of a record that is found often does not fall."""
 
-    def test_only_top_n(self, db, rconn, cfg):
-        cfg["ttl_refresh_top_k"] = 1
-        cfg["relative_min_score_ratio"] = 0.0
-        a = db.save_memory("topn alpha beta gamma delta")
-        b = db.save_memory("topn alpha beta other words")
-        db.search("topn alpha beta gamma delta")
-        counts = sorted(int(rconn.hget("mem:" + x["id"], "access_count")) for x in (a, b))
-        assert counts == [0, 1]
+    def _hashes(self, rconn):
+        out = {}
+        for k in rconn.scan_iter("*"):
+            if rconn.type(k) == b"hash":
+                out[k] = rconn.hgetall(k)
+        return out
 
-    def test_zero_top_k(self, db, rconn, cfg):
-        cfg["ttl_refresh_top_k"] = 0
-        r = db.save_memory("no counting here")
-        db.search("no counting here")
-        assert int(rconn.hget("mem:" + r["id"], "access_count")) == 0
+    def test_records_unchanged(self, db, rconn, cfg):
+        # settings of earlier versions, left in an existing config.json, are ignored
+        cfg.update({"access_count_enabled": True, "access_count_weight": 0.5, "ttl_refresh_top_k": 5})
+        db.save_memory("search writes nothing target words")
+        db.save_memory("search writes nothing long sentence. " * 40)
+        before = self._hashes(rconn)
+        for _ in range(5):
+            db.search("search writes nothing target words")
+            db.search("search writes nothing long sentence")
+        assert self._hashes(rconn) == before
+
+    def test_no_reindex_and_bm25_stable(self, db, rconn):
+        for i in range(3):
+            db.save_memory(f"the nightly backup job number {i} runs at night")
+        for i in range(30):
+            db.save_memory(f"unrelated note {i} about fonts and colours")
+
+        def info():
+            raw = rconn.execute_command("FT.INFO", "n3mc_idx")
+            return dict(zip(raw[::2], raw[1::2])).get(b"max_doc_id")
+
+        scores = sorted(round(r["_bm25"], 6) for r in db._bm25_search("backup", 100))
+        doc_id = info()
+        for _ in range(30):
+            db.search("nightly backup")
+        assert info() == doc_id
+        assert sorted(round(r["_bm25"], 6) for r in db._bm25_search("backup", 100)) == scores
 
 
 class TestSerialization:

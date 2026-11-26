@@ -17,6 +17,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `config.json` written by an earlier version already holds
   `"vector_min_cos": 0.85` and keeps it: change it to 0.83 by hand and
   restart the MCP client (or stop the server with `n3mc-lite --stop-server`).
+- **`recall_thread` lists only the session of the turn.** Rows of other
+  sessions that were saved at the same time (another Claude Code window, the
+  desktop app) no longer appear between the rows of the turn, and they are not
+  counted in `before` / `after`. A new optional argument `session_id` (CLI:
+  `--session-id`) chooses the session when the same `turn_id` is in several
+  sessions; without it, such a `turn_id` returns
+  `{"status": "ambiguous", "turn_id", "session_ids", "reason"}` instead of
+  merging the sessions.
+- **A search writes nothing to a record.** `access_count` is no longer
+  incremented on search hits, and the frequency boost is removed (`b_local`
+  is the stored importance). Writing to a record made RediSearch index it
+  again, and the stale index entries lowered the BM25 of the records that were
+  found often, down to 0, until the index's garbage collector ran. The
+  settings `access_count_enabled`, `access_count_weight`,
+  `access_count_max_boost` and `ttl_refresh_top_k` are removed; a value left
+  in an existing `config.json` is ignored. The default ranking does not change
+  (the boost was off by default).
 - The specification's "What changed in v2.0.0" table also lists three
   changes that v1.12.2 users see: a search no longer extends a TTL, the
   full-text index field is `content_fts` (the index is created again once),
@@ -26,6 +43,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   work.
 
 ### Fixed
+- Deleting a parent document (`delete_memory`, `delete_memories_by_session`)
+  also deleted a Redis key named `__n3mc_none__` when one existed. The guard
+  of the parent is now deleted by a script that receives only the guard key,
+  and only when it holds the parent's id.
+- The hook did not recover Claude's previous reply from the transcript when
+  the reply contained a raw U+2028, U+2029 or U+0085: the transcript was split
+  with `str.splitlines()`, which also cuts at these characters. Lines are now
+  split at LF only (CRLF accepted).
 - The MCP entry answers `initialize` within 2 seconds again: only the compiled
   modules of the direct save are imported before stdio starts; `redis` and
   `database.py` are imported at the direct save.

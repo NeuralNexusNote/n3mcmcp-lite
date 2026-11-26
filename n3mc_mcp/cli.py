@@ -819,7 +819,9 @@ def _last_assistant_from_transcript(transcript_path, current_prompt):
         size = f.tell()
         f.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
         data = f.read()
-    lines = data.decode("utf-8", errors="replace").splitlines()
+    # JSONL lines end at LF (CRLF accepted). str.splitlines() would also cut at U+2028 / U+2029 / U+0085
+    # and the other Unicode line breaks, which JSON keeps unescaped inside a string.
+    lines = [ln.decode("utf-8", errors="replace").rstrip("\r") for ln in data.split(b"\n")]
     first = True
 
     def text_of(content):
@@ -1499,8 +1501,10 @@ def main(argv=None) -> int:
         args = {} if a.limit is None else {"limit": a.limit}
         text, code = _tool_via_server(cfg, "list_memories", args)
     elif a.recall_thread is not None:
-        text, code = _tool_via_server(cfg, "recall_thread",
-                                      {"turn_id": a.recall_thread, "before": a.before, "after": a.after})
+        args = {"turn_id": a.recall_thread, "before": a.before, "after": a.after}
+        if a.session_id:
+            args["session_id"] = a.session_id
+        text, code = _tool_via_server(cfg, "recall_thread", args)
     elif a.delete is not None:
         text, code = _tool_via_server(cfg, "delete_memory", {"id": a.delete})
     elif a.delete_session is not None:

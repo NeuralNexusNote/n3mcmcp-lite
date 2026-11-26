@@ -29,10 +29,6 @@ DEFAULTS = {
     "search_query_max_chars": 2000,
     "chunk_threshold": 400,
     "chunk_overlap": 100,
-    "access_count_enabled": False,
-    "access_count_weight": 0.02,
-    "access_count_max_boost": 0.5,
-    "ttl_refresh_top_k": 5,
     "lexical_rerank_enabled": True,
     "rerank_weight": 0.3,
     "rerank_phrase_weight": 0.2,
@@ -55,13 +51,10 @@ _RANGES = {
     "search_query_max_chars": ("int", 1, None, True),
     "embedding_dim": ("int", 1, None, True),
     "chunk_threshold": ("int", 50, None, True),
-    "ttl_refresh_top_k": ("int", 0, None, True),
     "version_min_chars": ("int", 0, None, True),
     "min_results": ("int", 0, None, True),
     "half_life_days": ("num", 0, None, False),
     "bm25_min_threshold": ("num", 0, None, True),
-    "access_count_weight": ("num", 0, None, True),
-    "access_count_max_boost": ("num", 0, None, True),
     "rerank_weight": ("num", 0, None, True),
     "rerank_phrase_weight": ("num", 0, None, True),
     "min_score": ("num", 0, 1, True),
@@ -75,7 +68,8 @@ _RANGES = {
 }
 
 # Keys of earlier versions that are read and ignored (§6).
-IGNORED_KEYS = ("dedup_threshold", "context_char_limit", "ttl_refresh_on_search")
+IGNORED_KEYS = ("dedup_threshold", "context_char_limit", "ttl_refresh_on_search", "ttl_refresh_top_k",
+                "access_count_enabled", "access_count_weight", "access_count_max_boost")
 
 
 def _is_number(v) -> bool:

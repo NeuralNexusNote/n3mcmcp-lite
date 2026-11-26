@@ -191,7 +191,10 @@ TOOLS = [
             "before and after in chronological order. "
             "Use this when a search_memory hit lacks enough context: pass the "
             "hit's turn_id here to surface the surrounding conversation thread. "
-            "Returns {status:'not_found'} if turn_id is unknown."
+            "Only entries of the session of that turn are returned. "
+            "Returns {status:'not_found'} if turn_id is unknown, and "
+            "{status:'ambiguous', session_ids} if the turn_id is in several "
+            "sessions: call again with one of them as session_id."
         ),
         inputSchema={
             "type": "object",
@@ -199,6 +202,10 @@ TOOLS = [
                 "turn_id": {
                     "type": "string",
                     "description": "The turn_id from a search_memory result.",
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional. The session of the turn, when the same turn_id is in several sessions.",
                 },
                 "before": {
                     "type": "integer",
