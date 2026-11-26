@@ -10,6 +10,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Changed
+- **The default `vector_min_cos` is 0.83 (was 0.85).** With
+  `multilingual-e5-base`, the right record of a paraphrased question often
+  sits at cosine 0.83–0.85 and was shown only as a weak match; at 0.80 and
+  below, unrelated rows increase sharply. A new `config.json` gets 0.83. A
+  `config.json` written by an earlier version already holds
+  `"vector_min_cos": 0.85` and keeps it: change it to 0.83 by hand and
+  restart the MCP client (or stop the server with `n3mc-lite --stop-server`).
+- **`recall_thread` lists only the session of the turn.** Rows of other
+  sessions that were saved at the same time (another Claude Code window, the
+  desktop app) no longer appear between the rows of the turn, and they are not
+  counted in `before` / `after`. A new optional argument `session_id` (CLI:
+  `--session-id`) chooses the session when the same `turn_id` is in several
+  sessions; without it, such a `turn_id` returns
+  `{"status": "ambiguous", "turn_id", "session_ids", "reason"}` instead of
+  merging the sessions.
+- **A search writes nothing to a record.** `access_count` is no longer
+  incremented on search hits, and the frequency boost is removed (`b_local`
+  is the stored importance). Writing to a record made RediSearch index it
+  again, and the stale index entries lowered the BM25 of the records that were
+  found often, down to 0, until the index's garbage collector ran. The
+  settings `access_count_enabled`, `access_count_weight`,
+  `access_count_max_boost` and `ttl_refresh_top_k` are removed; a value left
+  in an existing `config.json` is ignored. The default ranking does not change
+  (the boost was off by default).
 - The specification's "What changed in v2.0.0" table also lists three
   changes that v1.12.2 users see: a search no longer extends a TTL, the
   full-text index field is `content_fts` (the index is created again once),
@@ -19,11 +43,54 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   work.
 
 ### Fixed
+- Deleting a parent document (`delete_memory`, `delete_memories_by_session`)
+  also deleted a Redis key named `__n3mc_none__` when one existed. The guard
+  of the parent is now deleted by a script that receives only the guard key,
+  and only when it holds the parent's id.
+- The hook did not recover Claude's previous reply from the transcript when
+  the reply contained a raw U+2028, U+2029 or U+0085: the transcript was split
+  with `str.splitlines()`, which also cuts at these characters. Lines are now
+  split at LF only (CRLF accepted).
 - The MCP entry answers `initialize` within 2 seconds again: only the compiled
   modules of the direct save are imported before stdio starts; `redis` and
   `database.py` are imported at the direct save.
 - Four errors in the specification (the regular expression of §12.9, the SCAN
   description of §3.12, the test list of §2, the import order of §4.6).
+- The specification states the success answer of `delete_memory`
+  (`{"status": "deleted", "id", "chunks_deleted"}` for a parent document,
+  `{"status": "deleted", "id"}` otherwise, as in 1.x), and no longer says that
+  any body up to 19 characters over `chunk_threshold` gives one chunk: that
+  holds only when the rest after the cut at a soft break is shorter than 20
+  characters.
+- The code and the tests are generated again from the specification.
+- **The plugin `n3mc-workingmemory` registers the MCP server in Claude Code
+  again, as in v1.12.2 and v2.0.0** (v2.0.2 had changed it to register the
+  hooks only). Claude Code can use MCP, the hooks (`n3mc-lite --init`), or
+  both. `n3mc-lite --init` registers the hooks also while the plugin is
+  enabled and never removes an MCP registration. Method A registers both the
+  hooks and the MCP entry in Claude Code (`claude mcp add`), and no longer adds
+  `mcp__n3mc-workingmemory` to `permissions.deny`. The self-evaluation (§10)
+  runs items 1–6 through the MCP tools of the restarted Claude Code session;
+  when the tools are missing, the AI asks for a restart instead of switching
+  to the CLI. The hook checks (§10 items 7–9) are no longer part of the
+  self-evaluation (the pytest suite covers the hooks' code), and the
+  cross-session test of Appendix B Phase 2 runs through the MCP tools. The plugin `n3mc-workingmemory-mcp` is removed from the
+  marketplace. The specification and the README say the same.
+- `n3mc-lite --buffer` whose request times out saves the entry directly, as
+  the specification says, instead of printing `Error: unknown tool
+  'save_memory'`. Smaller differences from the specification are fixed too
+  (the reason text of a timeout, a failed `/repair` logged, `--stop` deleting
+  only `turn_id_*.txt`, the MCP entry keeping the `agent_name` it is given,
+  `redis_url_mismatch` cleared only when the server reports the same Redis).
+- The specification no longer contradicts itself on the `list_memories`
+  limit 0 (20, as in 1.x), the exit status of `--stop-server`, the final
+  message of `--init`, and whether Claude Code has the MCP tools (§13).
+- §10 item 10 deletes the `server_start_failed` marker left by its step 5
+  before step 6 checks that the next CLI call starts the server again (the
+  marker holds the start for 5 minutes).
+- A Redis URL with the host `localhost` no longer costs about 2 seconds per new
+  connection on Windows: `localhost` is tried on `127.0.0.1` first (Windows
+  tries `::1` first, and the Redis container listens on `127.0.0.1` only).
 - Lowering only `chunk_threshold` to 100 or less no longer reports a
   `config_type` notice about `chunk_overlap` on every start; the missing
   `chunk_overlap` is written as the value in effect.

@@ -1,140 +1,169 @@
-"""The resident FastAPI server (spec §3.15, §4.5): /health /shutdown /buffer /search /repair
-/tools/{name}. Endpoints that touch Redis or the model are plain `def` (run in the thread pool)."""
-import contextlib
+"""The resident FastAPI server: /health /shutdown /buffer /search /repair /tools/{name} (spec §3.15, §4.5)."""
+import json
 import os
 import threading
-from typing import Any
+from contextlib import asynccontextmanager
 
 import redis
-from fastapi import Body, FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import config as _config
-from . import paths
-from . import processor as P
-from .tools import ToolRunner, _NUDGE_GENERIC
+from . import context, paths, processor
+from .config import backend_hint
+from .tools import TimeBoundError, ToolRunner
 
 
-def _exit_process() -> None:
-    """End the server process (tests replace this)."""
+def _exit_process():
     os._exit(0)
 
 
-def remove_pid_file_if_own(pid: int = None) -> None:
-    pid = os.getpid() if pid is None else pid
-    path = paths.pid_path()
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-    except OSError:
-        return
-    if content == str(pid):
+class NoticeBoard:
+    """The notices shown on the first successful search: the process notices of cfg["_notices"] once per
+    server process, then the notices.json notices due today (§3.15)."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._lock = threading.Lock()
+        self._shown = set()
+
+    def take(self):
+        with self._lock:
+            out = []
+            for n in list(self.cfg.get("_notices") or []):
+                if n not in self._shown:
+                    self._shown.add(n)
+                    out.append(n)
         try:
-            os.unlink(path)
-        except OSError:
+            from .cli import take_due_notices
+            out.extend(take_due_notices())
+        except Exception:  # noqa: BLE001
             pass
+        return out
 
 
-def create_app(cfg: dict, db, code_version: str, port: int = None, load_model: bool = True) -> FastAPI:
-    port = int(port if port is not None else cfg.get("server_port", 18524))
-    root = os.path.normcase(os.path.abspath(paths.data_dir()))
-    runner = ToolRunner(cfg, db)
+def create_app(cfg, db, code_version, port=None, root=None):
+    port = int(port if port is not None else cfg["server_port"])
+    root = root or paths.data_dir()
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    board = NoticeBoard(cfg)
+    runner = ToolRunner(cfg, db, notices=board.take)
+    repair_lock = threading.Lock()
 
-    @contextlib.asynccontextmanager
+    @asynccontextmanager
     async def lifespan(_app):
-        if load_model:
-            P.start_background_load(cfg)
+        processor.start_background_load()
         yield
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.cfg = cfg
     app.state.db = db
     app.state.runner = runner
-    app.state.code_version = code_version
-    app.state.root = root
+    app.state.board = board
+    app.state.exit = _exit_process
 
     @app.middleware("http")
-    async def _guard(request: Request, call_next):
-        host = request.headers.get("host", "")
-        if host not in allowed_hosts or "origin" in request.headers:
+    async def guard(request: Request, call_next):
+        if request.headers.get("host", "") not in allowed_hosts or "origin" in request.headers:
             return JSONResponse({"detail": "forbidden"}, status_code=403)
         return await call_next(request)
 
     @app.get("/health")
     async def health():
+        from .config import redis_display
         return {"status": "ok", "root": root, "code_version": code_version, "pid": os.getpid(),
-                "redis": _config.redis_display(db.url)}
+                "redis": redis_display(cfg.get("redis_url"))}
 
     @app.post("/shutdown")
-    async def shutdown(payload: Any = Body(default=None)):
-        given = payload.get("root") if isinstance(payload, dict) else None
-        if not isinstance(given, str) or os.path.normcase(os.path.abspath(given)) != root:
+    async def shutdown(request: Request):
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        want = body.get("root") if isinstance(body, dict) else None
+        if not isinstance(want, str) or os.path.normcase(os.path.abspath(want)) != os.path.normcase(os.path.abspath(root)):
             return JSONResponse({"detail": "not this server's data folder"}, status_code=403)
 
-        def _later():
+        def later():
+            from .cli import remove_pid_file_if_own
             remove_pid_file_if_own()
-            _exit_process()
+            app.state.exit()
 
-        threading.Timer(0.3, _later).start()
+        threading.Timer(0.3, later).start()
         return {"status": "ok"}
 
-    @app.post("/buffer")
-    def buffer(payload: Any = Body(default=None)):
-        body = payload if isinstance(payload, dict) else {}
-        body = P.sanitize_surrogates(body)
-        status = db.ensure_connected()
-        if status != "ok":
-            return JSONResponse({"status": "error", "saved": False, "reason": status}, status_code=503)
-        role = body.get("role")
-        if role not in ("user", "claude"):
-            role = None
+    async def _body(request: Request):
         try:
-            res = db.save_memory(body.get("content"), agent_name=body.get("agent_name") or "claude-code",
-                                 session_id=body.get("session_id"), turn_id=body.get("turn_id") or "",
-                                 role=role, no_model_wait=bool(body.get("no_model_wait")))
-        except (redis.ConnectionError, redis.TimeoutError):
-            db.mark_down()
-            return JSONResponse({"status": "error", "saved": False, "reason": db.hint()}, status_code=503)
-        return res
+            data = json.loads((await request.body()).decode("utf-8", errors="surrogatepass") or "{}")
+        except Exception:  # noqa: BLE001
+            return {}
+        return data if isinstance(data, dict) else {}
 
-    @app.post("/search")
-    def search(payload: Any = Body(default=None)):
-        body = payload if isinstance(payload, dict) else {}
-        body = P.sanitize_surrogates(body)
-        status = db.ensure_connected()
-        if status != "ok":
-            return JSONResponse({"detail": status}, status_code=503)
+    def _connected():
+        return db.ensure_connected()
+
+    def buffer_sync(body):
+        check = _connected()
+        if check != "ok":
+            return JSONResponse({"status": "error", "saved": False, "reason": check}, status_code=503)
+        role = body.get("role") if body.get("role") in ("user", "claude") else None
+        try:
+            r = db.save_memory(body.get("content"), agent_name=body.get("agent_name"),
+                               session_id=body.get("session_id"), turn_id=body.get("turn_id"), role=role,
+                               no_model_wait=bool(body.get("no_model_wait")))
+        except (redis.ConnectionError, redis.TimeoutError):
+            db.mark_disconnected()
+            return JSONResponse({"status": "error", "saved": False, "reason": backend_hint(db.url)}, status_code=503)
+        return r
+
+    def search_sync(body):
+        check = _connected()
+        if check != "ok":
+            return JSONResponse({"detail": check}, status_code=503)
         max_chars = body.get("max_chars")
         if not isinstance(max_chars, int) or isinstance(max_chars, bool):
             max_chars = None
+        q = body.get("query") if isinstance(body.get("query"), str) else ""
+        head = context.hook_head(q, int(cfg.get("search_query_max_chars", 2000)))
+        args = {k: body.get(k) for k in ("query", "session_id", "since", "until", "limit")}
         try:
-            text = runner.search_block(body, max_chars=max_chars, wait_model=not body.get("no_model_wait"))
-        except P.TimeBoundError as e:
+            text = runner.search_text(args, head=head, tail="", max_chars=max_chars,
+                                      no_model_wait=bool(body.get("no_model_wait")))
+        except TimeBoundError as e:
             return JSONResponse({"detail": str(e)}, status_code=400)
         except (redis.ConnectionError, redis.TimeoutError):
-            db.mark_down()
-            return JSONResponse({"detail": db.hint()}, status_code=503)
+            db.mark_disconnected()
+            return JSONResponse({"detail": backend_hint(db.url)}, status_code=503)
         return {"text": text}
+
+    def repair_sync():
+        if not repair_lock.acquire(blocking=False):
+            return {"status": "ok", "message": "repair already running", "reembedded": 0, "remaining": 0}
+        try:
+            check = _connected()
+            if check != "ok":
+                return JSONResponse({"status": "error", "message": check}, status_code=503)
+            try:
+                return db.repair(no_model_wait=True)
+            except (redis.ConnectionError, redis.TimeoutError):
+                db.mark_disconnected()
+                return JSONResponse({"status": "error", "message": backend_hint(db.url)}, status_code=503)
+        finally:
+            repair_lock.release()
+
+    @app.post("/buffer")
+    def buffer(body: dict = Depends(_body)):
+        return buffer_sync(body)
+
+    @app.post("/search")
+    def search(body: dict = Depends(_body)):
+        return search_sync(body)
 
     @app.post("/repair")
-    def repair(payload: Any = Body(default=None)):
-        status = db.ensure_connected()
-        if status != "ok":
-            return JSONResponse({"status": "error", "message": status}, status_code=503)
-        try:
-            return runner.repair()
-        except (redis.ConnectionError, redis.TimeoutError):
-            db.mark_down()
-            return JSONResponse({"status": "error", "message": db.hint()}, status_code=503)
+    def repair():
+        return repair_sync()
 
     @app.post("/tools/{name}")
-    def tools(name: str, nudge: int = 1, payload: Any = Body(default=None)):
-        args = payload if isinstance(payload, dict) else {}
-        text = runner.call(name, args, nudge=bool(nudge))
-        return {"text": text}
+    def tools(name: str, nudge: int = 1, body: dict = Depends(_body)):
+        return {"text": runner.call(name, body, nudge=bool(nudge))}
 
     return app
-
-
-__all__ = ["create_app", "remove_pid_file_if_own", "_exit_process", "_NUDGE_GENERIC"]

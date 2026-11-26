@@ -1,15 +1,15 @@
-"""config.json: load, validate, create exclusively, complete atomically, migrate once (spec §6, §7).
-Also the code_version of the resident server (§3.15) and the Redis display helpers."""
+"""config.json: load, validate, create exclusively, fill, migrate (spec §6, §7); code_version (§3.15);
+the Redis location texts (§3.9, §3.15)."""
 import hashlib
 import json
 import math
 import os
+import shutil
 import sys
 import tempfile
-import threading
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlparse
 
 from . import paths
 
@@ -20,7 +20,7 @@ DEFAULTS = {
     "bm25_min_threshold": 0.1,
     "search_result_limit": 20,
     "min_score": 0.2,
-    "vector_min_cos": 0.85,
+    "vector_min_cos": 0.83,
     "relative_min_score_ratio": 0.6,
     "min_results": 3,
     "version_order_enabled": True,
@@ -29,10 +29,6 @@ DEFAULTS = {
     "search_query_max_chars": 2000,
     "chunk_threshold": 400,
     "chunk_overlap": 100,
-    "access_count_enabled": False,
-    "access_count_weight": 0.02,
-    "access_count_max_boost": 0.5,
-    "ttl_refresh_top_k": 5,
     "lexical_rerank_enabled": True,
     "rerank_weight": 0.3,
     "rerank_phrase_weight": 0.2,
@@ -46,21 +42,19 @@ DEFAULTS = {
     "context_max_chars": 9500,
 }
 
-# key -> (kind, low, high, low_inclusive)   kind: "int" | "num"
+ID_KEYS = ("owner_id", "local_id")
+
+# key -> (kind, low, high, low_inclusive); kind "int" = JSON integer, "num" = any number
 _RANGES = {
     "ttl_seconds": ("int", 1, None, True),
     "search_result_limit": ("int", 1, None, True),
     "search_query_max_chars": ("int", 1, None, True),
     "embedding_dim": ("int", 1, None, True),
     "chunk_threshold": ("int", 50, None, True),
-    "chunk_overlap": ("int", 0, None, True),
-    "ttl_refresh_top_k": ("int", 0, None, True),
     "version_min_chars": ("int", 0, None, True),
     "min_results": ("int", 0, None, True),
     "half_life_days": ("num", 0, None, False),
     "bm25_min_threshold": ("num", 0, None, True),
-    "access_count_weight": ("num", 0, None, True),
-    "access_count_max_boost": ("num", 0, None, True),
     "rerank_weight": ("num", 0, None, True),
     "rerank_phrase_weight": ("num", 0, None, True),
     "min_score": ("num", 0, 1, True),
@@ -73,106 +67,105 @@ _RANGES = {
     "context_max_chars": ("int", 2000, 10000, True),
 }
 
-# The in-process notices (cfg["_notices"]) and their "shown" set are changed under this lock (§3.15).
-NOTICE_LOCK = threading.Lock()
-
-CODE_FILES = ("app.py", "tools.py", "tooldefs.py", "instructions.py", "context.py", "database.py",
-              "processor.py", "config.py", "paths.py", "cli.py")
+# Keys of earlier versions that are read and ignored (§6).
+IGNORED_KEYS = ("dedup_threshold", "context_char_limit", "ttl_refresh_on_search", "ttl_refresh_top_k",
+                "access_count_enabled", "access_count_weight", "access_count_max_boost")
 
 
-def _is_int(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
-def _is_num(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def config_value_ok(key, value, chunk_threshold=None) -> bool:
-    """Type and range check of one config.json value (§6). Unknown keys and the ids pass."""
+    """Type and range check of one config key (§6). Keys without a default are not checked."""
     if key not in DEFAULTS:
         return True
     default = DEFAULTS[key]
+    if key == "chunk_overlap":
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return False
+        thr = chunk_threshold if chunk_threshold is not None else DEFAULTS["chunk_threshold"]
+        return value < thr
     if isinstance(default, bool):
         return isinstance(value, bool)
     if isinstance(default, str):
         return isinstance(value, str)
     rng = _RANGES.get(key)
     if rng is None:
-        return _is_num(value)
+        return _is_number(value)
     kind, low, high, low_incl = rng
-    if kind == "int" and not _is_int(value):
-        return False
-    if kind == "num" and not _is_num(value):
-        return False
-    if low is not None:
-        if low_incl and value < low:
+    if kind == "int":
+        if not isinstance(value, int) or isinstance(value, bool):
             return False
-        if not low_incl and value <= low:
+    else:
+        if not _is_number(value) or (isinstance(value, float) and not math.isfinite(value)):
             return False
+    if low is not None and (value < low if low_incl else value <= low):
+        return False
     if high is not None and value > high:
         return False
-    if key == "chunk_overlap":
-        ct = DEFAULTS["chunk_threshold"] if chunk_threshold is None else chunk_threshold
-        if value >= ct:
-            return False
     return True
 
 
-def _fill_defaults(data: dict) -> None:
-    """Fill the missing fields with their defaults (§6). A missing chunk_overlap is written as the value
-    in effect: the default 100 is not below a chunk_threshold of 100 or less, and writing it would make
-    every later start report a chunk_overlap the user never wrote."""
-    ct = data.get("chunk_threshold", DEFAULTS["chunk_threshold"])
-    if not config_value_ok("chunk_threshold", ct):
-        ct = DEFAULTS["chunk_threshold"]
-    for k in DEFAULTS:
-        if k in data:
-            continue
-        v = DEFAULTS[k]
-        if k == "chunk_overlap" and v >= ct:
-            v = ct // 4
-        data[k] = v
+# ── Reading and writing the file ─────────────────────────────────────────────
 
-
-def _read_bytes_retry(path: str) -> bytes:
+def _read_bytes(path):
+    """Read a file; on Windows retry a PermissionError every 0.05 s for up to 1 s."""
     deadline = time.monotonic() + 1.0
     while True:
         try:
             with open(path, "rb") as f:
                 return f.read()
         except PermissionError:
-            if os.name != "nt" or time.monotonic() >= deadline:
+            if os.name != "nt" or time.monotonic() > deadline:
                 raise
             time.sleep(0.05)
 
 
-def _parse(raw: bytes):
-    """(dict, None) or (None, reason)."""
-    try:
-        data = json.loads(raw.decode("utf-8-sig"))
-    except (UnicodeDecodeError, ValueError) as e:
-        return None, f"{type(e).__name__}: {e}"
-    if not isinstance(data, dict):
-        return None, "the top level is not a JSON object"
-    return data, None
+def _replace(tmp, path):
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _dump(data: dict) -> bytes:
     return (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def _write_tmp(folder: str, content: bytes) -> str:
-    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=folder)
+def _write_tmp(folder, data: bytes) -> str:
+    fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=folder)
     with os.fdopen(fd, "wb") as f:
-        f.write(content)
+        f.write(data)
     return tmp
 
 
-def _create_exclusive(path: str, content: bytes) -> bool:
-    """Create `path` with `content` only if it does not exist. True if this call created it."""
-    folder = os.path.dirname(path)
-    tmp = _write_tmp(folder, content)
+def atomic_write(path, data: bytes):
+    """Update: write a temporary file in the same folder, then os.replace."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    tmp = _write_tmp(folder, data)
+    try:
+        _replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def create_exclusive(path, data: bytes) -> bool:
+    """Create path only if it does not exist (temporary file + os.link, else open "x").
+    Returns False when another process created it first."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    tmp = _write_tmp(folder, data)
     try:
         try:
             os.link(tmp, path)
@@ -182,235 +175,242 @@ def _create_exclusive(path: str, content: bytes) -> bool:
         except (OSError, NotImplementedError, AttributeError):
             try:
                 with open(path, "xb") as f:
-                    f.write(content)
+                    f.write(data)
                 return True
             except FileExistsError:
                 return False
     finally:
         try:
-            os.unlink(tmp)
+            os.remove(tmp)
         except OSError:
             pass
 
 
-def _replace_atomic(path: str, content: bytes) -> None:
-    tmp = _write_tmp(os.path.dirname(path), content)
+def _parse(data: bytes):
+    """(dict, None) or (None, reason)."""
     try:
-        paths.replace_with_retry(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        obj = json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, ValueError) as e:
+        return None, f"{type(e).__name__}: {e}"
+    if not isinstance(obj, dict):
+        return None, "the top level is not a JSON object"
+    return obj, None
 
 
-def _read_winner(path: str):
-    """After losing the exclusive create: read the other process's file (retry up to 2 s)."""
-    deadline = time.monotonic() + 2.0
+def _new_ids():
+    return {"owner_id": str(uuid.uuid4()), "local_id": str(uuid.uuid4())}
+
+
+def _lock_path(path):
+    return path + ".lock"
+
+
+def _acquire_lock(path) -> bool:
+    lock = _lock_path(path)
+    deadline = time.monotonic() + 10.0
     while True:
         try:
-            raw = _read_bytes_retry(path)
-            data, _ = _parse(raw)
-            if data is not None:
-                return raw, data
-        except OSError:
-            pass
-        if time.monotonic() >= deadline:
-            return None, None
-        time.sleep(0.1)
-
-
-class _IdLock:
-    """config.json.lock: open(..., "x"), retry every 0.05 s for up to 10 s; older than 10 s is stale."""
-
-    def __init__(self, path: str):
-        self.path = path + ".lock"
-        self.held = False
-
-    def __enter__(self):
-        deadline = time.monotonic() + 10.0
-        while True:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
             try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                self.held = True
-                return self
-            except FileExistsError:
-                try:
-                    if time.time() - os.path.getmtime(self.path) > 10.0:
-                        os.unlink(self.path)
-                        continue
-                except OSError:
-                    pass
-            except OSError:
-                return self
-            if time.monotonic() >= deadline:
-                return self
-            time.sleep(0.05)
-
-    def __exit__(self, *exc):
-        if self.held:
-            try:
-                os.unlink(self.path)
+                if time.time() - os.path.getmtime(lock) > 10.0:
+                    os.remove(lock)
+                    continue
             except OSError:
                 pass
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.05)
+        except OSError:
+            return False
 
 
-def _migrate_legacy(path: str) -> None:
-    """One-time copy of the pre-1.7 config.json (§7), with the exclusive-create rule."""
-    if os.environ.get("N3MC_DATA_DIR"):
+def _release_lock(path):
+    try:
+        os.remove(_lock_path(path))
+    except OSError:
+        pass
+
+
+def _migrate_legacy(path, notices):
+    """Copy the 1.6.x config (platformdirs) to the new folder, byte for byte, once (§7)."""
+    if os.environ.get("N3MC_DATA_DIR", "").strip():
         return
     legacy = paths.legacy_config_path()
     if not legacy or not os.path.isfile(legacy):
         return
     try:
-        raw = _read_bytes_retry(legacy)
+        data = _read_bytes(legacy)
     except OSError:
         return
-    if _create_exclusive(path, raw):
-        print(f"n3mc-lite: copied the configuration from {legacy} to {path}", file=sys.stderr)
+    if create_exclusive(path, data):
+        print(f"[n3mc-lite] copied the settings from {legacy} to {path} (the old file was kept)",
+              file=sys.stderr)
 
 
-def load_config() -> dict:
-    """Load (create) config.json. Never overwrites a file the user broke (§6)."""
-    notices = []
-    path = paths.config_path()
-    paths.ensure_data_dir()
-    if not os.path.exists(path):
-        _migrate_legacy(path)
-    raw = None
-    data = None
-    unreadable_reason = None
-    if not os.path.exists(path):
-        fresh = {"owner_id": str(uuid.uuid4()), "local_id": str(uuid.uuid4())}
-        fresh.update(DEFAULTS)
-        content = _dump(fresh)
-        if _create_exclusive(path, content):
-            raw, data = content, fresh
-        else:
-            raw, data = _read_winner(path)
-            if data is None:
-                try:
-                    raw = _read_bytes_retry(path)
-                except OSError:
-                    raw = None
-                unreadable_reason = "it is not valid JSON"
-    if data is None and unreadable_reason is None:
+def _create_new(path):
+    """Create the missing file with defaults and new ids; if another process wins, read its file."""
+    data = dict(_new_ids())
+    data.update(DEFAULTS)
+    raw = _dump(data)
+    if create_exclusive(path, raw):
+        return raw
+    deadline = time.monotonic() + 2.0
+    while True:
         try:
-            raw = _read_bytes_retry(path)
-            data, unreadable_reason = _parse(raw)
-        except OSError as e:
-            raw = None
-            unreadable_reason = f"{type(e).__name__}: {e}"
+            raw = _read_bytes(path)
+            obj, _err = _parse(raw)
+            if obj is not None or time.monotonic() > deadline:
+                return raw
+        except OSError:
+            if time.monotonic() > deadline:
+                raise
+        time.sleep(0.1)
 
-    cfg = dict(DEFAULTS)
-    cfg["_path"] = path
-    cfg["_unreadable"] = False
-    if data is None:
-        cfg["_unreadable"] = True
-        cfg["owner_id"] = str(uuid.uuid4())
-        cfg["local_id"] = str(uuid.uuid4())
-        notices.append(f"config_unreadable: {path} could not be read ({unreadable_reason}), so the "
-                       "default settings and a temporary owner_id are used and the file was left "
-                       "unchanged. Fix the file; the memory server restarts after config.json changes.")
+
+def _fill_ids(path, notices):
+    """Add the missing owner_id / local_id under config.json.lock (§6). Returns (obj, raw)."""
+    got = _acquire_lock(path)
+    try:
+        raw = _read_bytes(path)
+        obj, err = _parse(raw)
+        if obj is None:
+            return None, raw
+        if all(isinstance(obj.get(k), str) and obj.get(k) for k in ID_KEYS):
+            return obj, raw
+        ids = _new_ids()
+        for k in ID_KEYS:
+            if not (isinstance(obj.get(k), str) and obj.get(k)):
+                obj[k] = ids[k]
+        new_raw = _dump(obj)
+        try:
+            atomic_write(path, new_raw)
+            return obj, new_raw
+        except OSError as e:
+            notices.append(f"config_unreadable: {path} could not be updated ({type(e).__name__}: {e}); "
+                           "this run uses temporary ids.")
+            return obj, raw
+    finally:
+        if got:
+            _release_lock(path)
+
+
+def load_config(path=None) -> dict:
+    """Load config.json (§6). The returned dict holds the effective values, plus:
+    _notices (list of "key: message" strings), _config_path, _config_bytes (the bytes used, for
+    code_version), _config_unreadable (bool)."""
+    path = path or paths.config_path()
+    notices = []
+    unreadable = False
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    except OSError:
+        pass
+    if not os.path.exists(path):
+        _migrate_legacy(path, notices)
+    raw = None
+    obj = None
+    if not os.path.exists(path):
+        try:
+            raw = _create_new(path)
+        except OSError as e:
+            notices.append(f"config_unreadable: {path} could not be created ({type(e).__name__}: {e}); "
+                           "the defaults and temporary ids are used.")
+            unreadable = True
+    if raw is None and not unreadable:
+        try:
+            raw = _read_bytes(path)
+        except OSError as e:
+            notices.append(f"config_unreadable: {path} could not be read ({type(e).__name__}: {e}); "
+                           "the defaults and a temporary owner_id are used, and the file was not changed.")
+            unreadable = True
+    if raw is not None and not unreadable:
+        obj, err = _parse(raw)
+        if obj is None:
+            notices.append(f"config_unreadable: {path} could not be read ({err}); the defaults and a "
+                           "temporary owner_id are used, and the file was not changed. Fix the file.")
+            unreadable = True
+    cfg = {}
+    if unreadable:
+        cfg.update(DEFAULTS)
+        cfg.update(_new_ids())
     else:
-        missing_ids = not (isinstance(data.get("owner_id"), str) and data.get("owner_id")) or \
-            not (isinstance(data.get("local_id"), str) and data.get("local_id"))
-        missing = [k for k in DEFAULTS if k not in data]
-        written = {k for k in DEFAULTS if k in data}   # the keys the user wrote (only these are checked)
-        if missing_ids or missing:
-            try:
-                if missing_ids:
-                    with _IdLock(path):
-                        raw2 = _read_bytes_retry(path)
-                        d2, _ = _parse(raw2)
-                        if d2 is not None:
-                            data, raw = d2, raw2
-                        for k in ("owner_id", "local_id"):
-                            if not (isinstance(data.get(k), str) and data.get(k)):
-                                data[k] = str(uuid.uuid4())
-                        _fill_defaults(data)
-                        content = _dump(data)
-                        _replace_atomic(path, content)
-                        raw = content
-                else:
-                    _fill_defaults(data)
-                    content = _dump(data)
-                    _replace_atomic(path, content)
-                    raw = content
-            except OSError as e:
-                print(f"n3mc-lite: could not update {path} ({type(e).__name__}: {e})", file=sys.stderr)
-                for k in ("owner_id", "local_id"):
-                    if not (isinstance(data.get(k), str) and data.get(k)):
-                        data[k] = str(uuid.uuid4())
+        missing_ids = not all(isinstance(obj.get(k), str) and obj.get(k) for k in ID_KEYS)
+        if missing_ids:
+            filled, raw2 = _fill_ids(path, notices)
+            if filled is not None:
+                obj, raw = filled, raw2
         bad = []
-        ct = data.get("chunk_threshold", DEFAULTS["chunk_threshold"])
-        if not config_value_ok("chunk_threshold", ct):
-            ct = DEFAULTS["chunk_threshold"]
-        for k in DEFAULTS:
-            if k not in data or k not in written:
+        for key, default in DEFAULTS.items():
+            if key == "chunk_overlap":
                 continue
-            v = data[k]
-            if config_value_ok(k, v, chunk_threshold=ct):
-                cfg[k] = v
+            if key in obj:
+                if config_value_ok(key, obj[key]):
+                    cfg[key] = obj[key]
+                else:
+                    bad.append(key)
+                    cfg[key] = default
             else:
-                bad.append(k)
-        cfg["chunk_threshold"] = ct
-        if cfg["chunk_overlap"] >= ct:
-            cfg["chunk_overlap"] = ct // 4
-        cfg["owner_id"] = data["owner_id"]
-        cfg["local_id"] = data["local_id"]
+                cfg[key] = default
+        thr = cfg["chunk_threshold"]
+        if "chunk_overlap" in obj:
+            if config_value_ok("chunk_overlap", obj["chunk_overlap"], chunk_threshold=thr):
+                cfg["chunk_overlap"] = obj["chunk_overlap"]
+            else:
+                bad.append("chunk_overlap")
+                cfg["chunk_overlap"] = DEFAULTS["chunk_overlap"] if DEFAULTS["chunk_overlap"] < thr else thr // 4
+        else:
+            cfg["chunk_overlap"] = DEFAULTS["chunk_overlap"] if DEFAULTS["chunk_overlap"] < thr else thr // 4
+        for k in ID_KEYS:
+            cfg[k] = obj.get(k) if isinstance(obj.get(k), str) and obj.get(k) else str(uuid.uuid4())
         if bad:
-            one = len(bad) == 1
-            notices.append(f"config_type: {path}: {', '.join(bad)} {'has' if one else 'have'} the wrong "
-                           f"type or a value out of range and {'was' if one else 'were'} ignored "
-                           "(the default is used).")
-    cfg["_raw"] = raw
-    env_url = os.environ.get("N3MC_REDIS_URL")
+            notices.append(f"config_type: {path}: {', '.join(bad)} had the wrong type or a value out of "
+                           "range and was ignored (the default is used). Fix the value in the file.")
+        missing = [k for k in DEFAULTS if k not in obj]
+        if missing:
+            fill = dict(obj)
+            for k in missing:
+                fill[k] = cfg[k]
+            new_raw = _dump(fill)
+            try:
+                atomic_write(path, new_raw)
+                raw = new_raw
+            except OSError as e:
+                print(f"[n3mc-lite] could not update {path}: {type(e).__name__}: {e}", file=sys.stderr)
+    env_url = os.environ.get("N3MC_REDIS_URL", "").strip()
     if env_url:
         cfg["redis_url"] = env_url
-    if cfg.get("bind_host") != "127.0.0.1":
-        pass  # the warning is printed by the server (§3.15)
-    cfg["_notices"] = []
-    cfg["_notices_shown"] = set()
+    cfg["_notices"] = notices
+    cfg["_config_path"] = path
+    cfg["_config_bytes"] = raw if (raw is not None) else None
+    cfg["_config_unreadable"] = unreadable
     for n in notices:
-        add_notice(cfg, n)
+        print(f"[n3mc-lite] {n}", file=sys.stderr)
     return cfg
 
 
-def add_notice(cfg: dict, message: str) -> None:
-    """Add an in-process notice (§6) and print it to stderr. Duplicates are kept once."""
-    with NOTICE_LOCK:
-        lst = cfg.setdefault("_notices", [])
-        if message in lst:
-            return
-        lst.append(message)
-    try:
-        print(f"N3MC notice: {message}", file=sys.stderr)
-    except Exception:  # noqa: BLE001
-        pass
+def public_config(cfg: dict) -> dict:
+    return {k: v for k, v in cfg.items() if not k.startswith("_")}
 
 
-def take_process_notices(cfg: dict) -> list:
-    """The in-process notices not yet shown; marks them as shown (one time per process)."""
-    with NOTICE_LOCK:
-        shown = cfg.setdefault("_notices_shown", set())
-        out = [n for n in cfg.get("_notices", []) if n not in shown]
-        shown.update(out)
-    return out
+# ── code_version (§3.15) ─────────────────────────────────────────────────────
+
+CODE_FILES = ("app.py", "tools.py", "tooldefs.py", "instructions.py", "context.py", "database.py",
+              "processor.py", "config.py", "paths.py", "cli.py")
 
 
-def config_unreadable_detail(cfg: dict) -> str:
-    return ("config.json could not be read, so this entry was saved under a temporary owner_id and "
-            f"will not be visible after the server restarts. Fix {cfg.get('_path')} and restart the "
-            "MCP client.")
+def _config_part(config_bytes) -> bytes:
+    if config_bytes is None:
+        return b""
+    obj, _err = _parse(config_bytes)
+    if obj is not None:
+        return json.dumps(obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return config_bytes
 
 
-# ── code_version (§3.15) ──────────────────────────────────────────────────────
-
-def compute_code_version(config_raw) -> str:
+def compute_code_version(config_bytes) -> str:
     h = hashlib.sha256()
     pkg = os.path.dirname(os.path.abspath(__file__))
     for name in CODE_FILES:
@@ -419,46 +419,53 @@ def compute_code_version(config_raw) -> str:
                 h.update(f.read())
         except OSError:
             pass
-    if config_raw is not None:
-        data, _ = _parse(config_raw)
-        if data is not None:
-            h.update(json.dumps(data, sort_keys=True).encode("utf-8"))
-        else:
-            h.update(config_raw)
+    h.update(_config_part(config_bytes))
     return h.hexdigest()[:16]
 
 
-# ── Redis display (§3.3, §3.15) ───────────────────────────────────────────────
+def current_config_bytes(path=None):
+    path = path or paths.config_path()
+    try:
+        return _read_bytes(path)
+    except OSError:
+        return None
+
+
+# ── The Redis location, without user name and password ──────────────────────
 
 UNPARSEABLE = "<unparseable redis_url>"
 
 
-def _hostport(url: str) -> str:
+def redis_display(url) -> str:
+    """host:port/db of a redis URL, or <unparseable redis_url> (never any part of the input)."""
     try:
-        p = urlsplit(url)
-        host = p.hostname or "localhost"
-        port = p.port or 6379
-        return f"{host}:{port}"
-    except Exception:  # noqa: BLE001
-        return UNPARSEABLE
-
-
-def redis_display(url: str) -> str:
-    """<host>:<port>/<db>, without user name and password."""
-    try:
-        p = urlsplit(url)
+        p = urlparse(str(url))
         host = p.hostname or "localhost"
         port = p.port or 6379
         db = (p.path or "/0").lstrip("/") or "0"
-        if not db.isdigit():
-            return UNPARSEABLE
+        int(db)
         return f"{host}:{port}/{db}"
     except Exception:  # noqa: BLE001
         return UNPARSEABLE
 
 
-def backend_hint(url: str) -> str:
-    return (f"Redis Stack is not reachable at {_hostport(url)}. If Docker itself is not running, start "
-            "Docker (Docker Desktop) first. Then run: docker start redis-stack (first time: docker run -d "
-            "--name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest). The memory "
-            "server reconnects automatically — no restart needed; just retry.")
+def hostport(url) -> str:
+    try:
+        p = urlparse(str(url))
+        return f"{p.hostname or 'localhost'}:{p.port or 6379}"
+    except Exception:  # noqa: BLE001
+        return UNPARSEABLE
+
+
+DOCKER_RUN = "docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest"
+
+
+def backend_hint(url) -> str:
+    return (f"Redis Stack is not reachable at {hostport(url)}. If Docker itself is not running, start "
+            f"Docker (Docker Desktop) first. Then run: docker start redis-stack (first time: {DOCKER_RUN}). "
+            "The memory server reconnects automatically — no restart needed; just retry.")
+
+
+def no_search_hint(url, reason) -> str:
+    return (f"The Redis at {hostport(url)} does not provide RediSearch (FT.CREATE failed: {reason}). "
+            f"N3MC Lite needs Redis Stack, not plain Redis: {DOCKER_RUN}")

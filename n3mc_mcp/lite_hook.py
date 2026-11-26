@@ -1,5 +1,4 @@
-"""UserPromptSubmit hook entry (spec §12.1): audit.log first, then `python -m n3mc_mcp.cli
---hook-submit` with the same stdin. Always exits 0."""
+"""UserPromptSubmit hook entry: audit.log first, then `python -m n3mc_mcp.cli --hook-submit` (spec §12.1)."""
 import os as _os
 import sys as _sys
 
@@ -29,53 +28,52 @@ import subprocess  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
 
-from n3mc_mcp import paths  # noqa: E402
-from n3mc_mcp.processor import sanitize_surrogates  # noqa: E402
-
 CHILD_TIMEOUT = 55
 HOOK_NAME = "UserPromptSubmit"
-STEPS = (["--hook-submit"],)
 
 
-def read_stdin_bytes() -> bytes:
+def read_stdin() -> str:
     try:
-        return sys.stdin.buffer.read()
+        return sys.stdin.buffer.read().decode("utf-8", errors="surrogateescape")
     except Exception:  # noqa: BLE001
         try:
-            return sys.stdin.read().encode("utf-8", "surrogateescape")
+            return sys.stdin.read()
         except Exception:  # noqa: BLE001
-            return b""
+            return ""
 
 
-def audit_first(hook: str, data: bytes) -> None:
-    """Step 0: the audit record, before anything else (§12.2)."""
+def audit_first(hook_name: str, raw: str):
+    """Step 0: the audit record, before anything else (§12.2). Never raises."""
     try:
-        raw = sanitize_surrogates(data.decode("utf-8", "surrogateescape"))
+        from n3mc_mcp import paths
         try:
-            payload = sanitize_surrogates(json.loads(raw))
+            payload = json.loads(raw)
         except ValueError:
             payload = {"raw": raw}
-        paths.append_audit({"ts": paths.utc_now_iso(), "hook": hook, "raw": raw[:4096], "payload": payload})
+        paths.append_audit({"ts": paths.utc_now_iso(), "hook": hook_name, "raw": raw[:4096], "payload": payload})
     except Exception as e:  # noqa: BLE001
         try:
-            print(f"n3mc-lite: could not write audit.log ({type(e).__name__}: {e})", file=sys.stderr)
+            print(f"[n3mc-lite] audit.log: {type(e).__name__}: {e}", file=sys.stderr)
         except Exception:  # noqa: BLE001
             pass
 
 
-def run_step(args, data: bytes, deadline: float) -> None:
-    remaining = max(1.0, deadline - time.monotonic())
+def run_step(args, raw: str, deadline: float, forward_stdout: bool) -> None:
+    """One synchronous child step with the remaining share of CHILD_TIMEOUT (at least 1 s)."""
+    from n3mc_mcp.paths import python_cmd
+    timeout = max(1.0, deadline - time.monotonic())
     out = b""
     try:
-        r = subprocess.run([*paths.python_cmd(), "-m", "n3mc_mcp.cli", *args], input=data,
-                           stdout=subprocess.PIPE, timeout=remaining)
-        out = r.stdout or b""
+        cp = subprocess.run([*python_cmd(), "-m", "n3mc_mcp.cli", *args],
+                            input=raw.encode("utf-8", errors="surrogateescape"),
+                            stdout=subprocess.PIPE, timeout=timeout)
+        out = cp.stdout or b""
     except subprocess.TimeoutExpired as e:
-        out = e.output or b""
-        print(f"n3mc-lite: {' '.join(args)} timed out", file=sys.stderr)
+        out = e.stdout or b""
+        print(f"[n3mc-lite] {' '.join(args)} timed out after {timeout:.0f} s", file=sys.stderr)
     except Exception as e:  # noqa: BLE001
-        print(f"n3mc-lite: {' '.join(args)} failed ({type(e).__name__}: {e})", file=sys.stderr)
-    if out:
+        print(f"[n3mc-lite] {' '.join(args)}: {type(e).__name__}: {e}", file=sys.stderr)
+    if forward_stdout and out:
         try:
             sys.stdout.buffer.write(out)
             sys.stdout.flush()
@@ -83,28 +81,20 @@ def run_step(args, data: bytes, deadline: float) -> None:
             pass
 
 
-def run_hook(hook: str, steps, argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    extra = ["--uvx"] if "--uvx" in argv else []
+def main() -> int:
     try:
+        raw = read_stdin()
+        audit_first(HOOK_NAME, raw)
+        uvx = ["--uvx"] if "--uvx" in sys.argv[1:] else []
         deadline = time.monotonic() + CHILD_TIMEOUT
-        data = read_stdin_bytes()
-        audit_first(hook, data)
-        for step in steps:
-            run_step([*step, *extra], data, deadline)
+        run_step(["--hook-submit", *uvx], raw, deadline, forward_stdout=True)
     except Exception as e:  # noqa: BLE001
         try:
-            print(f"n3mc-lite: hook error ({type(e).__name__}: {e})", file=sys.stderr)
+            print(f"[n3mc-lite] hook: {type(e).__name__}: {e}", file=sys.stderr)
         except Exception:  # noqa: BLE001
             pass
     return 0
 
 
-def main(argv=None) -> int:
-    run_hook(HOOK_NAME, STEPS, argv)
-    return 0
-
-
 if __name__ == "__main__":
-    main()
-    sys.exit(0)
+    sys.exit(main())

@@ -1,201 +1,189 @@
-"""SessionStart hook of the N3MC Lite Claude Code plugins (spec §8 "Auto-allow").
+"""
+SessionStart hook — idempotently pre-approve the n3mc-workingmemory MCP
+tools in `~/.claude/settings.json` `permissions.allow` so the auto-save loop
+does not block on per-call approval prompts (spec §8), and pre-flight check
+that `uvx` is on `PATH` (the plugin manifest launches the MCP server via
+`uvx --from n3memorycore-mcp-lite n3mc-workingmemory`).
 
-The same file ships in both plugins:
-  * without --mcp (the full-recall plugin n3mc-workingmemory): pre-approve the CLI commands that the
-    rules file shows Claude (uvx form) and the plugin's MCP tools;
-  * with --mcp (the MCP plugin n3mc-workingmemory-mcp): pre-approve the plugin's MCP tools only.
+Rules added (spec §8, v1.7.0):
+- `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` — Claude Code names a
+  plugin's MCP tools `mcp__plugin_<plugin>_<server>__<tool>`, and permission
+  rules must use that plugin-scoped form. v1.6.x added only the plain
+  `mcp__n3mc-workingmemory__<tool>` names, which never matched the plugin's
+  tools, so plugin users were prompted on every call.
+- `mcp__n3mc-workingmemory__*` — the same tools when the server is
+  registered directly (`claude mcp add`, `.mcp.json`).
+Wildcards cover all seven tools (incl. `recall_thread`) and future ones.
 
-The delete commands and tools are never pre-approved. Nothing is ever removed from settings.json,
-and ~/.claude.json is only read. Every message goes out as one ASCII JSON line (exit 0)."""
+Safe behavior:
+- Always exits 0 (must never block session startup).
+- Writes settings.json only if a rule is missing; never removes entries;
+  preserves unknown fields; 2-space indent, UTF-8, trailing newline.
+  v1.7.1: re-reads the file just before writing and merges into what is
+  there; writes a temp file in the same folder and os.replace()s it.
+- If a rule is missing but settings.json cannot be parsed or written
+  (read-only, no permission, policy-locked), changes nothing and reports it
+  (stderr + systemMessage) instead of failing silently (spec §8).
+- Messages the user must act on (missing `uvx`) are printed as ONE JSON
+  object on stdout with `systemMessage` (shown to the user) and
+  `hookSpecificOutput.additionalContext` (seen by the LLM). A plain stderr
+  line would only appear as a terse transcript notice.
+- The Python-free fallback for "no Python on PATH" lives in hooks.json.
+"""
+from __future__ import annotations
+
 import json
 import os
-import shlex
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
-VERSION = "2.0.2"
-PKG = f"n3memorycore-mcp-lite=={VERSION}"
-CLI = f"uvx --from {PKG} n3mc-lite"
-SERVER = "n3mc-workingmemory"
-MCP_TOOLS = ("search_memory", "save_memory", "list_memories", "recall_thread", "repair_memory")
-CLI_RULES = [f"Bash({CLI} --search *)", f"Bash({CLI} --buffer *)", f"Bash({CLI} --list*)",
-             f"Bash({CLI} --recall-thread *)", f"Bash({CLI} --repair*)", f"Bash({CLI} --stop*)"]
-OURS = {
-    "UserPromptSubmit": ("n3mc-lite-hook", "n3mc_mcp.lite_hook"),
-    "Stop": ("n3mc-lite-stop-hook", "n3mc_mcp.lite_stop_hook"),
-}
+PLUGIN_RULE = "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*"
+DIRECT_RULE = "mcp__n3mc-workingmemory__*"
+RULES = [PLUGIN_RULE, DIRECT_RULE]
 
 
-def mcp_rules(plugin: str) -> list:
-    return [f"mcp__plugin_{plugin}_{SERVER}__{t}" for t in MCP_TOOLS]
+class SettingsUpdateError(Exception):
+    """settings.json needs a rule but cannot be read or written (spec §8)."""
 
 
-def _home() -> str:
-    return os.path.expanduser("~")
-
-
-def _settings_path() -> str:
-    return os.path.join(_home(), ".claude", "settings.json")
-
-
-def _read_json(path: str):
-    with open(path, "rb") as f:
-        data = json.loads(f.read().decode("utf-8-sig"))
+def _read_settings(settings_path: Path) -> tuple[dict, list]:
+    """(data, allow) of settings.json; raises SettingsUpdateError when it
+    cannot be read as a JSON object with the expected shape."""
+    if settings_path.exists():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise SettingsUpdateError(f"cannot read it as JSON: {type(e).__name__}: {e}")
+    else:
+        data = {}
     if not isinstance(data, dict):
-        raise ValueError("the top level is not a JSON object")
-    return data
+        raise SettingsUpdateError("the top level is not a JSON object")
 
-
-def _merge_rules(rules) -> None:
-    """Re-read settings.json just before writing, add the missing rules, replace atomically."""
-    path = _settings_path()
-    data = _read_json(path) if os.path.exists(path) else {}
-    perms = data.get("permissions")
-    if perms is None:
-        perms = data["permissions"] = {}
+    perms = data.get("permissions", {})
     if not isinstance(perms, dict):
-        raise ValueError("permissions is not an object")
-    allow = perms.get("allow")
-    if allow is None:
-        allow = perms["allow"] = []
+        raise SettingsUpdateError("\"permissions\" is not an object")
+    allow = perms.get("allow", [])
     if not isinstance(allow, list):
-        raise ValueError("permissions.allow is not a list")
-    missing = [r for r in rules if r not in allow]
-    if not missing:
-        return
-    allow.extend(missing)
-    folder = os.path.dirname(path)
-    os.makedirs(folder, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=folder)
+        raise SettingsUpdateError("\"permissions.allow\" is not a list")
+    return data, allow
+
+
+def _missing(allow: list) -> list[str]:
+    existing = {e for e in allow if isinstance(e, str)}
+    return [r for r in RULES if r not in existing]
+
+
+def _write_atomic(settings_path: Path, text: str) -> None:
+    """Temp file in the same folder + os.replace (spec §8, v1.7.1): an
+    interrupted write never leaves a truncated settings.json."""
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    if settings_path.exists() and not os.access(settings_path, os.W_OK):
+        # os.replace would succeed on a read-only file on POSIX; a read-only
+        # settings.json is the user's choice and is reported instead.
+        raise PermissionError(f"[Errno 13] Permission denied: '{settings_path}'")
+    fd, tmp = tempfile.mkstemp(prefix=".settings.", suffix=".tmp",
+                               dir=str(settings_path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-        os.replace(tmp, path)
-    except BaseException:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, settings_path)
+    finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        raise
 
 
-def _tokens(command: str) -> list:
-    command = command.replace("\\", "/")
+def _patch(settings_path: Path) -> list[str]:
+    """Add missing RULES. Returns the rules that were added ([] = no write).
+
+    v1.7.1 (Lite review LL2): the file is re-read immediately before writing
+    and the missing rules are merged into what is there at that moment
+    (another program may have changed it since the first read); the write
+    goes through a temporary file + os.replace.
+
+    Raises SettingsUpdateError when a rule is missing but the file cannot be
+    parsed as a JSON object or cannot be written (read-only, no permission,
+    policy-locked). Nothing is changed in that case.
+    """
+    _, allow = _read_settings(settings_path)
+    if not _missing(allow):
+        return []
+
+    # Re-read right before writing.
+    data, allow = _read_settings(settings_path)
+    added = _missing(allow)
+    if not added:
+        return []
+    perms = dict(data.get("permissions", {}), allow=allow + added)
+    data = dict(data, permissions=perms)
     try:
-        return shlex.split(command, posix=True)
-    except ValueError:
-        return command.split()
+        _write_atomic(settings_path,
+                      json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    except Exception as e:
+        raise SettingsUpdateError(f"{type(e).__name__}: {e}")
+    return added
 
 
-def is_pip_hook(command, event: str) -> bool:
-    """Rules (a) and (b) of is_own_hook (spec §12.8): the pip installation's hooks."""
-    if not isinstance(command, str):
-        return False
-    exe_name, module = OURS[event]
-    toks = _tokens(command)
-    if not toks:
-        return False
-    first = os.path.basename(toks[0]).lower()
-    if first.endswith(".exe"):
-        first = first[:-4]
-    if first == exe_name:
-        return True
-    for i, t in enumerate(toks[:-1]):
-        if t == "-m" and toks[i + 1] == module:
-            return True
-    return False
-
-
-def _has_pip_hooks(settings: dict) -> bool:
-    hooks = settings.get("hooks") if isinstance(settings.get("hooks"), dict) else {}
-    for event in OURS:
-        entries = hooks.get(event) if isinstance(hooks.get(event), list) else []
-        for e in entries:
-            hs = e.get("hooks") if isinstance(e, dict) else None
-            for h in hs if isinstance(hs, list) else []:
-                if isinstance(h, dict) and is_pip_hook(h.get("command"), event):
-                    return True
-    return False
-
-
-def uvx_message(mcp: bool) -> str:
-    if mcp:
-        return (f'[n3mc-workingmemory-mcp] uvx was not found on PATH. The plugin\'s MCP server runs through '
-                f'"uvx --from n3memorycore-mcp-lite=={VERSION} n3mc-workingmemory", so it cannot start until uv '
-                'is installed. Install (Windows): pipx install uv or powershell -c "irm '
-                'https://astral.sh/uv/install.ps1 | iex"; (Linux): curl -LsSf https://astral.sh/uv/install.sh | '
-                'sh. Docs: https://docs.astral.sh/uv/ / [n3mc-workingmemory-mcp] uvx が PATH 上に見つかりません。'
-                'uv を入れるまで、記憶の MCP サーバーは起動しません。上のいずれかのコマンドで uv を入れてください。')
-    return (f'[n3mc-workingmemory] uvx was not found on PATH. The plugin\'s memory hooks run through '
-            f'"uvx --from n3memorycore-mcp-lite=={VERSION} n3mc-lite", so they cannot run until uv is installed. '
-            'Install (Windows): pipx install uv or powershell -c "irm https://astral.sh/uv/install.ps1 | iex"; '
-            '(Linux): curl -LsSf https://astral.sh/uv/install.sh | sh. Docs: https://docs.astral.sh/uv/ / '
-            '[n3mc-workingmemory] uvx が PATH 上に見つかりません。uv を入れるまで、記憶のフックは動きません。'
-            '上のいずれかのコマンドで uv を入れてください。')
-
-
-def update_failed_message(mcp: bool, error: BaseException) -> str:
-    err = f"{type(error).__name__}: {error}"
-    if mcp:
-        return (f"[n3mc-workingmemory-mcp] Could not update ~/.claude/settings.json ({err}), so the memory tools "
-                "were not pre-approved and Claude Code will ask for permission when Claude uses the memory. Make "
-                'the file writable, or add "mcp__plugin_n3mc-workingmemory-mcp_n3mc-workingmemory__search_memory" '
-                "and the other memory tools to permissions.allow yourself.")
-    return (f"[n3mc-workingmemory] Could not update ~/.claude/settings.json ({err}), so the memory commands were "
-            "not pre-approved and Claude Code will ask for permission when Claude searches the memory. Make the "
-            f'file writable, or add "Bash({CLI} --search *)" to permissions.allow yourself.')
-
-
-def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    mcp = "--mcp" in argv
-    plugin = "n3mc-workingmemory-mcp" if mcp else "n3mc-workingmemory"
-    tag = f"[{plugin}]"
-    rules = mcp_rules(plugin) if mcp else CLI_RULES + mcp_rules(plugin)
-    messages = []
-    if shutil.which("uvx") is None:
-        messages.append(uvx_message(mcp))
+def _uvx_warning() -> str:
+    """Install hint when `uvx` is not on PATH ("" when it is)."""
     try:
-        _merge_rules(rules)
-    except Exception as e:  # noqa: BLE001
-        msg = update_failed_message(mcp, e)
-        print(msg.encode("ascii", "backslashreplace").decode("ascii"), file=sys.stderr)
-        messages.append(msg)
-    # Registered twice? (read only; nothing is removed)
+        if shutil.which("uvx") is not None:
+            return ""
+    except Exception:
+        return ""
+    return (
+        "[n3mc-workingmemory] `uvx` was not found on PATH. The plugin's MCP "
+        "server is launched via `uvx --from n3memorycore-mcp-lite "
+        "n3mc-workingmemory`, so it will fail to start until `uv` is installed. "
+        "Install (Windows): `pipx install uv` or "
+        "`powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"`; "
+        "(Linux): `curl -LsSf https://astral.sh/uv/install.sh | sh`. "
+        "Docs: https://docs.astral.sh/uv/ / "
+        "[n3mc-workingmemory] `uvx` が PATH 上に見つかりません。`uv` を入れるまで "
+        "MCP サーバーは起動しません。上のいずれかのコマンドで `uv` を入れてください。"
+    )
+
+
+def main() -> int:
+    notices: list[str] = []
     try:
-        settings = _read_json(_settings_path()) if os.path.exists(_settings_path()) else {}
-    except Exception:  # noqa: BLE001
-        settings = {}
-    if not mcp and _has_pip_hooks(settings):
-        messages.append('[n3mc-workingmemory] The N3MC Lite hooks are registered twice: by this plugin and by '
-                        '"n3mc-lite --init" in ~/.claude/settings.json. Every message is then searched twice. '
-                        "Remove the two n3mc-lite-hook / n3mc-lite-stop-hook entries from ~/.claude/settings.json, "
-                        "or uninstall the plugin.")
-    try:
-        cj = _read_json(os.path.join(_home(), ".claude.json"))
-    except Exception:  # noqa: BLE001
-        cj = {}
-    servers = cj.get("mcpServers") if isinstance(cj.get("mcpServers"), dict) else {}
-    if SERVER in servers:
-        messages.append(f"{tag} The N3MC Lite MCP server is registered twice in Claude Code: by this plugin and as "
-                        f"{SERVER} in ~/.claude.json, so every memory tool appears twice. Keep one: claude mcp "
-                        f"remove {SERVER} -s user, or uninstall this plugin.")
-    enabled = settings.get("enabledPlugins") if isinstance(settings.get("enabledPlugins"), dict) else {}
-    if not mcp and enabled.get("n3mc-workingmemory-mcp@neuralnexusnote") is True:
-        messages.append("[n3mc-workingmemory] The n3mc-workingmemory-mcp plugin is enabled too, so the N3MC Lite "
-                        "MCP server is registered twice and every memory tool appears twice. This plugin already "
-                        "registers the MCP server: disable the other one (/plugin disable "
-                        "n3mc-workingmemory-mcp@neuralnexusnote).")
-    if messages:
-        text = "\n".join(messages)
-        out = {"systemMessage": text,
-               "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
-        sys.stdout.write(json.dumps(out, ensure_ascii=True) + "\n")
-        sys.stdout.flush()
+        added = _patch(Path.home() / ".claude" / "settings.json")
+        if added:
+            sys.stderr.write(
+                "[n3mc-workingmemory] Added " + ", ".join(added) + " to "
+                "~/.claude/settings.json permissions.allow (auto-approve, so "
+                "the AI never blocks on a permission prompt).\n"
+            )
+    except SettingsUpdateError as e:
+        msg = (
+            f"[n3mc-workingmemory] Could not update ~/.claude/settings.json ({e}), "
+            "so the memory tools were not pre-approved and Claude Code will ask "
+            "for permission on every memory call. Make the file writable, or add "
+            f"\"{PLUGIN_RULE}\" to permissions.allow yourself."
+        )
+        sys.stderr.write(msg + "\n")
+        notices.append(msg)
+    except Exception as e:  # never block session startup
+        sys.stderr.write(f"[n3mc-workingmemory] permission install skipped: {e}\n")
+    warning = _uvx_warning()
+    if warning:
+        notices.append(warning)
+    if notices:
+        text = " ".join(notices)
+        sys.stdout.write(json.dumps({
+            "systemMessage": text,
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": text,
+            },
+        }, ensure_ascii=True) + "\n")    # ASCII: stdout is cp932 on a Japanese Windows (L-03)
     return 0
 
 
 if __name__ == "__main__":
-    # An unexpected failure exits 1, so that the Python-free fallback of hooks.json speaks instead.
     sys.exit(main())
