@@ -3236,6 +3236,8 @@ All three extensions are additive — none of them require changes to the Redis 
 
 ## Appendix B: Recommended AI-Assisted Workflow
 
+> **Generate in the main session; do not delegate to subagents.** The AI that implements this specification writes the code, the tests and every change to them itself, in the session the user is watching. Do not hand the implementation, a regeneration, the fixes or the tests to subagents (background agents, the Task / Agent tools): a subagent sees only the brief it is given, not this whole specification and the user's intent, it cannot ask the user, and its report sounds equally sure whether it is right or wrong. Use subagents only for read-only work (searching, comparing, reviewing), and check their findings in the main session before anything is changed.
+
 > **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code. The AI does not advance to the next phase on its own. Method A registers the MCP entry in Claude Code (and adds the hooks when they were asked for, §8). The MCP tools are exercised inside Claude Code (§10 items 1–7, after the restart) and through the thin client in a test folder (§10 item 10).
 
 | Phase | What you do | Model |
