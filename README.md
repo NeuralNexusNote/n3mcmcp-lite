@@ -1,4 +1,4 @@
-# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.2
+# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.1.0
 
 **Give Claude Code a working memory that clears itself after 7 days — and the same memory in the Claude desktop app.**
 
@@ -167,7 +167,7 @@ Then restart Claude Code, as in [Step 4 — Restart](#step-4--restart).
 ```
 
 The plugin registers the MCP server `n3mc-workingmemory` in Claude Code,
-as in v1.12.2. It runs through `uvx --from n3memorycore-mcp-lite==2.0.2 …`
+as in v1.12.2. It runs through `uvx --from n3memorycore-mcp-lite==2.1.0 …`
 (the version is pinned to the package version). A `SessionStart` hook
 pre-approves the memory tools.
 
@@ -220,7 +220,7 @@ Plugin users (no pip installation):
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"],
+      "args": ["--from", "n3memorycore-mcp-lite==2.1.0", "n3mc-workingmemory"],
       "env": {
         "N3MC_AGENT_NAME": "claude-desktop"
       }
@@ -437,7 +437,7 @@ without the auto-save reminder, because in Claude Code the hooks save;
 | `search_memory` | `--search "<keywords>" [--since S] [--until U] [--limit N]` | Hybrid (vector + BM25) search, ranked & time-decayed, `session_id` boost |
 | `save_memory` | `--buffer "<text>"` or `--buffer -` (stdin) | Save an entry (7-day TTL, exact duplicates rejected) |
 | `list_memories` | `--list [--limit N]` | Most-recent entries, newest first |
-| `recall_thread` | `--recall-thread <turn_id> [--before N] [--after N]` | The entries around a hit's `turn_id` |
+| `recall_thread` | `--recall-thread <turn_id> [--before N] [--after N] [--session-id S]` | The entries around a hit's `turn_id`, in the same session |
 | `delete_memory` | `--delete <id>` | Remove one entry (cascades to chunks if the id is a parent document) |
 | `delete_memories_by_session` | `--delete-session <session_id>` | Bulk-delete every memory tied to a `session_id` |
 | `repair_memory` | `--repair` | Re-create the index if missing and add missing vectors (up to 200 per call) |
@@ -445,7 +445,7 @@ without the auto-save reminder, because in Claude Code the hooks save;
 - In Claude Code, `--search`, `--buffer`, `--list`, `--recall-thread`,
   `--repair` and `--stop` are pre-approved (`permissions.allow`), in the
   `python -m n3mc_mcp.cli` and `n3mc-lite` forms (pip) or the
-  `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` form (plugin).
+  `uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-lite` form (plugin).
 - **`--delete` and `--delete-session` are never pre-approved**: they are
   irreversible, so Claude Code asks you each time.
 - A manual `--search` is not limited in size; the hook's block and the MCP

@@ -1,4 +1,4 @@
-# N3MemoryCore MCP-Lite v2.0.2 [Volatile Memory — hooks for Claude Code, MCP for other apps]
+# N3MemoryCore MCP-Lite v2.1.0 [Volatile Memory — hooks for Claude Code, MCP for other apps]
 > NeuralNexusNote™ プロダクト — **Lite（揮発型）版**
 
 > **本版の位置付け**：N3MemoryCore MCP の無償 Lite 版（ワーキングメモリ）。ストレージは **Redis Stack（RediSearch）**、各エントリに **7 日の TTL**、それ以上の永続性はありません。SQLite + sqlite-vec で永続保存する **Pro 版** との差別化を明確化しています。
@@ -179,7 +179,7 @@ docker start redis-stack
      ```
    - **uvx**（事前インストール不要・分離環境 — [`uv`](https://docs.astral.sh/uv/) が必要）。Claude デスクトップアプリ向け：
      ```bash
-     uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-workingmemory
+     uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-workingmemory
      ```
    - **Claude Code プラグインマーケットプレイス**（pip/uvx コマンドを手動で打つ必要なし — プラグインが MCP の入口を `uvx` で動かすが、`uv` は PATH に必要）：
      ```
@@ -256,7 +256,7 @@ n3memorycore-mcp-lite/
 ├── LICENSE / NOTICE / CHANGELOG.md / PHILOSOPHY.md
 ├── N3MemoryCore_MCP_Spec_EN.md / _JP.md   # this specification
 ├── n3mc_mcp/                       # Python package
-│   ├── __init__.py                 # Version marker (__version__ = "2.0.2")
+│   ├── __init__.py                 # Version marker (__version__ = "2.1.0")
 │   ├── __main__.py                 # Entry point: python -m n3mc_mcp (= the MCP thin client, run())
 │   ├── server.py                   # MCP thin client: stdio, tools/list, forwards tools/call to the resident server (§4.6); run()
 │   ├── tooldefs.py                 # The seven Tool definitions of §5 (3), shared by the thin client and the resident server
@@ -301,13 +301,13 @@ n3memorycore-mcp-lite/
 
 **`pyproject.toml`**：公開リポジトリでは、今のファイル（ビルドバックエンド hatchling、メタデータ、キーワード、分類子、`[tool.hatch…]` の各節）を残し、下の項目だけを変える。**方法 A が空のフォルダに生成するとき**は、次のファイルを書いてから同じ項目を当てる：`[build-system]` `requires = ["hatchling>=1.21.0"]`、`build-backend = "hatchling.build"`。`[project]` `name = "n3memorycore-mcp-lite"`、`description = "N3MemoryCore MCP Lite - ephemeral 7-day hybrid-search memory over Redis Stack"`、`readme = { file = "README.md", content-type = "text/markdown" }`、`license = { file = "LICENSE" }`、`requires-python = ">=3.10"`、`authors = [{ name = "NeuralNexusNote" }]`、下の依存。`[tool.hatch.build.targets.wheel]` `packages = ["n3mc_mcp"]`。`readme` と `license` が指すファイルがないと、hatchling がメタデータを作れず `pip install -e .` は失敗する。そのため方法 A は、`README.md`（この指示書から書く短い利用案内）と `LICENSE`（Apache License 2.0 の全文）も書く。キーワード、分類子、URL は、手元へのインストールには要らない。プラグインのファイル（`plugins/…/plugin.json`、`.claude-plugin/marketplace.json`）は公開リポジトリだけのもので、方法 A は作らない。
 
-- `version = "2.0.2"`。
+- `version = "2.1.0"`。
 - `dependencies`：今の 6 つ（`mcp>=1.0.0,<2.0.0`、`redis>=5.0.0,<8.0.0`、`sentence-transformers>=2.7.0`、`uuid-utils>=0.6.0`、`platformdirs>=4.0.0`、`numpy>=1.26.0`）に、`fastapi>=0.110`、`uvicorn>=0.27`、`pydantic>=2.0`、`psutil>=5.9` を足す（下限は Free のもの）。
 - `[project.optional-dependencies] dev`：`httpx>=0.27` を足す（FastAPI の `TestClient` 用）。
 - `[project.scripts]`：上の表の 5 つのスクリプト。
 - 分類子 `Operating System :: OS Independent` を、`Operating System :: Microsoft :: Windows` と `Operating System :: POSIX :: Linux` に変える（macOS は対象外）。
 
-`.claude-plugin/marketplace.json` の `metadata.version` と、`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` の `version` は、パッケージのバージョン（`2.0.2`）である。**`uvx` のコマンドは同じバージョンに固定する**。この文書にあるすべての `uvx --from n3memorycore-mcp-lite==<version>`（プラグインの MCP の入口、ルールファイルの `{cli}`、デスクトップの登録）は、パッケージのバージョンを書く。リリースでは、これらすべてを 2 つの `version` フィールドと一緒に変える。固定しないと、プラグインと pip のインストールが別のバージョンを動かしうる。それらのサーバーは `code_version` が違うので、互いを置き換え合う（§4.6）。
+`.claude-plugin/marketplace.json` の `metadata.version` と、`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` の `version` は、パッケージのバージョン（`2.1.0`）である。**`uvx` のコマンドは同じバージョンに固定する**。この文書にあるすべての `uvx --from n3memorycore-mcp-lite==<version>`（プラグインの MCP の入口、ルールファイルの `{cli}`、デスクトップの登録）は、パッケージのバージョンを書く。リリースでは、これらすべてを 2 つの `version` フィールドと一緒に変える。固定しないと、プラグインと pip のインストールが別のバージョンを動かしうる。それらのサーバーは `code_version` が違うので、互いを置き換え合う（§4.6）。
 
 **そのまま残すファイル（この指示書からは作らない）**：`SECURITY.md`、`CONTRIBUTING.md`、`.github/`（issue と PR のテンプレート、`workflows/test.yml`、`workflows/pypi-publish.yml`）、`server.json`（MCP レジストリの項目）、`.gitignore`、評価用スクリプト `tests/eval_*.py`、`tests/test_cross_session.py`。コードを作り直しても、これらを消したり書き換えたりしてはならない。`.github/workflows/test.yml` の CI マトリクスを手で直すときは、Windows と Linux だけを並べる。
 
@@ -1309,7 +1309,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 - **フックのないアプリでは、保存はモデル次第である**（§11）。指示とリマインダが保存を頼む。会話を丸ごと残せるのは Claude Code だけである。
 - **常駐サーバーが動けなければならない**（§2 の依存パッケージを持つ Python）。起動できないときは、検索は上のエラーを返し、保存はベクトルなしで入る。
-- **すべてのクライアントに 1 つのインストール。** フック・CLI・薄いクライアントは、同じコードを動かさなければならない。別のバージョンの写しは別の `code_version` を持ち、呼び出しのたびに互いのサーバーを置き換え合う（§3.15）。デスクトップアプリは、フックが使うのと同じスクリプトのフォルダの絶対パスで登録する。プラグインの利用者は、同じ `uvx --from n3memorycore-mcp-lite==2.0.2 …` の形で登録する（§8）。プラグインの `uvx` のコマンドはパッケージのバージョンに固定されている（§2）。そのため、どちらもこのリリースを使う限り、プラグインとデスクトップアプリは同じバージョンを動かす。
+- **すべてのクライアントに 1 つのインストール。** フック・CLI・薄いクライアントは、同じコードを動かさなければならない。別のバージョンの写しは別の `code_version` を持ち、呼び出しのたびに互いのサーバーを置き換え合う（§3.15）。デスクトップアプリは、フックが使うのと同じスクリプトのフォルダの絶対パスで登録する。プラグインの利用者は、同じ `uvx --from n3memorycore-mcp-lite==2.1.0 …` の形で登録する（§8）。プラグインの `uvx` のコマンドはパッケージのバージョンに固定されている（§2）。そのため、どちらもこのリリースを使う限り、プラグインとデスクトップアプリは同じバージョンを動かす。
 
 ---
 
@@ -2072,7 +2072,7 @@ pip でのインストール（絶対パスと `env`）：
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"],
+      "args": ["--from", "n3memorycore-mcp-lite==2.1.0", "n3mc-workingmemory"],
       "env": {
         "N3MC_AGENT_NAME": "claude-desktop"
       }
@@ -2112,7 +2112,7 @@ Claude Code は、フック（すべてのメッセージと応答を保存し�
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"]
+      "args": ["--from", "n3memorycore-mcp-lite==2.1.0", "n3mc-workingmemory"]
     }
   }
 }
@@ -2147,7 +2147,7 @@ python "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || py "${CLAUDE_PLUG
 `<FALLBACK>` は、下の「自動許可」にあるフォールバックの JSON の文（`\"` のエスケープ込み）である。
 
 - 常駐サーバーは、MCP の入口が自分の `sys.executable` で起動する（`-m n3mc_mcp.cli --run-server`、§3.15）。つまり `uvx` の環境の中で動く。
-- `--uvx` は、`uvx` で動くフックの入口（手で `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-hook --uvx` と登録したもの）に、ルールファイルを `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` のコマンドの形で書くよう伝える（§12）。これがなければ `python -m n3mc_mcp.cli` の形を使う（pip のインストール）。
+- `--uvx` は、`uvx` で動くフックの入口（手で `uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-lite-hook --uvx` と登録したもの）に、ルールファイルを `uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-lite` のコマンドの形で書くよう伝える（§12）。これがなければ `python -m n3mc_mcp.cli` の形を使う（pip のインストール）。
 - **`uvx` の起動時間（Windows 11、uv 0.11.7、パッケージは uv のキャッシュに入っている。1 回の慣らしの後の 10 回の中央値）**：システムの Python で `python -c pass` は 125 ms。`uvx --from n3memorycore-mcp-lite==2.0.2 python -c pass` は 316 ms。`uvx --from n3memorycore-mcp-lite==1.12.2 python -c "import n3mc_mcp.config"` は 503 ms。したがって `uvx` は、起動ごとに約 0.19 秒を足す（プラグインの MCP の入口は、セッションごとに 1 回起動する）。計測していないもの：パッケージのダウンロードや更新が要る実行、Linux。`uvx` のコマンドはパッケージのバージョンに固定する（§2）。
 
 **(b) pip**
@@ -2466,7 +2466,7 @@ n3mcmcp-lite/
 
 | テストクラス | テスト内容 |
 |---|---|
-| `TestThinNames` | `n3mc-workingmemory` と `n3mc-mcp-lite` は `n3mc_mcp.__main__:run` に対応する。`serverInfo.name` は `n3mc-workingmemory`。`pyproject.toml` はバージョン `2.0.2` と `mcp>=1.0.0,<2.0.0` を宣言する |
+| `TestThinNames` | `n3mc-workingmemory` と `n3mc-mcp-lite` は `n3mc_mcp.__main__:run` に対応する。`serverInfo.name` は `n3mc-workingmemory`。`pyproject.toml` はバージョン `2.1.0` と `mcp>=1.0.0,<2.0.0` を宣言する |
 | `TestThinTools` | `tools/list` は、サーバーなしで §5 (3) の 7 つの定義をそのまま返す。指示は §5 (1) の文そのまま。ハンドラは `validate_input=False` で登録する（拒まれたらなしで） |
 | `TestForwarding` | 各ツールは引数を付けて `POST /tools/<name>?nudge=1` として送り、応答の文をそのまま（バイト単位で同じに）返す。`session_id` は `search_memory` / `save_memory` で、ないときだけ埋める（引数 → `N3MC_SESSION_ID` → プロセスの UUID。どの呼び出しでも同じ）。`agent_name` を埋める（引数 → `N3MC_AGENT_NAME` → `clientInfo.name` → 空。空白の引数でほかに値がなければ空にし、空白のまま保存しない）。ハンドラの中の例外は、ちょうど `Error: <メッセージ>` + `_NUDGE_GENERIC` になる。どの結果も `isError` を設定しない。`importance: "nan"` はサーバーに届き、Lite の JSON を受け取る（SDK の検証エラーではない） |
 | `TestThinNoServer` | サーバーがない / まだ起動中 / 起動に失敗した / ほかのフォルダのサーバー：`save_memory` は直接保存する（`embedding` フィールドなし、§4.6 の `warning` と `detail`）。ほかのツールは §4.6 の文を返す。Redis も止まっている → バックエンドエラーの JSON。`delete_memory` / `delete_memories_by_session` と `--delete` / `--delete-session`：未送信 → "Nothing was deleted"、完了 → 通常の応答、削除後に応答が失われた（タイムアウトを差し込む）→ `"status": "unknown"` |

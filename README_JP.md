@@ -1,4 +1,4 @@
-# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.0.2
+# N3MemoryCore MCP Lite (n3mcmcp-lite) v2.1.0
 
 **Claude Code に、7 日で消える作業メモリを。同じ記憶を、Claude のデスクトップアプリでも。**
 
@@ -154,7 +154,7 @@ Claude Code の中で実行します。
 ```
 
 プラグインは、v1.12.2 と同じく、Claude Code に MCP サーバー `n3mc-workingmemory` を登録します。
-`uvx --from n3memorycore-mcp-lite==2.0.2 …` で動きます。
+`uvx --from n3memorycore-mcp-lite==2.1.0 …` で動きます。
 この版の番号は、パッケージの版に合わせて固定されています。
 `SessionStart` のフックが、記憶のツールを事前に許可します。
 
@@ -207,7 +207,7 @@ pip で入れた場合：
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"],
+      "args": ["--from", "n3memorycore-mcp-lite==2.1.0", "n3mc-workingmemory"],
       "env": {
         "N3MC_AGENT_NAME": "claude-desktop"
       }
@@ -417,12 +417,12 @@ CLI は、自動保存を促す一文を付けずに表示します。Claude Cod
 | `search_memory` | `--search "<keywords>" [--since S] [--until U] [--limit N]` | ハイブリッド（ベクトル + BM25）検索。時間で減衰する順位と `session_id` の加点 |
 | `save_memory` | `--buffer "<text>"` または `--buffer -`（stdin） | エントリを保存（7 日の TTL。完全に同じものは断る） |
 | `list_memories` | `--list [--limit N]` | 新しい順のエントリ |
-| `recall_thread` | `--recall-thread <turn_id> [--before N] [--after N]` | ヒットの `turn_id` の前後のエントリ |
+| `recall_thread` | `--recall-thread <turn_id> [--before N] [--after N] [--session-id S]` | ヒットの `turn_id` の前後の、同じセッションのエントリ |
 | `delete_memory` | `--delete <id>` | 1 件を消す（親文書の id ならチャンクも消す） |
 | `delete_memories_by_session` | `--delete-session <session_id>` | ある `session_id` の記憶をまとめて消す |
 | `repair_memory` | `--repair` | 索引がなければ作り直し、ベクトルのないレコードにベクトルを足す（1 回に 200 件まで） |
 
-- Claude Code では、`--search`、`--buffer`、`--list`、`--recall-thread`、`--repair`、`--stop` を事前に許可します（`permissions.allow`）。形は、pip では `python -m n3mc_mcp.cli` と `n3mc-lite`、プラグインでは `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` です。
+- Claude Code では、`--search`、`--buffer`、`--list`、`--recall-thread`、`--repair`、`--stop` を事前に許可します（`permissions.allow`）。形は、pip では `python -m n3mc_mcp.cli` と `n3mc-lite`、プラグインでは `uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-lite` です。
 - **`--delete` と `--delete-session` は、事前に許可しません。** 元に戻せないので、Claude Code が毎回たずねます。
 - 手で実行する `--search` には、大きさの制限がありません。フックの塊と MCP の `search_memory` の結果は、`context_max_chars` に収めます。
 

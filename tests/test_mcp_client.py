@@ -26,7 +26,7 @@ class TestThinNames:
         data = tomllib.load(open(os.path.join(REPO, "pyproject.toml"), "rb"))
         s = data["project"]["scripts"]
         assert s["n3mc-workingmemory"] == "n3mc_mcp.__main__:run" == s["n3mc-mcp-lite"]
-        assert data["project"]["version"] == "2.0.2"
+        assert data["project"]["version"] == "2.1.0"
         assert "mcp>=1.0.0,<2.0.0" in data["project"]["dependencies"]
 
     def test_server_name(self):

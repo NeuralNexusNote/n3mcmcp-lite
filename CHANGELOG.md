@@ -9,6 +9,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-11-27
+
+A search writes nothing to a record, `recall_thread` stays in the session of the turn, and the default
+vector floor is 0.83.
+
 ### Changed
 - **The default `vector_min_cos` is 0.83 (was 0.85).** With
   `multilingual-e5-base`, the right record of a paraphrased question often

@@ -182,9 +182,9 @@ class TestPluginHookAsciiStdout:
 class TestPluginRegistersMcp:
     def test_plugin_files(self):
         plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-        assert plugin["version"] == "2.0.2"
+        assert plugin["version"] == "2.1.0"
         assert plugin["mcpServers"]["n3mc-workingmemory"] == {
-            "command": "uvx", "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"]}
+            "command": "uvx", "args": ["--from", "n3memorycore-mcp-lite==2.1.0", "n3mc-workingmemory"]}
         hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
         assert set(hooks) == {"SessionStart"}
         market = json.loads((REPO / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
@@ -223,7 +223,7 @@ class TestRulesFile:
         cli._ensure_rules_md(str(tmp_path))
         assert cli._ensure_rules_md(str(tmp_path), uvx=True) == "replaced"
         p = tmp_path / ".claude" / "rules" / "n3mc-lite-behavior.md"
-        assert "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search" in p.read_text(encoding="utf-8")
+        assert "uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-lite --search" in p.read_text(encoding="utf-8")
         assert list(p.parent.glob("n3mc-lite-behavior.md.bak-n3mc-lite-*"))
         assert cli._ensure_rules_md(str(tmp_path), uvx=True) == "same"
 
