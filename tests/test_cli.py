@@ -209,7 +209,7 @@ class TestCommands:
         assert capsys.readouterr().out == "TEXT /search\n"
 
     @pytest.mark.parametrize("argv", [["--search", "x", "--since", "yesterday"], ["--search", "x", "--until", "9999-12-31"],
-                                      ["--search", "x", "--since", "1969-12-31"]])
+                                      ["--search", "x", "--since", "2026-13-01"]])
     def test_bad_time(self, sent, capsys, argv):
         assert cli.main(argv) == 2
         err = capsys.readouterr().err
@@ -233,7 +233,7 @@ class TestCommands:
         assert out.startswith("Error: until must be")
 
     def test_search_endpoint_400(self, app_router, capsys):
-        r = app_router.client.post("/search", json={"query": "x", "since": "1969-12-31"},
+        r = app_router.client.post("/search", json={"query": "x", "since": "2026-13-01"},
                                    headers={"Host": f"127.0.0.1:{conftest.TEST_PORT}"})
         assert r.status_code == 400
 
