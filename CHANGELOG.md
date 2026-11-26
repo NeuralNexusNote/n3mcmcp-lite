@@ -53,6 +53,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - The specification no longer contradicts itself on the `list_memories`
   limit 0 (20, as in 1.x), the exit status of `--stop-server`, the final
   message of `--init`, and whether Claude Code has the MCP tools (§13).
+- §10 item 10 deletes the `server_start_failed` marker left by its step 5
+  before step 6 checks that the next CLI call starts the server again (the
+  marker holds the start for 5 minutes).
 - A Redis URL with the host `localhost` no longer costs about 2 seconds per new
   connection on Windows: `localhost` is tried on `127.0.0.1` first (Windows
   tries `::1` first, and the Redis container listens on `127.0.0.1` only).
