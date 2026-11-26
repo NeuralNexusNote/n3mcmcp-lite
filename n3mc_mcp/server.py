@@ -75,8 +75,6 @@ class ThinClient:
                         val = cand.strip()
                         break
                 args["agent_name"] = val
-            else:
-                args["agent_name"] = a.strip()
         return args
 
     def handle(self, name, args) -> str:

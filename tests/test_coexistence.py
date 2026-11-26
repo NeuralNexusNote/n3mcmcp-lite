@@ -123,19 +123,16 @@ class TestKeepsOtherProducts:
 
 
 class TestPluginEnabled:
-    def test_init_adds_no_hooks(self, isolate, capsys):
+    def test_init_still_adds_hooks(self, isolate, capsys):
         _settings(isolate).parent.mkdir(parents=True)
         _settings(isolate).write_text(json.dumps({"enabledPlugins": {"n3mc-workingmemory@neuralnexusnote": True}}),
                                       encoding="utf-8")
         cli.main(["--init"])
         s = _read(isolate)
-        assert not _hook_cmds(s, "UserPromptSubmit") and s["permissions"]["allow"]
-        assert "The n3mc-workingmemory plugin is enabled" in capsys.readouterr().out
-
-    def test_plugin_reports_init_hooks(self, isolate):
-        cli.main(["--init"])
-        out = _run_plugin(isolate)
-        assert "registered twice" in json.loads(out)["systemMessage"]
+        assert len(_hook_cmds(s, "UserPromptSubmit")) == 1 and s["permissions"]["allow"]
+        out = capsys.readouterr().out
+        assert "The n3mc-workingmemory plugin is enabled: Claude Code also uses the MCP entry" in out
+        assert "N3MC Lite hooks registered in" in out
 
 
 def _run_plugin(isolate, path_env=None):
@@ -150,16 +147,18 @@ def _run_plugin(isolate, path_env=None):
 
 
 class TestPluginHook:
+    """The plugin is the one of v1.12.2: it registers the MCP entry; its SessionStart script pre-approves
+    the MCP tools."""
+
     def test_rules_written(self, isolate):
         _run_plugin(isolate)
         allow = _read(isolate)["permissions"]["allow"]
-        assert "Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)" in allow
-        assert not any("--delete" in r for r in allow)
-        assert not any(r.startswith("mcp__") for r in allow)
+        assert "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" in allow
+        assert "mcp__n3mc-workingmemory__*" in allow
 
     def test_atomic_replace_and_reread(self):
         src = (PLUGIN / "hooks" / "install_permissions.py").read_text(encoding="utf-8")
-        assert "os.replace" in src and "read_settings(path)" in src
+        assert "os.replace" in src
 
     def test_fallback_text(self):
         hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
@@ -170,27 +169,28 @@ class TestPluginHook:
     def test_uvx_missing(self, isolate, tmp_path):
         out = _run_plugin(isolate, path_env=str(tmp_path))
         msg = json.loads(out)["systemMessage"]
-        assert "uvx was not found on PATH" in msg and "uv を入れるまで" in msg
+        assert "was not found on PATH" in msg and "MCP サーバーは起動しません" in msg
 
 
 class TestPluginHookAsciiStdout:
     def test_ascii_one_line(self, isolate, tmp_path):
         out = _run_plugin(isolate, path_env=str(tmp_path))
-        assert out.count("\n") == 1 and out.isascii()
-        assert "記憶のフック" in json.loads(out)["systemMessage"]
+        assert out.count(chr(10)) == 1 and out.isascii()
+        assert "uv` を入れるまで" in json.loads(out)["systemMessage"]
 
 
-class TestNoMcpInClaudeCode:
+class TestPluginRegistersMcp:
     def test_plugin_files(self):
         plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-        assert "mcpServers" not in plugin and plugin["version"] == "2.0.2"
+        assert plugin["version"] == "2.0.2"
+        assert plugin["mcpServers"]["n3mc-workingmemory"] == {
+            "command": "uvx", "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"]}
         hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-        assert set(hooks) == {"SessionStart", "UserPromptSubmit", "Stop"}
-        assert hooks["UserPromptSubmit"][0]["hooks"][0]["command"] == \
-            "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-hook --uvx"
-        assert hooks["Stop"][0]["hooks"][0]["command"] == "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-stop-hook --uvx"
+        assert set(hooks) == {"SessionStart"}
+        market = json.loads((REPO / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        assert [p["name"] for p in market["plugins"]] == ["n3mc-workingmemory"]
 
-    def test_init_adds_no_mcp(self, isolate, tmp_path, monkeypatch, capsys):
+    def test_init_keeps_mcp_registrations(self, isolate, tmp_path, monkeypatch, capsys):
         cj = isolate["home"] / ".claude.json"
         cj.write_text(json.dumps({"mcpServers": {"n3mc-workingmemory": {}},
                                   "projects": {"/p": {"mcpServers": {"n3mc-workingmemory": {}}}}}), encoding="utf-8")
@@ -200,9 +200,8 @@ class TestNoMcpInClaudeCode:
         cli.main(["--init"])
         assert (cj.read_bytes(), (tmp_path / ".mcp.json").read_bytes()) == before
         out = capsys.readouterr().out
-        assert "claude mcp remove n3mc-workingmemory -s user" in out
-        assert "-s local (run it in that project)" in out
-        assert 'remove the "n3mc-workingmemory" entry from' in out
+        assert out.count("It is kept: Claude Code can use the MCP tools and the hooks together.") == 3
+        assert "remove" not in out
 
 
 class TestSeparateNames:

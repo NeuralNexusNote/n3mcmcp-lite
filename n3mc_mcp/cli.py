@@ -116,13 +116,13 @@ def _request(port, method, path, body=None, timeout=30):
     except urllib.error.URLError as e:
         reason = getattr(e, "reason", e)
         if isinstance(reason, (socket.timeout, TimeoutError)):
-            raise NoAnswer(f"timeout: {reason}") from None
+            raise NoAnswer(f"TimeoutError: {reason}") from None
         if isinstance(reason, ConnectionRefusedError) or isinstance(reason, OSError) and not isinstance(
                 reason, (ConnectionResetError, ConnectionAbortedError)):
             raise NotSent(f"{type(reason).__name__}: {reason}") from None
         raise NoAnswer(f"{type(reason).__name__}: {reason}") from None
     except (socket.timeout, TimeoutError) as e:
-        raise NoAnswer(f"timeout: {e}") from None
+        raise NoAnswer(f"TimeoutError: {e}") from None
     except (ConnectionResetError, ConnectionAbortedError, HTTPException) as e:
         raise NoAnswer(f"{type(e).__name__}: {e}") from None
     except OSError as e:
@@ -466,7 +466,9 @@ def _on_server_ok(cfg, health):
     _clear_start_failed()
     own = redis_display(cfg.get("redis_url"))
     theirs = (health or {}).get("redis")
-    if theirs and theirs != own:
+    if not theirs:
+        return
+    if theirs != own:
         _notify("redis_url_mismatch",
                 f"The N3MC Lite server uses Redis at {theirs}, but this process is set to {own}. Put redis_url "
                 f"into {paths.config_path()} instead of setting N3MC_REDIS_URL per application, then restart "
@@ -531,6 +533,7 @@ def _start_server(cfg, max_wait=START_WAIT_SECONDS) -> bool:
         return _wait_until_ok(cfg, min(START_WAIT_SECONDS, max_wait)) == "ok"
     except OSError as e:
         _err(f"could not create the PID file: {e}")
+        _set_reason(f"the memory server could not start (the PID file could not be created: {e})")
         return False
     try:
         try:
@@ -846,9 +849,8 @@ def _last_assistant_from_transcript(transcript_path, current_prompt):
             text, has = text_of(content)
             if not has:
                 continue
-            st = text.lstrip()
-            if st.startswith(("[Request interrupted by user", "<command-", "<local-command-")) \
-                    or st.startswith(_SYSTEM_PROMPT_PREFIXES):
+            if text.startswith(("[Request interrupted by user", "<command-", "<local-command-")) \
+                    or text.startswith(_SYSTEM_PROMPT_PREFIXES):
                 continue
             if first and current_prompt is not None and text.strip() == current_prompt.strip():
                 first = False
@@ -872,7 +874,7 @@ def hook_submit(raw: str, uvx=False) -> str:
     prompt = payload.get("prompt", payload.get("message", ""))
     text = _extract_text(prompt)
     session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else ""
-    if text.lstrip().startswith(_SYSTEM_PROMPT_PREFIXES):
+    if text.startswith(_SYSTEM_PROMPT_PREFIXES):
         paths.append_audit({"hook": "UserPromptSubmit", "stage": "skipped", "reason": "system_prompt"})
         return context.empty_block()
     cfg = load_config()
@@ -883,7 +885,9 @@ def hook_submit(raw: str, uvx=False) -> str:
         server_ok = False
     if server_ok:
         try:
-            _post(cfg["server_port"], "/repair", {}, timeout=10)
+            status, body = _post(cfg["server_port"], "/repair", {}, timeout=10)
+            if status != 200:
+                _err(f"repair: HTTP {status} {body}")
         except (NotSent, NoAnswer) as e:
             _err(f"repair: {e}")
     try:
@@ -899,13 +903,13 @@ def hook_submit(raw: str, uvx=False) -> str:
     new_turn = str(uuid.uuid4())
     _write_turn_id(session_id, new_turn)
     try:
-        if text.strip():
+        if text:
             out = _hook_search(cfg, server_ok, text, session_id)
         else:
             out = context.empty_block()
     except Exception as e:  # noqa: BLE001
         out = context.degraded_block(type(e).__name__)
-    if text.strip():
+    if text:
         _hook_save(cfg, server_ok, text, "user", session_id, new_turn)
     return out
 
@@ -990,7 +994,7 @@ def stop_cleanup(raw: str, uvx=False):
         d = paths.data_dir()
         if os.path.isdir(d):
             for name in os.listdir(d):
-                if name.startswith("turn_id") and name.endswith(".txt"):
+                if name.startswith("turn_id_") and name.endswith(".txt"):
                     p = os.path.join(d, name)
                     try:
                         if now - os.path.getmtime(p) > TURN_FILE_MAX_AGE:
@@ -1241,15 +1245,15 @@ def _check_old_mcp_registrations() -> list:
         if isinstance(data, dict):
             if isinstance(data.get("mcpServers"), dict) and "n3mc-workingmemory" in data["mcpServers"]:
                 msgs.append(f"An MCP registration of n3mc-workingmemory was found in Claude Code ({home_json}). "
-                            "Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s user")
+                            "It is kept: Claude Code can use the MCP tools and the hooks together.")
             projects = data.get("projects")
             if isinstance(projects, dict):
                 for proj, v in projects.items():
                     if isinstance(v, dict) and isinstance(v.get("mcpServers"), dict) \
                             and "n3mc-workingmemory" in v["mcpServers"]:
                         msgs.append(f"An MCP registration of n3mc-workingmemory was found in Claude Code ({home_json}, "
-                                    f"project {proj}). Claude Code now uses the hooks; remove it with: claude mcp "
-                                    "remove n3mc-workingmemory -s local (run it in that project)")
+                                    f"project {proj}). It is kept: Claude Code can use the MCP tools and the hooks "
+                                    "together.")
     except (OSError, ValueError):
         pass
     local = pathlib.Path(os.getcwd()) / ".mcp.json"
@@ -1258,8 +1262,8 @@ def _check_old_mcp_registrations() -> list:
             data = json.load(f)
         if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) \
                 and "n3mc-workingmemory" in data["mcpServers"]:
-            msgs.append(f"An MCP registration of n3mc-workingmemory was found in Claude Code ({local}). Claude Code "
-                        f'now uses the hooks; remove the "n3mc-workingmemory" entry from {local}')
+            msgs.append(f"An MCP registration of n3mc-workingmemory was found in Claude Code ({local}). It is kept: "
+                        "Claude Code can use the MCP tools and the hooks together.")
     except (OSError, ValueError):
         pass
     return msgs
@@ -1315,13 +1319,13 @@ def run_init() -> int:
                 kept.append(e2)
             elif not inner:
                 kept.append(entry)
-        if not plugin_on:
-            cmd = resolve_cmd(exe_name)
-            if cmd.startswith('"'):
-                messages.append(f"The hook command for {event} starts with a quote because {cmd} contains a space or "
-                                "another character the shell treats specially; if the hook does not run, install "
-                                "Python into a folder without such characters.")
-            kept.append({"hooks": [{"type": "command", "command": cmd, "timeout": 60}]})
+        cmd = resolve_cmd(exe_name)
+        if cmd.startswith('"'):
+            path = _tokens(cmd)[0] if _tokens(cmd) else cmd
+            messages.append(f"The hook command for {event} starts with a quote because {path} contains a space or "
+                            "another character the shell treats specially; if the hook does not run, install "
+                            "Python into a folder without such characters.")
+        kept.append({"hooks": [{"type": "command", "command": cmd, "timeout": 60}]})
         if kept:
             hooks[event] = kept
         elif event in hooks:
@@ -1340,15 +1344,15 @@ def run_init() -> int:
             stamp = datetime.now().strftime("%Y%m%d%H%M%S")
             shutil.copyfile(sp, str(sp) + f".bak-n3mc-lite-{stamp}")
         atomic_write(str(sp), (json.dumps(settings, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    if plugin_on:
+        print("The n3mc-workingmemory plugin is enabled: Claude Code also uses the MCP entry of the PyPI package "
+              f"(n3memorycore-mcp-lite=={__version__}). The hooks and the MCP tools work together when both run "
+              "the same code.")
     for m in messages:
         print(m)
     for m in _check_old_mcp_registrations():
         print(m)
-    if plugin_on:
-        print("The n3mc-workingmemory plugin is enabled and registers the N3MC Lite hooks, so n3mc-lite --init "
-              "added no hooks.")
-    else:
-        print(f"N3MC Lite hooks registered in {sp}. Saving starts with the next Claude Code session.")
+    print(f"N3MC Lite hooks registered in {sp}. Saving starts with the next Claude Code session.")
     return 0
 
 
@@ -1370,6 +1374,8 @@ def _tool_via_server(cfg, name, args):
             return json.dumps(save_without_server(cfg, args, str(e)), ensure_ascii=False), 0
         return unavailable_text(name, str(e), sent=False), 0
     except NoAnswer as e:
+        if name == "save_memory":
+            return json.dumps(save_without_server(cfg, args, str(e)), ensure_ascii=False), 0
         return unavailable_text(name, str(e), sent=True), 0
     if status == 200 and isinstance(r, dict):
         return r.get("text", ""), 0

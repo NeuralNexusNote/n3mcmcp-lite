@@ -235,8 +235,35 @@ class TestThinNoModel:
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
         ]
-        cp = self._run(tmp_path, ("\n".join(json.dumps(m) for m in msgs) + "\n").encode())
-        lines = [json.loads(x) for x in cp.stdout.decode().splitlines() if x.strip()]
+        # Like a real client: send a request, read its answer, then send the next one. (Writing everything
+        # and closing stdin at once lets the entry see end-of-input before it answers tools/list.)
+        env = dict(os.environ)
+        env["N3MC_DATA_DIR"] = str(tmp_path / "d")
+        os.makedirs(env["N3MC_DATA_DIR"], exist_ok=True)
+        with open(os.path.join(env["N3MC_DATA_DIR"], "config.json"), "w") as f:
+            json.dump({"redis_url": "redis://127.0.0.1:1/0", "server_port": 1}, f)
+        code = ("import n3mc_mcp.server as s\n"
+                "s._safe_ensure = lambda cli, cfg: None\n"
+                "s.run()\n")
+        p = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, env=env)
+        try:
+            def send(m):
+                p.stdin.write((json.dumps(m) + "\n").encode())
+                p.stdin.flush()
+
+            send(msgs[0])
+            first = p.stdout.readline()
+            send(msgs[1])
+            send(msgs[2])
+            second = p.stdout.readline()
+            p.stdin.close()
+            rest = p.stdout.read()
+            p.wait(timeout=60)
+        finally:
+            if p.poll() is None:
+                p.kill()
+        lines = [json.loads(x) for x in (first + second + rest).decode().splitlines() if x.strip()]
         assert len(lines) == 2
         init = lines[0]["result"]
         assert init["serverInfo"]["name"] == "n3mc-workingmemory" and init["instructions"] == INSTRUCTIONS
@@ -284,3 +311,15 @@ class TestThinSubprocess:
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(1)
+
+
+class TestCliBufferNoAnswer:
+    """§13 / §4.6: --buffer whose request times out saves directly (it never prints 'unknown tool')."""
+
+    def test_timeout_saves_directly(self, monkeypatch, capsys, rconn):
+        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
+        monkeypatch.setattr(cli, "_post", lambda *a, **k: (_ for _ in ()).throw(cli.NoAnswer("TimeoutError: timed out")))
+        cli.main(["--buffer", "saved after a timeout"])
+        r = json.loads(capsys.readouterr().out)
+        assert r["saved"] and r["warning"] == "embedding_unavailable"
+        assert "TimeoutError: timed out" in r["detail"]

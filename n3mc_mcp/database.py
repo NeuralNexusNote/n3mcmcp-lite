@@ -3,12 +3,14 @@ hybrid search and result shaping, list, recall, delete, repair (spec §3.3–§3
 import hashlib
 import math
 import os
+import socket
 import struct
 import sys
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse, urlunparse
 
 import redis
 from redis.commands.search.query import Query
@@ -172,12 +174,33 @@ class Database:
 
     # ── connection (§3.9) ────────────────────────────────────────────────
 
-    def _make_client(self):
+    def _connect_url(self):
+        """The URL to connect with: for host "localhost", 127.0.0.1 when a TCP connection there succeeds
+        within 0.3 s (§3.3). Windows tries ::1 first; a Redis that listens on 127.0.0.1 only (docker -p
+        127.0.0.1:6379:6379) then costs the whole socket_connect_timeout (2 s) on every new connection."""
         try:
-            return redis.from_url(self.url, decode_responses=False, protocol=2,
+            p = urlparse(self.url)
+            if (p.hostname or "").lower() != "localhost":
+                return self.url
+            port = p.port or 6379
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                pass
+            netloc = p.netloc
+            at = netloc.rfind("@")
+            userinfo, hostport_part = (netloc[:at + 1], netloc[at + 1:]) if at >= 0 else ("", netloc)
+            new_hostport = "127.0.0.1" + hostport_part[len("localhost"):] \
+                if hostport_part.lower().startswith("localhost") else hostport_part
+            return urlunparse(p._replace(netloc=userinfo + new_hostport))
+        except (OSError, ValueError):
+            return self.url
+
+    def _make_client(self):
+        url = self._connect_url()
+        try:
+            return redis.from_url(url, decode_responses=False, protocol=2,
                                   socket_connect_timeout=2, socket_timeout=5)
         except TypeError:
-            return redis.from_url(self.url, decode_responses=False,
+            return redis.from_url(url, decode_responses=False,
                                   socket_connect_timeout=2, socket_timeout=5)
 
     def _close_client(self):

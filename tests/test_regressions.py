@@ -1005,3 +1005,40 @@ class TestPublicRepoHygiene:
         import n3mc_mcp
         p = os.path.join(os.path.dirname(__file__), "..", ".claude-plugin", "marketplace.json")
         assert json.load(open(p, encoding="utf-8"))["metadata"]["version"] == n3mc_mcp.__version__
+
+
+class TestLocalhostIpv4First:
+    """§3.3: host localhost connects to 127.0.0.1 when it answers there (no 2 s IPv6 wait on Windows)."""
+
+    def _db(self, url):
+        return D.Database({"redis_url": url, "embedding_model": "x"})
+
+    def test_rewritten_when_ipv4_answers(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(16)
+        port = srv.getsockname()[1]
+        try:
+            assert self._db(f"redis://localhost:{port}/2")._connect_url() == f"redis://127.0.0.1:{port}/2"
+            assert self._db(f"redis://u:pw@localhost:{port}/0")._connect_url() == f"redis://u:pw@127.0.0.1:{port}/0"
+        finally:
+            srv.close()
+
+    def test_kept_when_nothing_on_ipv4(self):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.close()
+        assert self._db(f"redis://localhost:{port}/0")._connect_url() == f"redis://localhost:{port}/0"
+
+    def test_other_hosts_untouched(self):
+        assert self._db("redis://example.invalid:6379/0")._connect_url() == "redis://example.invalid:6379/0"
+
+    def test_connect_is_fast(self, rconn):
+        url = os.environ["N3MC_REDIS_TEST_URL"].replace("127.0.0.1", "localhost")
+        d = self._db(url)
+        d.cfg["owner_id"] = "x"
+        t = time.monotonic()
+        assert d.ensure_connected(ephemeral=False) == "ok"
+        assert time.monotonic() - t < 1.0
+        d.client.close()

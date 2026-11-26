@@ -30,10 +30,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   any body up to 19 characters over `chunk_threshold` gives one chunk: that
   holds only when the rest after the cut at a soft break is shorter than 20
   characters.
-- The code, the plugin and the tests are generated again from the
-  specification: the plugin `n3mc-workingmemory` registers the hooks only (no
-  MCP server in Claude Code), and the plugin `n3mc-workingmemory-mcp` is
-  removed from the marketplace.
+- The code and the tests are generated again from the specification.
+- **The plugin `n3mc-workingmemory` registers the MCP server in Claude Code
+  again, as in v1.12.2 and v2.0.0** (v2.0.2 had changed it to register the
+  hooks only). Claude Code can use MCP, the hooks (`n3mc-lite --init`), or
+  both. `n3mc-lite --init` registers the hooks also while the plugin is
+  enabled and never removes an MCP registration. Method A registers both the
+  hooks and the MCP entry in Claude Code (`claude mcp add`), and no longer adds
+  `mcp__n3mc-workingmemory` to `permissions.deny`. The self-evaluation (§10)
+  runs items 1–6 through the MCP tools of the restarted Claude Code session;
+  when the tools are missing, the AI asks for a restart instead of switching
+  to the CLI. The hook checks (§10 items 7–9) are no longer part of the
+  self-evaluation (the pytest suite covers the hooks' code), and the
+  cross-session test of Appendix B Phase 2 runs through the MCP tools. The plugin `n3mc-workingmemory-mcp` is removed from the
+  marketplace. The specification and the README say the same.
+- `n3mc-lite --buffer` whose request times out saves the entry directly, as
+  the specification says, instead of printing `Error: unknown tool
+  'save_memory'`. Smaller differences from the specification are fixed too
+  (the reason text of a timeout, a failed `/repair` logged, `--stop` deleting
+  only `turn_id_*.txt`, the MCP entry keeping the `agent_name` it is given,
+  `redis_url_mismatch` cleared only when the server reports the same Redis).
+- The specification no longer contradicts itself on the `list_memories`
+  limit 0 (20, as in 1.x), the exit status of `--stop-server`, the final
+  message of `--init`, and whether Claude Code has the MCP tools (§13).
+- A Redis URL with the host `localhost` no longer costs about 2 seconds per new
+  connection on Windows: `localhost` is tried on `127.0.0.1` first (Windows
+  tries `::1` first, and the Redis container listens on `127.0.0.1` only).
 - Lowering only `chunk_threshold` to 100 or less no longer reports a
   `config_type` notice about `chunk_overlap` on every start; the missing
   `chunk_overlap` is written as the value in effect.

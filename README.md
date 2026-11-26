@@ -77,11 +77,12 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 
 | Application | Connects through | Registered by |
 |---|---|---|
-| Claude Code | **the hooks only** (`UserPromptSubmit`, `Stop`) and the CLI `n3mc-lite` | the plugin, or `n3mc-lite --init` |
+| Claude Code | **the hooks** (`UserPromptSubmit`, `Stop`) and the CLI `n3mc-lite`, **or MCP** (the thin client) — your choice; both together also work | hooks: `n3mc-lite --init`; MCP: the plugin (as in v1.12.2) or `claude mcp add` |
 | Claude desktop app and other applications without hooks | **MCP only** (the thin client `n3mc-workingmemory`) | you, in the application's configuration file |
 
-- **Do not register the MCP server in Claude Code.** Claude Code gets its
-  memory from the hooks and the CLI.
+- **Claude Code can use the hooks, MCP, or both.** The hooks save every
+  message and reply; with MCP the model saves through the tools, as in
+  v1.12.2.
 - Both paths reach **the same resident server and the same Redis**: what is
   said in Claude Code is found from the desktop app, and what the desktop
   app saves is found in Claude Code.
@@ -142,7 +143,8 @@ an AI can generate the implementation from it. To do that:
    to the specification `N3MemoryCore_MCP_Spec_EN.md`."
 
 The AI first checks the folder, Python and Redis, then generates the package,
-runs `pip install -e .`, registers the hooks with `n3mc-lite --init`, writes
+runs `pip install -e .`, registers the hooks (`n3mc-lite --init`) and the MCP
+entry (`claude mcp add`) in Claude Code, writes
 the MCP entry into the
 Claude desktop app's configuration file if the app is installed (after a
 backup, replacing only that entry), and checks that everything starts. The
@@ -154,12 +156,9 @@ Then restart Claude Code, as in [Step 4 — Restart](#step-4--restart).
 
 ### Method B: Install the package (bonus)
 
-#### Step 2 — Claude Code (hooks)
+#### Step 2 — Claude Code (MCP or hooks)
 
-Choose one. **Do not register the MCP server in Claude Code**
-(`claude mcp add`, `~/.claude.json`, `.mcp.json`).
-
-**(a) Plugin marketplace (recommended — no config file to edit).** Requires
+**(a) Plugin marketplace — MCP, as in v1.12.2 (no config file to edit).** Requires
 [`uv`](https://docs.astral.sh/uv/) on `PATH`. Run inside Claude Code:
 
 ```
@@ -167,12 +166,12 @@ Choose one. **Do not register the MCP server in Claude Code**
 /plugin install n3mc-workingmemory@neuralnexusnote
 ```
 
-The plugin registers three hooks: `SessionStart` (pre-approves the CLI
-commands), and `UserPromptSubmit` and `Stop`, which run through
-`uvx --from n3memorycore-mcp-lite==2.0.2 …` (the version is pinned to the
-package version).
+The plugin registers the MCP server `n3mc-workingmemory` in Claude Code,
+as in v1.12.2. It runs through `uvx --from n3memorycore-mcp-lite==2.0.2 …`
+(the version is pinned to the package version). A `SessionStart` hook
+pre-approves the memory tools.
 
-**(b) pip.**
+**(b) pip — hooks.**
 
 ```bash
 pip install n3memorycore-mcp-lite
@@ -182,10 +181,11 @@ n3mc-lite --init
 `n3mc-lite --init` registers the two hooks in `~/.claude/settings.json` with
 the absolute paths of `n3mc-lite-hook` / `n3mc-lite-stop-hook`, keeps every
 other entry (including other N3MC products' hooks), backs the file up before
-writing, and adds the permission rules for the CLI. When the plugin is enabled, it
-adds no hooks (the plugin's hooks are used).
+writing, and adds the permission rules for the CLI. It never removes an MCP
+registration.
 
-Use only one of (a) and (b): with both, every message is searched twice.
+(a) and (b) can be used together: the MCP tools and the hooks reach the
+same memory, and the model then does not save on every turn.
 
 #### Step 3 — Claude desktop app (optional)
 
@@ -541,9 +541,9 @@ port (18524), its own hook commands (`n3mc-lite-hook`,
   must run the same version; otherwise each replaces the other's server on
   every call. Register the desktop app with the same scripts folder the
   hooks use, or with the same pinned `uvx` form.
-- **Plugin and pip together**: do not use both. `--init` registers no hooks
-  while the plugin is enabled, and the plugin reports hooks written by
-  `--init`.
+- **Plugin and pip together**: they work together when both run the same
+  version (the plugin pins it). A version generated from the specification
+  runs other code, so its setup stops while the plugin is enabled.
 
 ## Why N3MemoryCore? (vs. built-in memory)
 

@@ -73,24 +73,24 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 
 | アプリ | つながる経路 | 登録するもの |
 |---|---|---|
-| Claude Code | **フックだけ**（`UserPromptSubmit`、`Stop`）と CLI `n3mc-lite`（§12、§13） | プラグイン、または `n3mc-lite --init` |
+| Claude Code | **フック**（`UserPromptSubmit`、`Stop`）と CLI `n3mc-lite`（§12、§13）、**または MCP**（薄いクライアント、§4.6）。利用者が選ぶ。両方でもよい | フック：`n3mc-lite --init`。MCP：プラグイン `n3mc-workingmemory`（v1.12.2 と同じく MCP の入口を登録する）、または `claude mcp add`。方法 A は両方を登録する |
 | Claude デスクトップアプリと、フックのないほかのアプリ | **MCP だけ**（薄いクライアント `n3mc-workingmemory`、§4.6） | Claude デスクトップアプリは、方法 A のセットアップで AI がその設定ファイルに書く。ほかのアプリは利用者が書く（§8） |
 
-- **Claude Code はもう MCP を使わない。** プラグインはフックを登録し、Claude Code に MCP サーバーを登録しなくなった。`n3mc-lite --init` も MCP サーバーを登録しない。Claude Code に MCP サーバーを登録してはならない。
+- **Claude Code は、フックでも MCP でも、両方でもつなげる。** フックは、すべてのメッセージと応答を保存し、毎ターンに合う記憶を入れる。MCP では、v1.12.2 と同じく、モデルがツールで検索と保存をする（§11）。プラグイン `n3mc-workingmemory` は、v1.12.2 と同じく MCP の入口を登録する（フックは登録しない）。`n3mc-lite --init` はフックを登録し、MCP の登録には触れない。両方を使うときは、指示（§5 (1) の規則 1 と 2）が、フックの塊があるときは毎ターン保存しないようモデルに伝える。
 - どちらの経路も**同じ常駐サーバーと同じ Redis** に届く。Claude Code で話したことはデスクトップアプリから見つかり、デスクトップアプリが保存したことは Claude Code で見つかる。
 
 **更新した後に既存の利用者から見えること**
 
 | 以前（v1.12.2） | 以後（v2.0.0） |
 |---|---|
-| Claude Code に 7 つの `mcp__…n3mc-workingmemory__*` ツールが見えていた | **Claude Code に MCP のツールは見えなくなる。** プラグインはもう MCP サーバーを登録しない |
+| Claude Code に 7 つの `mcp__…n3mc-workingmemory__*` ツールが見えていた | **変わらない。** プラグインは v1.12.2 と同じく MCP の入口を登録し、7 つのツールが見える。フックを使うときは `n3mc-lite --init` を実行する |
 | モデルが `save_memory` に渡すと決めたものだけが保存された | **空でないすべてのメッセージと応答をフックが保存する**（コードブロックは `[code omitted]` にする）。保存は `[user]` / `[claude]` のレコードになる（§3.16） |
 | モデルがターンの最初に `search_memory` を呼んでいた | `UserPromptSubmit` フックが、メッセージのたびに検索し、結果を `# Recalled Memory Context` の見出しで Claude のコンテキストに入れる（§12） |
 | 検索・一覧・取り出し・削除は MCP のツールだった | Claude Code では CLI が同じことをする：`n3mc-lite --search`、`--list`、`--recall-thread`、`--delete`、`--delete-session`、`--buffer`、`--repair`（§13）。表示する文はツールの文と同じである |
 | アプリごとに自分の MCP サーバーを起動し、モデル（約 1.1 GB）を読み込んでいた | 1 つの常駐サーバーがモデルを 1 回だけ読み込む（§3.15）。MCP の入口は薄いクライアントで、モデルを読み込まない（§4.6） |
 | セッションの合間に動くプロセスはなかった | 常駐サーバーは、一度起動するとバックグラウンドで動き続ける |
-| pip の利用者は MCP サーバーを登録した | pip の利用者は `n3mc-lite --init` を 1 回実行してフックを登録する（§12）。Claude Code に残った古い `n3mc-workingmemory` の登録はもう使われない。方法 A はそれを消し、`--init` は知らせるだけで残す（§8） |
-| 古いプラグインや `.mcp.json` が `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`（版の指定なし）を起動していた | **プラグインを更新する**（`/plugin update`）。それまでは、`uvx` が 2.0.0 を取ってくると、その登録が 2.0.0 の薄いクライアントを Claude Code の MCP サーバーとして、フックなしで起動する。モデルは v1.12.2 と同じくツールで検索と保存をし、それが常駐サーバーを通る（§4.6）。`n3mc-lite --init` は、そのような登録を知らせる（§8） |
+| pip の利用者は MCP サーバーを登録した | その登録はそのまま使える（MCP の入口は薄いクライアントになる、§4.6）。フックも使うときは、`n3mc-lite --init` を 1 回実行する（§12）。`--init` も方法 A も、MCP の登録を消さない（§8） |
+| 古いプラグインや `.mcp.json` が `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`（版の指定なし）を起動していた | そのまま動く。`uvx` が 2.0.x を取ってくると、その登録が薄いクライアントを起動し、モデルは v1.12.2 と同じくツールで検索と保存をし、それが常駐サーバーを通る（§4.6）。プラグインを更新すると、`uvx` の版がパッケージの版に固定される（§2） |
 | `N3MC_SESSION_ID` で、Claude Code のセッションの保存を 1 つのプロジェクトにまとめられた | フックのレコードは Claude Code 自身の `session_id` を持つ（§3.16）。`N3MC_SESSION_ID` は今も MCP の保存と検索に効く（§4.6）。`delete_memories_by_session` / `--delete-session` には、レコードに出るセッション ID（`--list`）を使う |
 | MCP クライアントの `env` の `N3MC_REDIS_URL` で Redis を選べた | 常駐サーバーは、それを起動したプロセスの環境を使う（§3.15）。どのプロセスも同じものを使うよう、`redis_url` を `config.json` に書く。自分の設定が動いているサーバーと違うクライアントには、通知 `redis_url_mismatch` が出る |
 | `skip_code_blocks: true` は、フェンス付きの `save_memory` を断った | 同じ設定で、フェンスを含むフックのメッセージや応答も、すべて保存しない（§3.16）。既定の `false` なら `[code omitted]` にして保存する |
@@ -100,7 +100,7 @@ Claude desktop app ─(MCP, stdio)─▶ n3mc-workingmemory ───┘
 | 全文検索は、索引 `n3mc_idx` の `content` の欄を使っていた | `content_fts`（役割の接頭辞と `[code omitted]` を除いた本文）を使う（§3.7）。古い形の索引は、起動のときに一度だけ消して作り直す。レコードそのものは残る。それより前に保存したレコードには `content_fts` がないので、期限で消えるまで、BM25 は `content_ngram` だけでそれを見つける（§3.7） |
 | MCP の SDK が、ツールの引数をスキーマで確かめ、`Input validation error: …` と答えていた（たとえば 100 を超える `limit`、文字列の `importance`、数の `turn_id`） | Lite が自分で引数を確かめ、自分の文で答える（§4.3、§4.6 の 5）。たとえば 100 を超える `limit` は受け付け（1 未満は 1 にする）、文字列でない `turn_id` には `{"status": "error", "saved": false, "reason": "turn_id must be a string (got int)"}` を返す |
 | — | `--stop` は、Claude Code がターンを終えた各プロジェクトの根のフォルダに `.claude/rules/n3mc-lite-behavior.md` を書く（§12.4、§12.9） |
-| `examples/claude_code_mcp.json` が Claude Code への MCP の登録を示していた | 消した。Claude Code はフックを使う |
+| `examples/claude_code_mcp.json` が Claude Code への MCP の登録を示していた | 消した。Claude Code で MCP を使うときは、プラグインを入れるか `claude mcp add` で登録する（§8） |
 | Redis の案内と README は `docker run … -p 6379:6379 …`（すべてのインターフェース）と書いていた | **（表示の変更）** `-p 127.0.0.1:6379:6379` と書く。記憶がネットワークから届かなくなる。すでに作ったコンテナは、自分の設定のままである。変えるには作り直す（`docker rm -f redis-stack`、そのあと新しい `docker run`）。そのとき、そのコンテナの記憶は、ほかの再起動と同じく消える（§3.4） |
 | 規則 0 と検索のリマインダは、永続の記憶として `n3mc-longtermmemory` を挙げていた | **（表示の変更）** `n3mc-pro`、`n3mc-pg`、`n3mc-longtermmemory`（N3MC MCP Pro、その PostgreSQL 版、以前の MCP Pro の MCP の登録名）を挙げる（§5 (1)、(2)） |
 | 方法 A は `claude_desktop_config.json` を書き換えていた | AI は、控えを取ってから `n3mc-workingmemory` の項目だけを置き換える（§8「自動の登録」） |
@@ -164,7 +164,7 @@ docker start redis-stack
    4. **頼む**:プロンプト欄に「この指示書 `N3MemoryCore_MCP_Spec_JP.md` に従って n3mcmcp-lite を実装してください」と書いて送ります。
 
    AI は最初にフォルダ・Python・Redis を確かめ([§1](#1-ビジョン) の「セットアップ前の確認」)、足りないものがあれば手順を示して止まります。AI がパッケージ構成・RediSearch インデックス作成・常駐サーバー・フック・CLI・MCP の薄いクライアントまで生成します。段階的な **実装 → デバッグ → 自律評価 → 品質レビュー** の 4 フェーズ・ワークフローは [付録 B](#付録-b推奨-ai-支援ワークフロー) を参照。
-3. **導入と登録(AI が行う)**：AI がプロジェクトルートで `pip install -e .` を実行し、`n3mc-lite --init` で Claude Code に**フック**を登録し、Claude デスクトップアプリが入っていれば、その設定ファイルに MCP の入口の項目(絶対パス入り)を書き込み(控えを取り、この項目だけを置き換える)、すべてが起動することを確かめます([§8「コード生成の後の自動登録」](#コード生成の後の自動登録方法-a--必須))。Claude Code の設定ファイルを自分で編集する必要はありません。
+3. **導入と登録(AI が行う)**：AI がプロジェクトルートで `pip install -e .` を実行し、`n3mc-lite --init` で Claude Code に**フック**を、`claude mcp add` で **MCP の入口**を登録し、Claude デスクトップアプリが入っていれば、その設定ファイルに MCP の入口の項目(絶対パス入り)を書き込み(控えを取り、この項目だけを置き換える)、すべてが起動することを確かめます([§8「コード生成の後の自動登録」](#コード生成の後の自動登録方法-a--必須))。Claude Code の設定ファイルを自分で編集する必要はありません。
 4. **クライアントを再起動**。再起動の後の最初の記憶の検索は、常駐サーバーが ~1.1 GB の埋め込みモデルをダウンロードしてロードするので 30–60 秒かかります。
 
 #### 方法 B：パッケージ導入（おまけ）
@@ -181,13 +181,13 @@ docker start redis-stack
      ```bash
      uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-workingmemory
      ```
-   - **Claude Code プラグインマーケットプレイス**（pip/uvx コマンドを手動で打つ必要なし — プラグインがフックを `uvx` で動かすが、`uv` は PATH に必要）：
+   - **Claude Code プラグインマーケットプレイス**（pip/uvx コマンドを手動で打つ必要なし — プラグインが MCP の入口を `uvx` で動かすが、`uv` は PATH に必要）：
      ```
      /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
      /plugin install n3mc-workingmemory@neuralnexusnote
      ```
 3. **アプリをつなぐ**：
-   - **Claude Code**：プラグインの利用者は何もしない。プラグインがフックを登録する。pip の利用者は `n3mc-lite --init` を 1 回実行する（§12）。Claude Code に MCP サーバーを登録してはならない。
+   - **Claude Code**：プラグインの利用者は何もしない。プラグインが、v1.12.2 と同じく MCP の入口を登録する。すべてのメッセージと応答を保存するフックを使うときは、pip で入れて `n3mc-lite --init` を 1 回実行する（§12）。MCP、フック、その両方のどれを使ってもよい。
    - **Claude デスクトップアプリ**（とその他の MCP クライアント）：アプリの設定に MCP の入口を登録する（[§8](#8-クライアント設定) 参照）。
 4. **クライアントを再起動**。最初の記憶の検索は、常駐サーバーが ~1.1 GB の埋め込みモデルをダウンロードしてロードするので 30–60 秒かかります。
 
@@ -271,11 +271,11 @@ n3memorycore-mcp-lite/
 │   ├── processor.py                # Embedding, ranking, CJK tokenization, reranker
 │   ├── config.py                   # config.json load/save + UUID generation
 │   └── paths.py                    # data folder (~/.n3mc-workingmemory/) and its files (§7) + legacy platformdirs path for migration
-├── plugins/n3mc-workingmemory/     # Claude Code plugin (§8, §12)
-│   ├── .claude-plugin/plugin.json  # no "mcpServers"
+├── plugins/n3mc-workingmemory/     # Claude Code plugin: the MCP entry, as in v1.12.2 (§8)
+│   ├── .claude-plugin/plugin.json  # "mcpServers": n3mc-workingmemory through uvx
 │   └── hooks/
-│       ├── hooks.json              # SessionStart + UserPromptSubmit + Stop
-│       └── install_permissions.py  # SessionStart: permission rules for the CLI commands (§8)
+│       ├── hooks.json              # SessionStart only
+│       └── install_permissions.py  # SessionStart: permission rules for the MCP tools (§8)
 ├── .claude-plugin/marketplace.json # Marketplace entry; metadata.version = package version
 ├── tests/                          # pytest suite (§9)
 │   ├── conftest.py
@@ -307,7 +307,7 @@ n3memorycore-mcp-lite/
 - `[project.scripts]`：上の表の 5 つのスクリプト。
 - 分類子 `Operating System :: OS Independent` を、`Operating System :: Microsoft :: Windows` と `Operating System :: POSIX :: Linux` に変える（macOS は対象外）。
 
-`.claude-plugin/marketplace.json` の `metadata.version` と、`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` の `version` は、パッケージのバージョン（`2.0.2`）である。**`uvx` のコマンドは同じバージョンに固定する**。この文書にあるすべての `uvx --from n3memorycore-mcp-lite==<version>`（プラグインのフック、許可ルール、ルールファイルの `{cli}`、デスクトップの登録）は、パッケージのバージョンを書く。リリースでは、これらすべてを 2 つの `version` フィールドと一緒に変える。固定しないと、プラグインと pip のインストールが別のバージョンを動かしうる。それらのサーバーは `code_version` が違うので、互いを置き換え合う（§4.6）。
+`.claude-plugin/marketplace.json` の `metadata.version` と、`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` の `version` は、パッケージのバージョン（`2.0.2`）である。**`uvx` のコマンドは同じバージョンに固定する**。この文書にあるすべての `uvx --from n3memorycore-mcp-lite==<version>`（プラグインの MCP の入口、ルールファイルの `{cli}`、デスクトップの登録）は、パッケージのバージョンを書く。リリースでは、これらすべてを 2 つの `version` フィールドと一緒に変える。固定しないと、プラグインと pip のインストールが別のバージョンを動かしうる。それらのサーバーは `code_version` が違うので、互いを置き換え合う（§4.6）。
 
 **そのまま残すファイル（この指示書からは作らない）**：`SECURITY.md`、`CONTRIBUTING.md`、`.github/`（issue と PR のテンプレート、`workflows/test.yml`、`workflows/pypi-publish.yml`）、`server.json`（MCP レジストリの項目）、`.gitignore`、評価用スクリプト `tests/eval_*.py`、`tests/test_cross_session.py`。コードを作り直しても、これらを消したり書き換えたりしてはならない。`.github/workflows/test.yml` の CI マトリクスを手で直すときは、Windows と Linux だけを並べる。
 
@@ -354,7 +354,7 @@ n3memorycore-mcp-lite/
 > | 29 | MCP の入口がモデルを import する、または stdout に出力する | アプリごとに約 1.1 GB をまた読み込む。紛れ込んだ `print()` が JSON-RPC の流れを壊す | 薄いクライアントは `sentence_transformers` も `torch` も import しない。stdout には MCP のメッセージ以外を出さない | [§4.6](#46-mcp-の薄いクライアント) |
 > | 30 | `127.0.0.1` に `urllib.request.urlopen` を使う | `HTTP_PROXY` が設定されている（会社の PC）と、すべてのリクエストがプロキシに行く。サーバーが止まっているように見え、フックはすべて待たされる | リクエストは `build_opener(ProxyHandler({}))` で開く | [§3.15](#315-常駐サーバー) |
 > | 31 | エンドポイントを `async def` で書く | 長い `/repair` や検索が `/health` を止める。CLI はサーバーがないと判断し、もう 1 つ起動する | Redis かモデルにさわるエンドポイントは、すべて普通の `def` にする | [§3.15](#315-常駐サーバー) |
-> | 32 | プラグインのフックと `--init` のフックの両方が登録される | メッセージごとに検索が 2 つ差し込まれる。1 つのやりとりの `[user]` と `[claude]` のレコードが別々の `turn_id` を持つ | プラグインが有効な間、`--init` は何も登録しない。プラグインの SessionStart フックは `--init` のフックを知らせる | [§14](#14-ほかの-n3mc-製品との共存) |
+> | 32 | プラグインの MCP の入口（`uvx` で動く PyPI のコード）と、生成したインストールのフック・CLI が並ぶ | 呼び出しのたびに互いのサーバーを止めて起動し直す（`code_version` が違う） | プラグインが有効な間、方法 A は止めて利用者に選ばせる（§8） | [§14](#14-ほかの-n3mc-製品との共存) |
 > | 33 | フックの出力が 10,000 文字を超える | Claude Code はそれをファイルに移し、Claude には 2,000 文字のプレビューしか見えない | フックと MCP の `search_memory` の塊に `context_max_chars`（既定 9,500） | [§3.17](#317-コンテキストの大きさの上限) |
 > | 34 | Redis かサーバーが止まっているとき、フックが例外を出すか非ゼロで終わる | Claude Code がメッセージのたびにフックのエラーを表示する。プロンプトが失われる | 先に `audit.log`。ベクトルなしで直接保存。通知。exit 0 | [§12](#12-claude-code-のフック) |
 
@@ -387,7 +387,7 @@ N3MemoryCore は各レコードの出所と文脈を識別する 5 つの ID フ
 
 ### 3.3 Redis 接続と TTL
 
-**接続**：`redis_url`（設定フィールド）または環境変数 `N3MC_REDIS_URL`（環境変数が優先）から構築。既定値：`redis://localhost:6379/0`。`decode_responses=False` — クライアントはバイナリ埋め込みペイロードを扱う必要がある。
+**接続**：`redis_url`（設定フィールド）または環境変数 `N3MC_REDIS_URL`（環境変数が優先）から構築。既定値：`redis://localhost:6379/0`。`decode_responses=False` — クライアントはバイナリ埋め込みペイロードを扱う必要がある。**ホストが `localhost` のとき**：クライアントを作る前に、`127.0.0.1:<port>` に TCP で 0.3 秒だけつないでみる。つながれば、`localhost` を `127.0.0.1` に置き換えた URL（利用者名、パスワード、ポート、DB は同じ）でクライアントを作る。つながらなければ、URL をそのまま使う。設定の `redis_url` と、それを表示する文は変えない。**理由**：Windows は `localhost` を先に `::1` として試す。`127.0.0.1` だけで待ち受ける Redis（`docker run -p 127.0.0.1:6379:6379`）では、新しく接続するたびに `socket_connect_timeout`（2 秒）を待つことになる。実測で 2.0 秒、`127.0.0.1` では 0.005〜0.04 秒。
 
 > **⚠️ 実装注意（redis-py 8.0+ / RESP3）**：redis-py 8.0 から `from_url()` の既定プロトコルが **RESP3** になった。`decode_responses=False` と RESP3 を併用すると `FT.SEARCH` の応答が **bytes キーの dict** として届き、`Result.from_resp3` のパースが失敗して**検索結果が常に 0 件**になる。**現行実装はこれを (a) `pyproject.toml` で `redis<8.0.0` をピンし、かつ (b) `FT.SEARCH` が dict 応答を返した場合のハンドリングを併用して吸収している。** 新しい redis-py を意図的に使う場合は、接続時に **`protocol=2`（RESP2）を明示**すること（`redis.from_url(url, decode_responses=False, protocol=2)`）。この設定は接続クライアント・テストフィクスチャの**両方**に適用する。
 
@@ -1208,7 +1208,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 | --------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
 | `search_memory` | `query: string, limit?: int, session_id?: string, since?: string, until?: string` (§4.3.1) | ハイブリッド（ベクトル + BM25）検索、時間減衰＋頻度ブースト＋ `b_session` ランキング、語彙リランク。チャンクヒットは親ドキュメントに折りたたまれ全文 verbatim で返る（[§3.11](#311-全文再現親ドキュメントチャンクパターン)）。結果は [§3.14](#314-検索結果の整形) の通りに整形・表示される（ベクトル下限、新しい版を先頭へ、相対カット、`saved=` 時刻）。**下限を通った行が `min_results`（既定 3）件に満たないときは、落ちた行のうち近いものを `#### Possibly related (weak matches — may be unrelated)` の下に足す。ツールの説明では LLM に「弱い候補は関連度の下限を通っておらず、関係がないことが多い。質問に実際に関係があるときだけ使い、関係がなければ無視して触れない」と伝える。**`session_id` 引数は **Pro と同じ b_session ランキング**（match=1.0 / mismatch=0.6）に直接作用し、同一 `session_id` で保存されたメモリを上位に押し上げる。省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数 → プロセス起動時 UUIDv4）が effective_session として使われる。markdown を返す。 |
 | `save_memory`   | `content: string, agent_name?: string, owner_id?: string, importance?: number, session_id?: string, turn_id?: string` (§4.3.1) | 本文長 ≤ `chunk_threshold` なら完全一致の重複判定のみ（§3.8）を行った後、HSET + EXPIRE し `{"status": "saved", "saved": true, "id": "...", "ttl_seconds": ...}` を返す。超過なら**親ドキュメント**を `doc:<id>` に verbatim 保存し、スライディングウィンドウでチャンク化した `mem:<id>` を並列登録、`{"status": "saved", "saved": true, "parent_id": "...", "chunks": N, "saved_count": N, "ids": [...], "ttl_seconds": ...}` を返す。`owner_id` を指定した場合、サーバー設定と不一致なら `{"status":"error","saved":false,"reason":"owner_id mismatch"}` を返す。`importance` は 0.5〜2.0 の範囲でクランプされ、保存時スコア重みに反映される。数値でない値（`NaN` を含む。例：文字列 `"nan"`）は `{"saved": false, "status": "error", "reason": "importance must be numeric (got <value>)"}` を返し、何も保存しない（そうしないと `NaN` がクランプを素通りし、最大の重要度 `2.0` として保存される）。`session_id` 省略時はサーバー既定（`N3MC_SESSION_ID` 環境変数、なければプロセス起動時の UUIDv4）が write-time tag として使われる（`delete_memories_by_session` のフィルタキー、および後続 `search_memory` の `b_session` マッチ対象）。 |
-| `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。1 未満の `limit` は 1 として扱う（負の値で一覧の末尾から行を削ってはならない）。親は `[doc×N]` タグ付き。チャンクは隠蔽（FT.SEARCH `*` クエリ後に Python 側で `parent_id` 空文字列フィルタ、§3.12 参照）。**索引をページ単位で読む**：新しい順（`timestamp_epoch` の降順）に 200 件ずつ（`LIMIT <offset> 200`）取り出し、このオーナーの独立メモリが `limit` 件集まるか索引が尽きるまでページを進める。（`max(limit × 5, 200)` 行を 1 回だけ読むのでは足りない。260 チャンクの文書のあとではその塊がチャンクだけになり、その直前に保存した独立メモリが一覧に出ない。） |
+| `list_memories` | `limit?: int (既定 20)`                   | 親ドキュメントと独立メモリを新しい順で並べた markdown。`limit` がない、空、または 0 のときは 20、それ以外の 1 未満の値は 1 として扱う（負の値で一覧の末尾から行を削ってはならない。§5 (4)）。親は `[doc×N]` タグ付き。チャンクは隠蔽（FT.SEARCH `*` クエリ後に Python 側で `parent_id` 空文字列フィルタ、§3.12 参照）。**索引をページ単位で読む**：新しい順（`timestamp_epoch` の降順）に 200 件ずつ（`LIMIT <offset> 200`）取り出し、このオーナーの独立メモリが `limit` 件集まるか索引が尽きるまでページを進める。（`max(limit × 5, 200)` 行を 1 回だけ読むのでは足りない。260 チャンクの文書のあとではその塊がチャンクだけになり、その直前に保存した独立メモリが一覧に出ない。） |
 | `delete_memory` | `id: string`                              | 設定の `owner_id` のレコードに限る（別のオーナーの ID → `{"status":"not_found","id":...}`）。**ID は前置きなし（`<uuid>`、`search_memory` / `list_memories` の表示どおり）でも、先頭に `doc:` か `mem:` を 1 つ付けてもよい。そうした前置きを 1 つだけ先に外し（§3.12 の「前置きのない UUID にそろえる」）、応答の `id` は前置きのない UUID にする。** ID が親（`doc:<uuid>` が存在する）なら親＋`docsha:`＋その `chunk_ids` に列挙された全チャンクを連鎖削除（§3.11）。それ以外は `mem:<uuid>` を消し、独立したレコード（`parent_id` なし）ならガードの値がこの ID のときだけ `mem:sha:<sha1>` も消す。アトミックに行う（§3.5「削除のセマンティクス」）。成功の応答は、親なら `{"status": "deleted", "id": "<uuid>", "chunks_deleted": N}`、それ以外は `{"status": "deleted", "id": "<uuid>"}` である（1.x と同じ）。 |
 | `delete_memories_by_session` | `session_id: string`         | 指定 `session_id` に紐づく独立メモリ・親ドキュメント・子チャンク・sha ガードを、設定 `owner_id` のレコードに限定して一括削除。応答は `{"status":"deleted", "session_id": ..., "documents_deleted": D, "chunks_deleted": C, "singles_deleted": S, "deleted": D+C+S}`。ヒットゼロのときは `{"status":"not_found", "session_id": ..., "deleted": 0}`（再呼び出しは安全な no-op）。**不可逆操作のため呼び出し前に `session_id` をユーザーに確認すること。** Lite 専用（[§10 Test 6](#10-自律評価evidence-report) 参照）。 |
 | `repair_memory` | —                                         | `ensure_index()` と、欠けているベクトルの付け足し（1 回の呼び出しで最大 200 件）。[§3.10](#310-修復) 参照。 |
@@ -1314,7 +1314,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 #### ほかのアプリへの登録
 
-§8「Claude Desktop」を参照。薄いクライアントを Claude Code に登録してはならない（§8「Claude Code」）。
+§8「Claude Desktop」を参照。Claude Code では、プラグイン `n3mc-workingmemory` か `claude mcp add` で登録する（§8「Claude Code」）。
 
 #### この設計の限界
 
@@ -1328,7 +1328,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 
 MCP には Claude Code の `UserPromptSubmit` / `Stop` フック相当が無いため、自動保存の振る舞いは `initialize` 応答で **自然言語の指示** として返す。接続中の LLM がシステム指示として読む。
 
-この指示は、MCP を使うアプリ（Claude デスクトップアプリなど）のためのものである。Claude Code はフックを使い、ルールファイル `.claude/rules/n3mc-lite-behavior.md` から指針を得る（§12）。指示の文は 1 つで、すべてのクライアントに送る。クライアントがフックを持つかどうかは分からないので、ルール 1 と 2 は、コンテキストにすでに `Source: N3MC Lite (7-day working memory)` の行を持つ塊がある（Lite のフックが入れた。N3MC Free と Pro のフックの塊にはこの行がない）ときにすることを述べる：塊で足りないときだけ検索し、利用者が頼んだときだけ保存する。塊のないクライアントは MCP の振る舞い（毎ターン検索し、自動で保存する）に従う。これが効くのは、Claude Code に古い MCP の登録がフックと並んで残っているときだけである（§8）。
+この指示は、MCP を使うアプリ（Claude デスクトップアプリなど）のためのものである。Claude Code は、フック、MCP、またはその両方を使う（§8）。フックを使うときは、ルールファイル `.claude/rules/n3mc-lite-behavior.md` から指針を得る（§12）。指示の文は 1 つで、すべてのクライアントに送る。クライアントがフックを持つかどうかは分からないので、ルール 1 と 2 は、コンテキストにすでに `Source: N3MC Lite (7-day working memory)` の行を持つ塊がある（Lite のフックが入れた。N3MC Free と Pro のフックの塊にはこの行がない）ときにすることを述べる：塊で足りないときだけ検索し、利用者が頼んだときだけ保存する。塊のないクライアントは MCP の振る舞い（毎ターン検索し、自動で保存する）に従う。これが効くのは、Claude Code で MCP の入口とフックの両方を使うときである（§8）。
 
 指示は LLM に以下を要求する：
 
@@ -2052,7 +2052,7 @@ Redis 状態は Redis コンテナが置く場所（既定では無名 Docker �
 
 ## 8. クライアント設定
 
-> **どのアプリが何を使うか。** Claude Code は**フックだけ**を使う。Claude デスクトップアプリと、フックのないほかのアプリは **MCP だけ**を使う（「v2.0.0 で変わったこと」を参照）。
+> **どのアプリが何を使うか。** Claude Code は**フックか MCP**（利用者が選ぶ。両方でもよい）を使う。Claude デスクトップアプリと、フックのないほかのアプリは **MCP だけ**を使う（「v2.0.0 で変わったこと」を参照）。
 
 ### Claude Desktop
 
@@ -2095,27 +2095,39 @@ pip でのインストール（絶対パスと `env`）：
 - フックが別のデータフォルダ（`N3MC_DATA_DIR`）を使うときは、同じ `N3MC_DATA_DIR` を `env` に足す。そうしないと、デスクトップアプリは `~/.n3mc-workingmemory` と、別の `config.json`、別の `server_port` を使ってしまう。
 - このアプリの既定の `session_id` を固定するために、`N3MC_SESSION_ID` を足してもよい（§3.1）。
 - Windows や Linux のほかの MCP クライアントも、同じように登録する（command、args、env）。
-- **デスクトップアプリの Code タブ**：デスクトップアプリは、この登録を Code タブ（Claude Code）のセッションにも渡す。そのままでは Code タブでフックと MCP の両方が同じ記憶につながり、モデルが頼まれずに `save_memory` を呼ぶと、Code タブの保存が `claude-desktop` の名前で入る。Claude Code をフックだけにするには、`~/.claude/settings.json` の `permissions.deny` に `"mcp__n3mc-workingmemory"` を足す（Claude Code の設定なので、チャットには効かない）。こうすると、Code タブのモデルからこの登録のツールが見えなくなる。方法 A のセットアップでは、AI がこの行を足す（下の「自動の登録」の 5）。
+- **デスクトップアプリの Code タブ**：デスクトップアプリは、この登録を Code タブ（Claude Code）のセッションにも渡す。そのままでは Code タブでフックと MCP の両方が同じ記憶につながり、モデルが頼まれずに `save_memory` を呼ぶと、Code タブの保存が `claude-desktop` の名前で入る。Claude Code をフックだけにしたい利用者は、`~/.claude/settings.json` の `permissions.deny` に `"mcp__n3mc-workingmemory"` を足してよい（Claude Code の設定なので、チャットには効かない）。こうすると、Code タブのモデルからこの登録のツールが見えなくなる。方法 A のセットアップは、この行を足さない。Claude Code は MCP でつないでよいからである。
 - **自動の登録（方法 A のセットアップの手順 4）**：AI が次の順で行う。利用者に手で登録させない。
   1. 設定ファイルを探す。候補は、Windows では `%APPDATA%\Claude\claude_desktop_config.json`、`%LOCALAPPDATA%\Claude-Data\*\claude_desktop_config.json`（Microsoft Store 版。アプリはこのファイルを読む）、`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`。Linux では `~/.config/Claude/claude_desktop_config.json`。あるものの中で、更新日時がいちばん新しいものを使う。アプリは動くたびにこのファイルを書き直し、読まれていない古いファイルが別の場所に残っていることがある。1 つもなければ、デスクトップアプリは入っていないとみて登録を飛ばし、そう報告する。
   2. 書き込む前に、同じフォルダに控え `claude_desktop_config.json.bak-n3mc-<YYYYMMDDHHMMSS>` を取る。
   3. JSON として読み、`mcpServers` の下の `n3mc-workingmemory` の項目だけを上の pip の項目にする（`command` は `n3mc-workingmemory` の絶対パス）。フックが `N3MC_DATA_DIR` を使っているときは、同じ値を `env` に入れる。ほかの項目とキーは変えない。同じ名前の項目があれば置き換える。JSON として読めない、または一番外がオブジェクトでないときは、書き換えずに報告する。
   4. 同じフォルダの一時ファイルに書いてから置き換える。書いたあと読み直し、項目が入っていることを確かめる。
-  5. `~/.claude/settings.json` の `permissions.deny` に `"mcp__n3mc-workingmemory"` を足す（上の「デスクトップアプリの Code タブ」）。ほかのキーと項目は残し、同じ行を 2 つにしない。
-  6. 書いたファイルと控えの場所を、最後のメッセージで利用者に伝える。アプリを完全に終了して起動し直すまで、新しい登録は効かない。
+  5. 書いたファイルと控えの場所を、最後のメッセージで利用者に伝える。アプリを完全に終了して起動し直すまで、新しい登録は効かない。
 
-### Claude Code（フック）
+### Claude Code（フックか MCP）
 
-**Claude Code に MCP サーバーを登録してはならない**（`claude mcp add`、`~/.claude.json`、`.mcp.json`）。Claude Code は、フック（すべてのメッセージと応答を保存し、毎ターンに合う記憶を入れる）と CLI `n3mc-lite` から記憶を得る（§12、§13）。入れ方は 2 つある：
+Claude Code は、フック（すべてのメッセージと応答を保存し、毎ターンに合う記憶を入れる）と CLI `n3mc-lite` から記憶を得るか（§12、§13）、MCP の入口から得る（§4.6。v1.12.2 と同じく、モデルがツールで検索と保存をする）。利用者が選ぶ。両方でもよく、そのときは指示（§5 (1) の規則 1 と 2）が、フックの塊があるときは毎ターン保存しないようモデルに伝える。入れ方は次のとおり：
 
-**(a) プラグインマーケットプレイス（推奨 — 手動設定ファイル不要）**
+**(a) プラグインマーケットプレイス — MCP（v1.12.2 と同じ。手動設定ファイル不要）**
 
 ```
 /plugin marketplace add NeuralNexusNote/n3mcmcp-lite
 /plugin install n3mc-workingmemory@neuralnexusnote
 ```
 
-`uv` が PATH にあることが前提。`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` はメタデータを残し、**`mcpServers` キーは持たない**。`plugins/n3mc-workingmemory/hooks/hooks.json` は 3 つのフックを登録する：
+`uv` が PATH にあることが前提。`plugins/n3mc-workingmemory/.claude-plugin/plugin.json` はメタデータと、次の `mcpServers` を持つ（v1.12.2 の形。`uvx` の版はパッケージの版に固定する、§2）：
+
+```json
+{
+  "mcpServers": {
+    "n3mc-workingmemory": {
+      "command": "uvx",
+      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"]
+    }
+  }
+}
+```
+
+`plugins/n3mc-workingmemory/hooks/hooks.json` は `SessionStart` の 1 つだけを登録する（`UserPromptSubmit` と `Stop` は登録しない）：
 
 ```json
 {
@@ -2128,20 +2140,6 @@ pip でのインストール（絶対パスと `env`）：
             "type": "command",
             "command": "<COMMAND A, below, as a JSON string>"
           }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-hook --uvx", "timeout": 60 }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-stop-hook --uvx", "timeout": 60 }
         ]
       }
     ]
@@ -2157,9 +2155,9 @@ python "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || py "${CLAUDE_PLUG
 
 `<FALLBACK>` は、下の「自動許可」にあるフォールバックの JSON の文（`\"` のエスケープ込み）である。
 
-- `--uvx` は、このインストールが `uvx` で動くことをフックの入口に伝える。そのためルールファイルとプラグインの許可ルールは、`uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` のコマンドの形を書く（§12）。これがなければ `python -m n3mc_mcp.cli` の形を使う（pip のインストール）。
-- 常駐サーバーは、フックのプロセスが自分の `sys.executable` で起動する（`-m n3mc_mcp.cli --run-server`、§3.15）。つまり `uvx` の環境の中で動く。
-- **`uvx` の起動時間（Windows 11、uv 0.11.7、パッケージは uv のキャッシュに入っている。1 回の慣らしの後の 10 回の中央値）**：システムの Python で `python -c pass` は 125 ms。`uvx --from n3memorycore-mcp-lite==2.0.2 python -c pass` は 316 ms。`uvx --from n3memorycore-mcp-lite==1.12.2 python -c "import n3mc_mcp.config"` は 503 ms。したがって `uvx` は、フックの起動ごとに約 0.19 秒を足す。メッセージごとに 2 つのフック（`UserPromptSubmit` と `Stop`）が起動する。計測していないもの：パッケージのダウンロードや更新が要る実行、Linux。**プラグインのフックは `uvx` で動かす。足される時間は受け入れる。** `uvx` のコマンドはパッケージのバージョンに固定する（§2）。
+- 常駐サーバーは、MCP の入口が自分の `sys.executable` で起動する（`-m n3mc_mcp.cli --run-server`、§3.15）。つまり `uvx` の環境の中で動く。
+- `--uvx` は、`uvx` で動くフックの入口（手で `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-hook --uvx` と登録したもの）に、ルールファイルを `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` のコマンドの形で書くよう伝える（§12）。これがなければ `python -m n3mc_mcp.cli` の形を使う（pip のインストール）。
+- **`uvx` の起動時間（Windows 11、uv 0.11.7、パッケージは uv のキャッシュに入っている。1 回の慣らしの後の 10 回の中央値）**：システムの Python で `python -c pass` は 125 ms。`uvx --from n3memorycore-mcp-lite==2.0.2 python -c pass` は 316 ms。`uvx --from n3memorycore-mcp-lite==1.12.2 python -c "import n3mc_mcp.config"` は 503 ms。したがって `uvx` は、起動ごとに約 0.19 秒を足す（プラグインの MCP の入口は、セッションごとに 1 回起動する）。計測していないもの：パッケージのダウンロードや更新が要る実行、Linux。`uvx` のコマンドはパッケージのバージョンに固定する（§2）。
 
 **(b) pip**
 
@@ -2170,7 +2168,7 @@ n3mc-lite --init
 
 `n3mc-lite --init` は、`n3mc-lite-hook` / `n3mc-lite-stop-hook` の絶対パスで 2 つのフックを `~/.claude/settings.json` に登録し、下の許可ルールを足す（§12「`--init`」）。Claude Code を再起動する（ウィンドウを閉じるだけでは足りないことがある。タスクバーの右端の「^」から Claude のアイコンを右クリックして終了するか、Windows から一度サインアウトする）。記憶は次のセッションから始まる。
 
-**古い MCP の登録（v1.12.2 以前）**：Claude Code にある `n3mc-workingmemory` の項目（`~/.claude.json` の user スコープ、またはプロジェクトの `.mcp.json`）は、もう使われない。`n3mc-lite --init` は `~/.claude.json` — 一番上の `mcpServers` と、`projects` の各項目の `mcpServers` — と、今のフォルダの `.mcp.json` を読み（読むだけ）、見つけたら `An MCP registration of n3mc-workingmemory was found in Claude Code (<file>). Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s user` を出力する（`.mcp.json` なら `remove the "n3mc-workingmemory" entry from <file>`。`projects` の項目は local スコープの登録で、`-s user` では消えないので、`An MCP registration of n3mc-workingmemory was found in Claude Code (<file>, project <project path>). Claude Code now uses the hooks; remove it with: claude mcp remove n3mc-workingmemory -s local (run it in that project)`）。これらのファイルは直さない。残っていると、Claude Code はフックと並んでツールをまた表示する。そのとき指示は、毎ターン保存しないようモデルに伝える（§5）。
+**Claude Code の MCP の登録**：Claude Code にある `n3mc-workingmemory` の項目（`~/.claude.json` の user スコープ、またはプロジェクトの `.mcp.json`）は、そのまま使える。`n3mc-lite --init` は `~/.claude.json` — 一番上の `mcpServers` と、`projects` の各項目の `mcpServers` — と、今のフォルダの `.mcp.json` を読み（読むだけ）、見つけたら `An MCP registration of n3mc-workingmemory was found in Claude Code (<file>). It is kept: Claude Code can use the MCP tools and the hooks together.` を出力する（`projects` の項目なら `(<file>, project <project path>)`）。これらのファイルは直さない。両方を使うとき、指示は毎ターン保存しないようモデルに伝える（§5）。
 
 設定を直した後はクライアントを再起動する。最初のメッセージの前に Redis Stack を動かしておくこと — そうしないと、フックは文を `audit.log` にだけ残し、「Redis Stack を起動してください」の通知を出す（§12）。
 
@@ -2179,14 +2177,14 @@ n3mc-lite --init
 **方法 A は、AI がフックを登録し、確かめたところで終わる。利用者に残る作業は、完全な再起動だけである。**利用者に設定ファイルを編集させてはならない。どのクライアントも使っていないパッケージのままフェーズ 1 を終えてはならない。`pip install -e .` が成功したら、すぐに次を行え。
 
 1. **この PC の入口を見つける。**`pip install -e .` を実行した Python の scripts フォルダ(`python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`、venv なら `Scripts\` / `bin/`)に、`n3mc-lite`、`n3mc-lite-hook`、`n3mc-lite-stop-hook`、`n3mc-workingmemory`(Windows では `.exe`)があることを確かめよ。コマンド名ではなく**絶対パス**を使え。Claude Code は、scripts フォルダを含まない `PATH` でコマンドを動かすことがある。
-2. **Claude Code から古い MCP の登録を消す。**`claude mcp remove n3mc-workingmemory -s user` を実行せよ(「見つからない」というエラーは問題ない)。インストール先のフォルダの `.mcp.json` に `n3mc-workingmemory` の項目があれば、その項目を消し、ほかのサーバーは残せ。`claude` コマンドが `PATH` に無いときは、代わりに `~/.claude.json` の最上位の `mcpServers` から `n3mc-workingmemory` の項目を消せ。その前にファイルをバックアップし、ほかのキーはすべて残し、同じフォルダの一時ファイルに書いてから置き換える形で書け。**理由**：Claude Code はフックを使う。1.x の版から残った登録があると、ツールがまた表示され、モデルがフックと並んで自分でも保存してしまう。
-3. **フックを登録する**:`<n3mc-lite の絶対パス> --init` を実行せよ(§12)。これはフックと許可ルールを `~/.claude/settings.json` に書き、ほかの項目(ほかの N3MC 製品のフックを含む、§14)はすべて残す。**プラグインが有効だと知らせてきたら、止めて利用者に選ばせよ**：プラグインは PyPI のコードを `uvx` で動かし、生成したコードとは `code_version` が違う（§3.15）。そのため、プラグインのフックと、このインストールの CLI と MCP の入口が、呼び出しのたびに互いのサーバーを止めて起動し直す。次を示せ：`The n3mc-workingmemory plugin is enabled. Choose one: (a) keep the plugin and remove this generated installation (pip uninstall n3memorycore-mcp-lite), or (b) disable the plugin (/plugin disable n3mc-workingmemory@neuralnexusnote), then run this setup step again.` 答えを待て。(b) なら、利用者がプラグインを無効にしたあとで手順 3 をもう一度行え。
-4. **Claude Desktop**:上の「Claude Desktop」の「自動の登録」の 1〜6 を行い、手順 1 の絶対パスを入れた pip の項目を、デスクトップアプリの設定ファイルに書き込め。利用者に項目を示して手で足させてはならない。デスクトップアプリが入っていなければ、この手順を飛ばし、最後のメッセージでそう伝えよ。
+2. **Claude Code に MCP の入口を登録する。**`claude mcp add n3mc-workingmemory -s user -- <n3mc-workingmemory の絶対パス>` を実行せよ。user スコープに `n3mc-workingmemory` がすでにあり、そのコマンドが手順 1 のパスと違う(またはこの PC に存在しない)ときは、先に `claude mcp remove n3mc-workingmemory -s user` を実行してから足し直せ。`claude` コマンドが `PATH` に無いときは、代わりに `~/.claude.json` の最上位の `mcpServers` に項目 `{"type": "stdio", "command": "<絶対パス>", "args": [], "env": {}}` を書け。その前にファイルをバックアップし、ほかのキーはすべて残し、同じフォルダの一時ファイルに書いてから置き換える形で書け。プロジェクトの `.mcp.json` にある `n3mc-workingmemory` の項目は消してはならない。その中の絶対パスがこの PC に存在しないときだけ、手順 1 のパスに書き換えよ(§1 の確認 3)。**理由**：Claude Code は MCP とフックでつなぐ。評価(§10 の項目 1〜6、付録 B のフェーズ 3)は、再起動した Claude Code のセッションの MCP のツールで行う。
+3. **フックを登録する**:`<n3mc-lite の絶対パス> --init` を実行せよ(§12)。これはフックと許可ルールを `~/.claude/settings.json` に書き、ほかの項目(ほかの N3MC 製品のフックを含む、§14)はすべて残す。**プラグイン `n3mc-workingmemory` が有効なら（`~/.claude/settings.json` の `enabledPlugins`。`--init` も知らせる）、止めて利用者に選ばせよ**：プラグインの MCP の入口は PyPI のコードを `uvx` で動かし、生成したコードとは `code_version` が違う（§3.15）。そのため、プラグインの MCP の入口と、このインストールのフックと CLI が、呼び出しのたびに互いのサーバーを止めて起動し直す。次を示せ：`The n3mc-workingmemory plugin is enabled. Choose one: (a) keep the plugin and remove this generated installation (pip uninstall n3memorycore-mcp-lite), or (b) disable the plugin (/plugin disable n3mc-workingmemory@neuralnexusnote), then run this setup step again.` 答えを待て。(b) なら、利用者がプラグインを無効にしたあとで手順 3 をもう一度行え。
+4. **Claude Desktop**:上の「Claude Desktop」の「自動の登録」の 1〜5 を行い、手順 1 の絶対パスを入れた pip の項目を、デスクトップアプリの設定ファイルに書き込め。利用者に項目を示して手で足させてはならない。デスクトップアプリが入っていなければ、この手順を飛ばし、最後のメッセージでそう伝えよ。
 5. **再起動を頼む前に確かめる。**
    - §10 項目 7.1 のフックの関門が `OK` を出力する。
+   - `claude` が使えるなら、`claude mcp get n3mc-workingmemory` が手順 1 の絶対パスと `Connected` を示す。
    - `<n3mc-lite の絶対パス> --search "setup check"` が `# Recalled Memory Context` で始まる塊を出力する(これで常駐サーバーが起動する。初回の起動はモデルのダウンロードで数分かかることがある — 「まだ起動中」の代わりの出力でよい。その後、本当の結果か `_No memories found._` が出るまで繰り返せ)。
    - `n3mc-workingmemory` を自分で一度起動し、stdio で MCP の `initialize` を送ってから `tools/list` を送り、§4.3 の 7 つのツールがそろうことを確かめてから(応答は 2 秒以内に来る、§4.6)、その stdin を閉じよ。
-   - `claude` が使えるなら、`claude mcp get n3mc-workingmemory` がそのようなサーバーはないと答えること。
    - どれかが失敗したら、直してやり直せ。動かないセットアップのまま渡してはならない。
 6. **最後にメッセージを 1 つだけ出す**:利用者が再起動を見落とさないように、次のひな形どおりに書け。**メッセージの 1 行目は、必ず見出し `## ⚠️ Claude Code の再起動が必要です` にする。**その前に「登録が完了しました」などの文を置いてはならない。登録したものや注意点は、再起動の手順のあとに書く。
 
@@ -2205,13 +2203,13 @@ n3mc-lite --init
    > ⚠️ **Claude Code を再起動するまで、記憶は働きません。**
    ```
 
-   「Claude Code を再起動してください」の一言だけで済ませてはならない。「再起動しました」と送られてきたら、その発言が保存されたこと（`python -m n3mc_mcp.cli --list` に `[user]` の行が出る）と、そのターンに `# Recalled Memory Context` が入ったことを確かめ、記憶が働いているかを短く伝え、次にすること（付録 B のフェーズ 2 に進み、そこにあるプロンプトを順に貼る）を案内せよ。
+   「Claude Code を再起動してください」の一言だけで済ませてはならない。「再起動しました」と送られてきたら、その発言が保存されたこと（`python -m n3mc_mcp.cli --list` に `[user]` の行が出る）、そのターンに `# Recalled Memory Context` が入ったこと、セッションに `n3mc-workingmemory` の 7 つのツール（§4.3）があることを確かめ、記憶が働いているかを短く伝え、次にすること（付録 B のフェーズ 2 に進み、そこにあるプロンプトを順に貼る）を案内せよ。
 
 > **⚠️ 理由**:コード生成によるセットアップは、パッケージは入ったのに登録が動かない状態で終わることがある。たとえば、別の PC から写したフォルダの `.mcp.json` が `C:\Users\<別の PC のユーザー>\…\Python312\Scripts\n3mc-workingmemory.exe` を指していて、この PC には存在しないときや、`PATH` に頼るコマンド名だけで登録したときである。Lite の主なインストール方法はコード生成なので、手作業の設定なしで、動くセットアップで終わらなければならない。絶対パスの決まりは、フックのコマンドとデスクトップの項目に当てる。
 
 ### 自動許可（Claude Code 固有）
 
-Claude Code には、このサーバーの MCP ツールはない。フックは Claude Code 自身が動かすので、許可は要らない。許可が要るのは、Claude が自分から検索するときに動かす CLI のコマンドである（§13）。ルールがなければ、`--search` のたびに利用者に聞く。
+フックは Claude Code 自身が動かすので、許可は要らない。許可が要るのは、Claude が自分から検索するときに動かす CLI のコマンド（§13）と、Claude Code が MCP を使うときの MCP の入口のツールである。ルールがなければ、`--search` やツールの呼び出しのたびに利用者に聞く。
 
 **pip（`PERMISSION_RULES`。`n3mc-lite --init` が書く）** — `~/.claude/settings.json` の `permissions.allow` に足す（欠けているものだけ。何も消さない）：
 
@@ -2236,23 +2234,22 @@ Claude Code には、このサーバーの MCP ツールはない。フックは
 }
 ```
 
-**プラグイン（`hooks/install_permissions.py`、SessionStart）** — 同じ 6 つのコマンドを `uvx` の形で：`Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)` … `Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --stop*)`。1.x の版のルール `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` と `mcp__n3mc-workingmemory__*` は足さない。すでにあるものはそのままにする（何にも当たらない）。
+**プラグイン（`hooks/install_permissions.py`、SessionStart）** — v1.12.2 と同じ MCP のツールのルール：`mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`（Claude Code は、プラグインが登録した MCP サーバーのツールを `mcp__plugin_<plugin>_<server>__<tool>` と名付ける）と `mcp__n3mc-workingmemory__*`（`claude mcp add` や `.mcp.json` で直接登録した同じツール）。
 
-- **`--delete` と `--delete-session` は決して事前に許可しない**：不可逆なので（§4.3）、Claude Code はそのたびに利用者に聞く — ツールの説明がモデルに求めているのと同じ確認である。
+- **CLI のコマンド `--delete` と `--delete-session` は決して事前に許可しない**：不可逆なので（§4.3）、Claude Code はそのたびに利用者に聞く — ツールの説明がモデルに求めているのと同じ確認である。
 - `<python> -m n3mc_mcp.cli` の形は、ルールファイルが Claude に示す形である（Free §4 ②：Claude Code が起こす bash のサブシェルには、scripts フォルダが `PATH` にあるとは限らない）。**`--init` は上のルールを、`<python>` = `shell_path(sys.executable)` で書く**。ルールファイルと同じ絶対パスなので、パッケージが venv にあっても、Claude が実行するものと合う。上の JSON は、`PATH` 上の `python` のときの形を示している。`n3mc-lite` の形は、対話で使うためのものである。
 
-プラグインのフックは次のように動き、文は CLI のコマンドについてのものにする：
+プラグインのスクリプトは v1.12.2 のものである（`plugins/n3mc-workingmemory/hooks/` は公開リポジトリだけのもので、方法 A は作らない、§2）。次のように動き、文は MCP のツールについてのものである：
 
 - **書き込み**：書く直前に `settings.json` を読み直し、欠けているルールだけを合わせ、同じフォルダに一時ファイルを書いて `os.replace` する。項目は決して消さない。関係のないフィールドには触れない。
-- **`settings.json` を更新できないとき**：何も変えず、stderr に 1 行と、`systemMessage` + `additionalContext` の JSON を出し、exit 0：`[n3mc-workingmemory] Could not update ~/.claude/settings.json (<ErrorType>: …), so the memory commands were not pre-approved and Claude Code will ask for permission when Claude searches the memory. Make the file writable, or add "Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)" to permissions.allow yourself.` ルールがすでにあるときは何も伝えない。
+- **`settings.json` を更新できないとき**：何も変えず、stderr に 1 行と、`systemMessage` + `additionalContext` の JSON を出し、exit 0：`[n3mc-workingmemory] Could not update ~/.claude/settings.json (<ErrorType>: …), so the memory tools were not pre-approved and Claude Code will ask for permission on every memory call. Make the file writable, or add "mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*" to permissions.allow yourself.` ルールがすでにあるときは何も伝えない。
 - **Python のフォールバックと、目に見える失敗**：`hooks.json` のコマンドは `python` → `py` → `python3` を試す。どれも動かない（またはスクリプトが非ゼロで終わる）ときは、Python を使わない段が JSON オブジェクトを 1 つ出して exit 0 で終わる：
 
 ```json
-{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory commands may not be pre-approved and Claude Code may ask for permission when Claude searches the memory. Install Python 3, or add \"Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
+{"systemMessage": "[n3mc-workingmemory] Python was not found on PATH (tried python, py, python3), or the permission script failed, so the memory tools may not be pre-approved and Claude Code may ask for permission on every memory call. Install Python 3, or add \"mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*\" to permissions.allow in ~/.claude/settings.json.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "<the same text>"}}
 ```
 
-- **`uvx` の事前チェック**：`shutil.which("uvx")`。なければ、次の日英両言語のインストール手順を載せた同じ形の JSON を出す：`[n3mc-workingmemory] uvx was not found on PATH. The plugin's memory hooks run through "uvx --from n3memorycore-mcp-lite==<version> n3mc-lite", so they cannot run until uv is installed. Install (Windows): pipx install uv or powershell -c "irm https://astral.sh/uv/install.ps1 | iex"; (Linux): curl -LsSf https://astral.sh/uv/install.sh | sh. Docs: https://docs.astral.sh/uv/ / [n3mc-workingmemory] uvx が PATH 上に見つかりません。uv を入れるまで、記憶のフックは動きません。上のいずれかのコマンドで uv を入れてください。`ほかのメッセージと 1 つの JSON オブジェクトにまとめる。`json.dumps(..., ensure_ascii=True)` で書く。
-- **二重登録の確認**：`~/.claude/settings.json` に pip のインストールのフックもあるときは、同じ JSON に次を足す：`[n3mc-workingmemory] The N3MC Lite hooks are registered twice: by this plugin and by "n3mc-lite --init" in ~/.claude/settings.json. Every message is then searched twice. Remove the two n3mc-lite-hook / n3mc-lite-stop-hook entries from ~/.claude/settings.json, or uninstall the plugin.`（§14）。スクリプトが自分でフックを消すことはない。**見分け方**：このスクリプトはパッケージのない Python で動くことがあるので、`is_own_hook`（§12.8）の規則 (a) と (b) の写しを自分で持つ — 実行ファイル名 `n3mc-lite-hook` / `n3mc-lite-stop-hook`（`.exe` の有無を問わず、どのフォルダでも）か、`-m n3mc_mcp.lite_hook` / `-m n3mc_mcp.lite_stop_hook`。パッケージのフォルダが要る規則 (c) は持たない。
+- **`uvx` の事前チェック**：`shutil.which("uvx")`。なければ、次の日英両言語のインストール手順を載せた同じ形の JSON を出す：``[n3mc-workingmemory] `uvx` was not found on PATH. The plugin's MCP server is launched via `uvx --from n3memorycore-mcp-lite n3mc-workingmemory`, so it will fail to start until `uv` is installed. Install (Windows): `pipx install uv` or `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`; (Linux): `curl -LsSf https://astral.sh/uv/install.sh | sh`. Docs: https://docs.astral.sh/uv/ / [n3mc-workingmemory] `uvx` が PATH 上に見つかりません。`uv` を入れるまで MCP サーバーは起動しません。上のいずれかのコマンドで `uv` を入れてください。``ほかのメッセージと 1 つの JSON オブジェクトにまとめる。`json.dumps(..., ensure_ascii=True)` で書く。
 
 > Claude Desktop にはツール単位のパーミッションゲートが無いため、これらはどれも不要。`plugin.json` に `permissions` フィールドを持たせる配布は Claude Code 側未対応（2026-04 時点）のため、プラグインでは `SessionStart` フック経由でユーザーの `settings.json` をパッチする方式を採る。
 
@@ -2411,13 +2408,14 @@ n3mcmcp-lite/
 | `TestNudgeOnErrors` | 数値でない `importance` の JSON、読めない `since` の `Error:`、予期しない例外、`search_memory` のバックエンドエラーが、どれもエラーの文で始まり、リマインダで終わる。予期しない例外は、ちょうど `Error: <メッセージ>` + リマインダになる（1.x と同じく、例外の型名を付けない） |
 | `TestConditionalWrites`（*Redis*） | `INCR_IF_EXISTS`・`HSET_IF_EXISTS` は、レコードがあれば書き込んで TTL を保ち、なければ何も作らない。`SCAN` のあとに消えたレコードに対する `repair_memory` はキーを作らず、`reembedded` に数えない。保存・検索・修復のあと、テスト DB のすべてのキー（テスト用の印を除く）に TTL がある |
 | `TestHangulFiller` | `U+3164`、`U+115F`、`U+1160`、`U+FFA0`、`U+2800` だけの本文は見える文字なしとして拒否される。見える文字と一緒なら verbatim に保存される |
-| `TestPluginHook`（追加分） | `settings.json` を書く直前に読み直し、アトミックに置き換える。フォールバックの文面に "or the permission script failed" が入る。`uvx` がないときは、§8 の案内の文がそのまま入る |
+| `TestPluginHook`（追加分） | プラグインのスクリプトが §8 の MCP のツールのルールを書き、`settings.json` をアトミックに置き換える。フォールバックの文面に "or the permission script failed" が入る。`uvx` がないときは、§8 の案内の文が入る |
 | `TestWeakMatches`（*Redis*） | 下限を通った行が 1 件で `min_results: 3` なら、弱い候補が 2 件その後に足され、`filter_score` の順に並び、`_weak` の印が付く、`vector_min_cos` 未満の候補は実際の cos で足される、`min_results: 0` では何も足さない、十分な件数が通ったときは足さない、`limit` が `min_results` より小さければ合計はその上限まで、1 つの親ドキュメントの 2 つのチャンクのヒットは弱い候補 1 行になり、すでに結果にある親は足さない、`filter_score` が `1e-6` 未満の候補は足さない、**弱い候補の `access_count` は変わらない**（普通の行は加算される）、空のクエリ、または空白だけのクエリでは弱い候補を足さない、既定の設定は `min_results: 3` |
 | `TestGuardReleasedOnAnyFailure`（*Redis*） | 短い本文と長い本文で：`turn_id: 12` の保存は失敗し、`mem:sha:` / `docsha:` のキーを残さず、そのあと同じ本文を保存できる。`agent_name`・`session_id`・`turn_id` の単独のサロゲートは除かれ、記録は保存される。サロゲートのないフィールドは変わらずに入る |
 | `TestPluginHookAsciiStdout` | `uvx` がないとき、フックの標準出力は ASCII だけの 1 行で、`json.loads` すると `systemMessage` に日本語の案内がそのまま入っている |
+| `TestLocalhostIpv4First` | ホストの `localhost` は、`127.0.0.1` に TCP でつながれば `127.0.0.1` になり（利用者名とパスワードは残る）、何も待ち受けていなければそのまま。ほかのホストは変えない。`localhost` のテスト用の URL が 1 秒以内につながる（§3.3） |
 | `TestPublicRepoHygiene` | `tests/eval_uvx_missing.py` に絶対パスのユーザーのフォルダがない（外すフォルダは、`uvx` がある `PATH` の項目）。`.claude-plugin/marketplace.json` の `metadata.version` がパッケージの版と同じ |
 
-`TestPluginHook` と `TestPluginHookAsciiStdout` は、CLI の許可ルール（`Bash(uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search *)` …）を確かめ、その中に `--delete` / `--delete-session` がないことも確かめる。
+`TestPluginHook` と `TestPluginHookAsciiStdout` は、MCP のツールのルール（`mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*`、`mcp__n3mc-workingmemory__*`）を確かめる。
 
 ### Layer 5: `tests/test_hooks.py`
 
@@ -2502,8 +2500,8 @@ n3mcmcp-lite/
 | `TestInit` | `--init` は、2 つのフックを絶対パス（スラッシュ区切り、`shell_path` が要るとしたときだけ引用符）で書き、`PERMISSION_RULES` を書く。`shell_path` は、ふつうのパスと 8.3 形式の短い名前（`PROGRA~1`）はそのままにし、空白・`'`・`&` を含むパスは二重引用符で囲み、`$` と `` ` `` をエスケープする。scripts フォルダが `O'Brien` という名前のフォルダの下にあるとき、フックは引用符付きで書かれ、自分のものと分かる。もう一度実行しても何も書かない。変える前にバックアップを作る。不正な `settings.json` は変えず、終了コード 1。自分の入口・`-m`・パッケージのスクリプトの形は置き換え、重複させない（バックスラッシュで書かれていても同じ） |
 | `TestInitNonStringCommand` | `command` が null や数のフックの項目は残り、`--init` は例外で終わらずに自分の項目を足す |
 | `TestKeepsOtherProducts` | Free の `n3mc-hook` / `n3mc-stop-hook` の項目、Pro の `python ".../n3mc_hook.py"` の項目、ほかのどのフックも残し、知らせる。Free 自身の見分け方 — その規則をここに書く：実行ファイル `n3mc-hook` / `n3mc-stop-hook`（`.exe` の有無を問わず）、`-m n3memorycore.n3mc_hook` / `-m n3memorycore.n3mc_stop_hook`、または Free のパッケージのフォルダの中のスクリプト `n3mc_hook.py` / `n3mc_stop_hook.py` — は Lite の項目に当たらない |
-| `TestPluginEnabled` | `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` が true のとき、`--init` はフックを登録せず、許可ルールを足し、§12 のメッセージを出力する。プラグインの許可スクリプトは、`settings.json` に見つけた `--init` のフックを知らせる |
-| `TestNoMcpInClaudeCode` | `plugin.json` に `mcpServers` がない。`hooks.json` には、§8 のコマンドの `SessionStart`、`UserPromptSubmit`、`Stop` がある。`--init` は `~/.claude.json` にも `.mcp.json` にも MCP サーバーを足さない。そこにある古い `n3mc-workingmemory` の項目は知らせるが、直さない |
+| `TestPluginEnabled` | `enabledPlugins["n3mc-workingmemory@neuralnexusnote"]` が true でも、`--init` はフックと許可ルールを登録し、§12.8 の手順 3 のメッセージを出力する |
+| `TestPluginRegistersMcp` | `plugin.json` に §8 の `mcpServers` がある（`uvx` はパッケージの版に固定）。`hooks.json` は `SessionStart` だけ。マーケットプレイスのプラグインは 1 つ。`--init` は `~/.claude.json` にも `.mcp.json` にも MCP サーバーを足さず、消さない。そこにある `n3mc-workingmemory` の項目は「残す」と知らせる |
 | `TestSeparateNames` | 既定のポート 18524、データフォルダ `~/.n3mc-workingmemory`、ルールファイル `n3mc-lite-behavior.md`、PID ファイル `n3mc-lite.pid`、コマンド `n3mc-lite*` — どれも Free のもの（`18520`、`~/.n3mc`、`n3mc-behavior.md`、`n3mc*`）や Pro のもの（`18521`）と同じでない |
 | `TestRulesFile` | ルールファイルは、`python -m n3mc_mcp.cli` の形か、`--uvx` 付きなら `uvx` の形で、テンプレートから書く。もう一方の形のテンプレートと同じファイルは置き換える（バックアップ付き）。手で直したファイルは置き換えず、`rules_md_edited:<hash>` を出す。1 行目は `<!-- n3mc-lite-behavior v1 -->` |
 
@@ -2550,9 +2548,9 @@ pytest tests/ -v -k "not TestEmbedding"
 > - 一時的にするのはデータフォルダだけにする。`HOME` / `USERPROFILE` を替えるときも、`HF_HOME` は本物のモデルのキャッシュ（`~/.cache/huggingface`）を指したままにする（約 1.1 GB のモデルの再ダウンロードを防ぐ）。
 > - pytest（§9）は、直している途中は関係するテストのファイルだけを流す。全体は、この評価の前に 1 回だけ流す（上のとおり）。
 
-> **項目 1〜6 でのツールの呼び方**：Claude Code には、このサーバーの MCP ツールはない。各ツールは CLI で動かす。CLI は同じハンドラを呼び、リマインダを除いて同じ文を出力する（§13）：`search_memory` → `python -m n3mc_mcp.cli --search`（§3.14 と同じ検索を行い、行をフックの見出しの中に出力する）。`save_memory` → `--buffer`。`list_memories` → `--list`。`delete_memories_by_session` → `--delete-session`（Claude Code が許可を求めるので、許可する）。`repair_memory` → `--repair`。項目 10 は MCP の経路そのものを確かめる。
+> **項目 1〜6 でのツールの呼び方**：各ツールは **MCP で**呼ぶ。方法 A のあとに再起動した Claude Code のセッションの `n3mc-workingmemory` のツールを使う（付録 B のフェーズ 3）。確かめは、利用者の呼び出しと同じ道を通る：MCP の入口（薄いクライアント、§4.6）、常駐サーバー、Redis。項目 1 の前に、`claude mcp get n3mc-workingmemory` が `Connected` を示し、セッションに §4.3 の 7 つのツールがあることを確かめる。**ツールがなければ、止めて、利用者に Claude Code の再起動を頼む（§8 のひな形）。CLI に切り替えてはならない。** Claude Code がツールの許可を求めたとき（たとえば `delete_memories_by_session`）は、許可する。報告には、項目ごとに使った道を書く。項目 1 の (d) はサーバー側の関数のマイクロベンチマークで、項目 1 の Redis が止まったときの確かめは項目 10 の MCP の入口で行う（項目 1 を参照）。項目 10 でも、一時的なフォルダで MCP の入口を確かめる。
 
-1. **常駐速度テスト**: 次を分けて測る：(a) MCP の入口の `initialize` への答え（記録する）、(b) サーバーの起動から `/health` が答えるまで（記録する。ライブラリの import に約 10 秒かかる、§3.9）、(c) モデルを読み込んだあとの最初の検索（記録する）、(d) その後の検索 10 回の中央値。(d) はサーバー側の処理（埋め込み + Redis の KNN/BM25 + ランキング）として、`processor` / `database` の関数を直接呼ぶマイクロベンチで測る。**合格：(d) が CPU 環境で 0.5s 以内。** (a)〜(c) は PC によるので、報告するが判定しない。Redis Stack が起動していない状態で呼び出した場合、サーバーがクラッシュせず「Redis Stack を起動してください」のヒントを返すことも併せて確認せよ。（サーバーが動いている間 PID ファイルがあること、`config.json` を直した後の次の呼び出しで新しいサーバーが起動することも確かめよ。）
+1. **常駐速度テスト**: 次を分けて測る：(a) MCP の入口の `initialize` への答え（記録する）、(b) サーバーの起動から `/health` が答えるまで（記録する。ライブラリの import に約 10 秒かかる、§3.9）、(c) モデルを読み込んだあとの最初の検索（記録する）、(d) その後の検索 10 回の中央値。(d) はサーバー側の処理（埋め込み + Redis の KNN/BM25 + ランキング）として、`processor` / `database` の関数を直接呼ぶマイクロベンチで測る。**合格：(d) が CPU 環境で 0.5s 以内。** (a)〜(c) は PC によるので、報告するが判定しない。Redis Stack が起動していない状態で呼び出した場合、サーバーがクラッシュせず「Redis Stack を起動してください」のヒントを返すことも併せて確認せよ。これは項目 10 の MCP の入口（`redis_url` を §9 のテスト用の Redis にした一時的なデータフォルダ）で確かめる：`docker pause redis-stack-test` をしてツールを呼び、そのあと `docker unpause redis-stack-test`。**利用者の Redis は決して止めたり一時停止したりしない**：永続化を切ってある（§3.4）ので、再起動するとすべての記憶が消える。（サーバーが動いている間 PID ファイルがあること、`config.json` を直した後の次の呼び出しで新しいサーバーが起動することも確かめよ。）
 
    > **⚠️ 計測の解釈**：「定常 0.5s 以内」は **純サーバー側処理**（埋め込み生成 + Redis KNN/BM25 + ランキング）の目標値である。MCP クライアント経由（Claude Code 等）で計測すると **JSON-RPC 往復・クライアント側の LLM 処理時間が上乗せ**され、エンドツーエンドの中央値は **5〜10s** になることがある（これは仕様逸脱ではない）。純サーバー側を測りたい場合は `processor`/`database` 関数を直接呼ぶマイクロベンチを使うこと。また §3.9 の通りモデルロードはバックグラウンド化されるため、**バックグラウンドのロードが終わる前に届いた呼び出しは、最大 20 秒待ち**（`MODEL_WAIT_SECONDS`、§3.9）、そのあと「まだ読み込み中」の通知付きでキーワードだけで動く点も計測時に留意（モデルロード後の初回は数秒）。
 
@@ -2586,12 +2584,11 @@ pytest tests/ -v -k "not TestEmbedding"
 7. **フックの統合（Free §6 テスト 7 を手直し）**：Claude Code の中で確かめる：
    1. **グローバルのフックの登録がある**（必須の関門）。次を実行する：
       ```bash
-      python -c "import json,os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'),encoding='utf-8')); h=s.get('hooks',{}); p=s.get('enabledPlugins',{}).get('n3mc-workingmemory@neuralnexusnote'); ok=lambda ev,names: any(any(n in c.get('command','').lower() for n in names) for e in h.get(ev,[]) for c in e.get('hooks',[])); assert not p, 'the plugin is enabled: its hooks run the PyPI code, not this installation (Method A step 3)'; assert ok('UserPromptSubmit',('n3mc-lite-hook','n3mc_mcp.lite_hook')), 'UserPromptSubmit hook missing'; assert ok('Stop',('n3mc-lite-stop-hook','n3mc_mcp.lite_stop_hook')), 'Stop hook missing'; assert any(r.endswith('-m n3mc_mcp.cli --search *)') for r in s.get('permissions',{}).get('allow',[])), 'permission rules missing'; print('OK')"
+      python -c "import json,os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'),encoding='utf-8')); h=s.get('hooks',{}); p=s.get('enabledPlugins',{}).get('n3mc-workingmemory@neuralnexusnote'); ok=lambda ev,names: any(any(n in c.get('command','').lower() for n in names) for e in h.get(ev,[]) for c in e.get('hooks',[])); assert not p, 'the plugin is enabled: its MCP entry runs the PyPI code, not this installation (Method A step 3)'; assert ok('UserPromptSubmit',('n3mc-lite-hook','n3mc_mcp.lite_hook')), 'UserPromptSubmit hook missing'; assert ok('Stop',('n3mc-lite-stop-hook','n3mc_mcp.lite_stop_hook')), 'Stop hook missing'; assert any(r.endswith('-m n3mc_mcp.cli --search *)') for r in s.get('permissions',{}).get('allow',[])), 'permission rules missing'; print('OK')"
       ```
-      合格：`OK` を出力する。この確認は、このインストールの `--init` が書いたフックを求める。プラグインが有効だと失敗する。プラグインのフックは、生成したコードではなく PyPI のコードを動かすからである。失敗したら実装は終わっていない：`n3mc-lite --init` を実行する（§12）。
+      合格：`OK` を出力する。この確認は、このインストールの `--init` が書いたフックを求める。プラグインが有効だと失敗する。プラグインの MCP の入口は、生成したコードではなく PyPI のコードを動かすからである（方法 A の手順 3）。失敗したら実装は終わっていない：`n3mc-lite --init` を実行する（§12）。
    2. **UserPromptSubmit**：**インストール先のフォルダの外**（例 `~`）で開いた Claude Code のセッションからメッセージを送り、そのターンのコンテキストに `# Recalled Memory Context` があること、直前の応答とメッセージが保存されていること（`python -m n3mc_mcp.cli --list` が `[claude] …` と `[user] …` のレコードを表示する）を確かめる。インストール先のフォルダの外であることが肝心である：その中では、グローバルの登録が欠けていても隠れてしまうことがある。
    3. **Stop**：そのセッションの応答の後で、応答が保存されていること（`[claude] …`。`[user]` のレコードと同じ `turn_id` — `--recall-thread <turn_id>` で確かめる）と、プロジェクトの `.claude/rules/n3mc-lite-behavior.md` が `<!-- n3mc-lite-behavior v1 -->` で始まることを確かめる。
-   4. `claude mcp list`（使えるとき）が `n3mc-workingmemory` を表示しない。
 
 8. **フックによる完全記録（Free §6 テスト 9 を手直し）**：
    - 2 文字の応答を `last_assistant_message` として `--save-claude-turn` に、5 文字のプロンプトを `--hook-submit` に渡す（フックの JSON を stdin で）：どちらも `[claude] …` と `[user] …` として保存される。
@@ -2615,7 +2612,9 @@ pytest tests/ -v -k "not TestEmbedding"
 
 11. **コンテキストの大きさの上限（N3MC-Pro §6 テスト 19 と同様）**：`config.json` に `context_max_chars: 4000` と自分の `server_port` を書いた一時的なデータフォルダで、**テスト用**の Redis に対し、同じ話題についての 300〜400 文字のレコード 30 件（同じ文の単語をいくつかずつ変えたもの）を `--buffer` で保存する。その話題について尋ねる `prompt` を持つ `UserPromptSubmit` の JSON で `--hook-submit` を実行し、同じ質問で手の `--search` を実行し、それで MCP の `search_memory` を実行する。`--hook-submit` の stdout と `search_memory` の文は、それぞれ `context_size` の数え方（§3.17）で最大 4,000 であり、手の検索より行が少なく、`lower-ranked match(es) omitted to keep this block within the context limit` を含む。手の `--search` はすべての行を出力し、そのような行はない。次に、同じ話題の 20,000 文字の親ドキュメントを 1 つ保存し、フックの検索を繰り返す：出力はやはり収まり、その文書が最初の 3 つのヒットに入っていれば `_(cut here to keep this block within the context limit.)_` で終わる。
 
-> 項目 7〜9 は、項目 1〜6 と同じく、利用者の Redis を使う本物のインストールで行う。ただし項目 8 の失敗する保存の確認は、テスト用の Redis で行う。項目 10 と 11 は、一時的なデータフォルダと自分のポートを使う。
+> 項目 1〜9 は、利用者の Redis を使う本物のインストールで行う（項目 1〜6 は Claude Code の MCP のツールで）。ただし項目 1 の Redis が止まったときの確かめと、項目 8 の失敗する保存の確認は、テスト用の Redis で行う。
+>
+> **自律評価は MCP で行い、フックを使う確かめ（項目 7〜9）は行わない。** 検証レポートでは項目 7〜9 を行わない。フックのコードは pytest（§9 の Layer 5）が確かめる。項目 7.1 の関門は、方法 A のセットアップの確かめ（§8）としてだけ使う。項目 10 と 11 は、一時的なデータフォルダと自分のポートを使う。
 
 ---
 
@@ -2781,12 +2780,12 @@ _If several versions of the same content appear, the one with the newest `saved`
 
 1. データフォルダの `config.json` を読み込む（作る）（§6）。
 2. `~/.claude/settings.json` を読む。**ないファイルは `{}` として読む**。手順 6 で作り、控えは取らない（控えるものがない）。要れば `~/.claude/` も作る。読めないファイル、または型の違う `hooks` / `permissions` / `permissions.allow`：何も変えず、理由を出力し、exit 1。
-3. **プラグインは有効か？** `settings["enabledPlugins"]["n3mc-workingmemory@neuralnexusnote"]` が `true` なら、プラグインがフックを登録する：自分の項目を（あれば）消して何も足さず、`The n3mc-workingmemory plugin is enabled and registers the N3MC Lite hooks, so n3mc-lite --init added no hooks.` を出力し、手順 5 に進む。
+3. **プラグインは有効か？** `settings["enabledPlugins"]["n3mc-workingmemory@neuralnexusnote"]` が `true` なら、`The n3mc-workingmemory plugin is enabled: Claude Code also uses the MCP entry of the PyPI package (n3memorycore-mcp-lite==<version>). The hooks and the MCP tools work together when both run the same code.` を出力して続ける（プラグインが登録するのは MCP の入口で、フックではない）。
 4. **フックを合わせる**：`UserPromptSubmit` と `Stop` について、自分のものでない項目はすべて残し（`n3mc` を含む残したコマンドは、それぞれ `Another N3MC hook is registered for <event> and was left in place: <command>` で知らせる）、項目 `{"hooks": [{"type": "command", "command": resolve_cmd(<entry point>), "timeout": 60}]}` を 1 つ足す。`command` が文字列でないフックの項目（null など）は、自分のものではないとして残す（知らせの対象にもしない）。
 5. **許可ルール**：§8 の `PERMISSION_RULES`（`python -m n3mc_mcp.cli` と `n3mc-lite` の形）のうち欠けているものを足す。何も消さない。
 6. **何かが変わったときだけ書く**：ファイルを `settings.json.bak-n3mc-lite-<YYYYmmddHHMMSS>` に写し、同じフォルダに一時ファイルを書いて、`os.replace` する。
 7. **古い MCP の登録**：`~/.claude.json` か `./.mcp.json` にある `n3mc-workingmemory` の項目を、§8 のとおりに知らせる（読むだけ）。
-8. `N3MC Lite hooks registered in <settings path>. Saving starts with the next Claude Code session.`（または手順 3 のメッセージ）を出力する。
+8. `N3MC Lite hooks registered in <settings path>. Saving starts with the next Claude Code session.` を出力する（手順 3 のメッセージがあれば、その後に）。
 
 ```python
 OURS = {  # event -> (entry-point name, module name)
@@ -2969,7 +2968,7 @@ kept only in `audit.log`.
 
 ## 13. CLI `n3mc-lite`
 
-`n3mc-lite`（`n3mc_mcp.cli:main`。`python -m n3mc_mcp.cli` でも）は、Lite の機能を持つ Free の CLI である。このサーバーの MCP ツールがない Claude Code では、これがツールと同じことをする：ツールのコマンドはどれも、常駐サーバーのツールのハンドラを呼び（`POST /tools/<name>?nudge=0`）、応答の文をそのまま、改行を 1 つ付けて出力する。1 回の呼び出しで、コマンドはちょうど 1 つ（argparse の、互いに排他的なグループ）。文字列の引数はすべて、どのコマンドが使うよりも前に `sanitize_surrogates`（§3.13）を通す。`--search` も同じ。
+`n3mc-lite`（`n3mc_mcp.cli:main`。`python -m n3mc_mcp.cli` でも）は、Lite の機能を持つ Free の CLI である。Claude Code では、MCP の入口を使わないときも、これがツールと同じことをする：ツールのコマンドはどれも、常駐サーバーのツールのハンドラを呼び（`POST /tools/<name>?nudge=0`）、応答の文をそのまま、改行を 1 つ付けて出力する。1 回の呼び出しで、コマンドはちょうど 1 つ（argparse の、互いに排他的なグループ）。文字列の引数はすべて、どのコマンドが使うよりも前に `sanitize_surrogates`（§3.13）を通す。`--search` も同じ。
 
 | コマンド | 呼ぶもの | 出力 |
 |---|---|---|
@@ -2988,7 +2987,7 @@ kept only in `audit.log`.
 
 - `--search`、`--list`、`--recall-thread`：使えるサーバーがないとき、`--search` は §12.7 の代わりの出力を出し、ツールのコマンドは §4.6 の表の文をリマインダなしで出力する。サーバーのない `--buffer` は直接保存し（§3.16、`role` なし）、§4.6 の `save_memory` の JSON をリマインダなしで出力する。
 - **時刻の範囲**：`--since` / `--until` は、リクエストの前に §4.3.1 の決まりで読む。読めない値、または `since` が `until` より後なら、§4.3.1 の `Error: …` の文を stderr に出し、終了コード 2 で終わる。
-- **終了コード**：0。ただし引数のエラーは 2、読めない `settings.json` での `--init` は 1。ツール自身のエラーの文（`Error: …`、`"status": "error"`）は、ツールが返したとおり、終了コード 0 で出力する。
+- **終了コード**：0。ただし引数のエラーは 2、読めない `settings.json` での `--init` は 1、停止を確かめられない `--stop-server` は 1。ツール自身のエラーの文（`Error: …`、`"status": "error"`）は、ツールが返したとおり、終了コード 0 で出力する。
 - **PID ファイル**：サーバーを起動するプロセス（`_start_server`）は、`Popen` の前に `open(path, "x")` で PID ファイルを作り、子プロセスの PID を書く。排他的な作成が失敗したら、ほかのプロセスがサーバーを起動している：「PID ファイルの扱い」（§3.15）に従う。**サーバーは自分の PID を書く**：サーバーは、自分の `os.getpid()` を PID ファイルに 2 回書く（`_write_own_pid`：ファイルがなければ排他的に作り、あれば上書きする。`OSError` は無視する）。1 回目は `_run_server` の始め（Redis とモデルより前）、2 回目は `uvicorn.run` の直前である。起動した側は `Popen` が返った直後に `Popen.pid` を書くので、最後に書くのがサーバーになるようにする。Free も同じことを 1 回行う。理由：Windows では venv の `python.exe`（標準の venv も uv の venv も。したがって `uvx` も）はランチャーで、本体の Python を子として起動する。そのため `Popen.pid` はランチャーの番号になる。ランチャーはどのポートでも待ち受けないので、その番号のままだと、`server_port` を変えたあと §3.15 の別ポートの確認がポートを見つけられず、古いサーバーが止まらず、CLI は呼び出しのたびに 60 秒待つ。`remove_pid_file_if_own()` の比較も一致しない。**空か読めない PID ファイル**（作ってから書くまでの間）は、ファイルの更新時刻から 60 秒の間「起動中」として扱い、死んだプロセスとは扱わない。消さず、2 つ目のサーバーも起動しない。
 - **Claude が聞かずに動かしてよいコマンド**：§8「自動許可」。`--delete`、`--delete-session`、`--init` は、いつも利用者の許可が要る。
 - 普通の出力に「run n3mc-lite --search …」のような案内を出さない。どのコマンドがあるかは、ルールファイルが Claude に伝える。
@@ -3012,7 +3011,7 @@ Lite は、N3MC-Free、N3MC-Pro、MCP の Pro / PostgreSQL / Ollama 版と同じ
 - **`--init` はほかの製品のフックを残し**（`is_own_hook`、§12.8）、それを知らせる。ほかの製品の `--init` も Lite のものを残す（それらの照合は `n3mc-lite-hook` にも `n3mc_mcp.lite_hook` にも当たらない）。
 - **サーバーの識別**：どのサーバーも、自分のデータフォルダを `root` として知らせる。自分のポートにほかの製品のサーバーを見つけた CLI は、それを決して使わず、止めもしない（§3.15「ポートがほかのフォルダのサーバーのものだったとき」）。
 - **2 つの製品のフックを一緒に**：Claude は毎ターン、それぞれの製品から、それぞれの記憶の `# Recalled Memory Context` の塊を 1 つずつ得る。それぞれのルールファイルは、自分のコマンドを示す。これは利用者の選択であり、どちらの製品も相手を消さない。
-- **1 台の PC にプラグインと pip**：プラグインのフックと `n3mc-lite --init` が書いたフックの両方が動いてしまう（メッセージごとに検索が 2 つ。また、どちらも `turn_id_<session>.txt` に書くので、1 つのやりとりの `[user]` と `[claude]` のレコードが別々の `turn_id` を持ちうる）。プラグインが有効な間、`--init` はフックを登録しない（§12.8）。プラグインの SessionStart のスクリプトは、`--init` が書いたフックを知らせる（§8）。
+- **1 台の PC にプラグインと pip**：プラグインは MCP の入口を、`n3mc-lite --init` はフックを登録する。同じ版を動かす限り、両方一緒に動く（プラグインは `uvx` の版をパッケージの版に固定する、§2）。生成したインストールは `code_version` が違うので、プラグインが有効な間、方法 A は止める（§8）。
 - **MCP の共存**：指示のルール 0（§5 (1)）：同じアプリに永続の N3MC の記憶が MCP でつながっているとき — `n3mc-pro`（N3MC MCP Pro）、`n3mc-pg`（その PostgreSQL 版）、`n3mc-longtermmemory`（以前の MCP Pro）— は、Lite はワーキングメモリである。
 
 ---
@@ -3033,7 +3032,7 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 
 > **生成は本体のセッションで行い、サブエージェントに任せない。** この指示書を実装する AI は、コード・テストとそれらの変更を、利用者が見ているセッションで自分で書く。実装、作り直し、直し、テストを、サブエージェント（バックグラウンドのエージェント、Task / Agent ツール）に任せてはならない。サブエージェントは渡された説明しか知らず、この指示書の全体と利用者の意図を知らない。利用者に聞くこともできず、正しくても誤っていても同じ調子で報告を返す。サブエージェントは読むだけの作業（探す、比べる、レビューする）にだけ使い、その結果は、何かを変える前に本体のセッションで確かめる。
 
-> **この付録は人間向けの操作ガイドです。** 各フェーズで ``` 内のプロンプトをコピーして Claude Code に貼り付けてください。AI が自動で次のフェーズに進むことはありません。Claude Code では、記憶は**フック**と CLI `n3mc-lite` で動く（§12、§13）。MCP のツールは、テスト用のフォルダで薄いクライアントを通して試す（§10 項目 10）。
+> **この付録は人間向けの操作ガイドです。** 各フェーズで ``` 内のプロンプトをコピーして Claude Code に貼り付けてください。AI が自動で次のフェーズに進むことはありません。方法 A は、Claude Code に**フック**と **MCP の入口**の両方を登録する（§8）。MCP のツールは、再起動したあとの Claude Code の中（§10 項目 1〜6）と、テスト用のフォルダで薄いクライアントを通して（§10 項目 10）試す。
 
 | フェーズ | あなたがやること | 使うモデル |
 |---|---|---|
@@ -3049,7 +3048,7 @@ Lite 版は §3.6 に記載したハイブリッド + 時間減衰ランカー�
 > 再起動前のチェックリスト：
 > 1. `pip install -e .`（または再インストール）で最新コードがインポートパスに載っているか確認
 > 2. フックが登録済みか確認：§10 項目 7.1 の関門が `OK` を出力する（[§8](#8-クライアント設定)、§12 参照）
-> 3. `~/.claude/settings.json` に CLI の許可ルール（`Bash(python -m n3mc_mcp.cli --search *)` …。[§8 自動許可](#自動許可claude-code-固有) 参照）があり、`claude mcp get n3mc-workingmemory` がそのようなサーバーはないと答えるか確認
+> 3. `~/.claude/settings.json` に CLI の許可ルール（`Bash(python -m n3mc_mcp.cli --search *)` …。[§8 自動許可](#自動許可claude-code-固有) 参照）があり、`claude mcp get n3mc-workingmemory` が `Connected` を示すか確認
 > 4. Redis Stack が起動していること（`docker ps` で確認、無ければ `docker start redis-stack` または `docker run -d --name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest`）
 > 5. Claude Code を**完全に終了 → 再起動**（**Windows**：右上 × ボタンや `/exit` だけでは残ることがあるため、**タスクマネージャ**で `Claude` / `claude` 関連プロセスをすべて終了させる。サーバーの新しい起動を計測するときは、コマンドラインに `n3mc_mcp.cli --run-server` を含む `python.exe` も終了させる）
 > 6. サーバー起動の後の最初の検索は、multilingual-e5-base（~1.1 GB）の HF キャッシュ未生成なら 2〜10 分。その間、フックは「まだ起動中」の代わりの出力か、通知付きのキーワードだけの結果を出力する（§3.9）
@@ -3110,10 +3109,11 @@ n3mcmcp-lite について：
 **③ クロスセッションテスト**（サーバーを再起動してもデータが残るか実行確認）
 ```
 n3mcmcp-lite について：
-このセッションのメッセージがフックで保存されたことを確認してください
-（python -m n3mc_mcp.cli --list）。常駐サーバーを python -m n3mc_mcp.cli --stop-server で止め
-（Redis は止めない）、そのメッセージについて python -m n3mc_mcp.cli --search を
-実行してください：サーバーがもう一度起動し、レコードが見つかること。
+この Claude Code のセッションの MCP のツール（n3mc-workingmemory）を使ってください。
+ツールがなければ止めて、Claude Code の再起動を私に頼んでください。
+save_memory で 1 件保存し、search_memory で見つかることを確かめてください。
+常駐サーバーを python -m n3mc_mcp.cli --stop-server で止め（Redis は止めない）、
+もう一度 search_memory を呼んでください：サーバーがもう一度起動し、レコードが見つかること。
 一時的なデータフォルダで、MCP の薄いクライアントを通した save_memory でも
 同じことをしてください（§10 項目 10）。必要に応じて修正してください。
 ```
@@ -3124,15 +3124,17 @@ n3mcmcp-lite について：
 
 ### フェーズ 3：自律評価（Evidence Report）
 
-> **先に Claude Code を完全終了 → 再起動してから以下を実行**（上記 "⚠️ フェーズ 3 の前に Claude Code の再起動が必須" 参照）。再起動せずに実行すると、変更したインストールのフックが効いていないことがあり、§10-1 のサーバー起動の後の初回の計測ができません。
+> **先に Claude Code を完全終了 → 再起動してから以下を実行**（上記 "⚠️ フェーズ 3 の前に Claude Code の再起動が必須" 参照）。再起動せずに実行すると、セッションに MCP のツールがなく（MCP の登録は起動のときに読まれる）、変更したインストールのフックも効いていないことがあるので、項目 1〜6 を MCP で行えず、§10-1 のサーバー起動の後の初回の計測もできません。
 
 モデルは **Sonnet** または **Opus**（自律評価項目の検証は Sonnet で十分。Opus に渡せばよりシビアな採点になりやすい）。再起動後に以下を貼り付けてください。
 
 ```
 n3mcmcp-lite について：
 指示書 §10 の自律評価（Evidence Report）を実行してください。
-項目 1〜9 には §13 の CLI のコマンド（python -m n3mc_mcp.cli ...）を、項目 10 には
-MCP クライアントのテストを使い、§10 の 1〜11 の各項目を順に検証し、各項目を
+項目 1〜6 にはこの Claude Code のセッションの MCP のツール（n3mc-workingmemory）を使い、
+ツールがなければ止めて、Claude Code の再起動を私に頼んでください。項目 7〜9（フックを
+使う確かめ）は行わないでください。項目 10 には MCP クライアントのテストを使い、
+項目ごとに使った道（MCP か CLI か）を書いて、§10 の項目 1〜6、10、11 を順に検証し、各項目を
 ⭐⭐⭐⭐⭐ で採点した Evidence Report を生成してください。
 
 特に以下を明示的に記録してください：
@@ -3141,7 +3143,6 @@ MCP クライアントのテストを使い、§10 の 1〜11 の各項目を順
 - §10-4: 括弧付き保存テキストを無括弧クエリで上位 3 件以内ヒット（CJK バイグラム）
 - §10-6: 短／中／長（chunk_threshold 超）の混合投入を 1 つの session_id の下で → delete_memories_by_session
          → 投入数と deleted 合計の一致、他 session の無干渉、2 回目 not_found
-- §10-7..9: フックの関門、ターンごとに turn_id 1 つの [user]/[claude] レコード
 - §10-10: 一時フォルダでの MCP の薄いクライアント（モデルなし、同じ文）
 - §10-11: context_max_chars 4000 でのコンテキストの大きさの上限
 

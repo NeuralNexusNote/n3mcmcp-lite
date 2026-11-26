@@ -158,8 +158,9 @@ def rconn():
     if problem:
         pytest.skip(problem)
     import redis
-    r = redis.from_url(REDIS_TEST_URL, decode_responses=False, protocol=2, socket_connect_timeout=2,
-                       socket_timeout=5)
+    from n3mc_mcp.database import Database
+    url = Database({"redis_url": REDIS_TEST_URL, "embedding_model": ""})._connect_url()   # localhost -> 127.0.0.1
+    r = redis.from_url(url, decode_responses=False, protocol=2, socket_connect_timeout=2, socket_timeout=5)
     try:
         r.ping()
     except Exception as e:  # noqa: BLE001
