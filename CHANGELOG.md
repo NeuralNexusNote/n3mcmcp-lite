@@ -10,37 +10,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Changed
-- **Claude Code connects through MCP again; the hooks are added to it.**
-  The specification (EN / JP) no longer removes MCP from Claude Code. Claude
-  Code has three valid configurations: MCP only (the default; the model calls
-  `search_memory` / `save_memory`, as in v1.12.2), MCP + hooks (full recall:
-  the hooks save every message and reply and add the matching memories on
-  every turn, and the MCP tools stay available), and hooks only.
-  `n3mc-lite --init` registers the MCP server `n3mc-workingmemory` in Claude
-  Code's user scope (`~/.claude.json`) and pre-approves the memory tools
-  except the two delete tools; `n3mc-lite --init --hooks` adds the hooks.
-  Hooks that are already registered keep running and are registered again by
-  `--init`; `--init` never removes them. Method A registers MCP only unless
-  the user asks for the hooks. The plugin `n3mc-workingmemory` registers the
-  MCP server again (`mcpServers` in `plugin.json`) next to its hooks, so
-  plugin users get MCP + hooks after updating; the new plugin
-  `n3mc-workingmemory-mcp` registers MCP only. `--init` removes
-  `mcp__n3mc-workingmemory` from `permissions.deny`, which the earlier Method A
-  added and which hides the MCP tools from Claude Code. The README shows the
-  three configurations.
-- The specification's "What changed in v2.0.0" table now also lists four
+- The specification's "What changed in v2.0.0" table also lists three
   changes that v1.12.2 users see: a search no longer extends a TTL, the
   full-text index field is `content_fts` (the index is created again once),
-  Lite checks tool arguments itself instead of the MCP SDK, and the memory
-  tools are pre-approved one by one without the delete tools.
-- The self-evaluation (§10) runs items 1–7 through MCP: the memory tools of
-  the Claude Code session restarted after `n3mc-lite --init`. When the tools
-  are missing, the AI stops and asks for a restart instead of switching to the
-  CLI; the CLI is used only in the hooks-only configuration. The Redis-down
-  check of item 1 uses the MCP entry of item 10 with the test Redis, never the
-  user's Redis. The Phase 3 prompt of Appendix B says the same.
+  and Lite checks tool arguments itself instead of the MCP SDK.
+- The specification asks the AI that implements it to write the code and the
+  tests itself in the main session, and to use subagents only for read-only
+  work.
 
 ### Fixed
+- The MCP entry answers `initialize` within 2 seconds again: only the compiled
+  modules of the direct save are imported before stdio starts; `redis` and
+  `database.py` are imported at the direct save.
+- Four errors in the specification (the regular expression of §12.9, the SCAN
+  description of §3.12, the test list of §2, the import order of §4.6).
 - Lowering only `chunk_threshold` to 100 or less no longer reports a
   `config_type` notice about `chunk_overlap` on every start; the missing
   `chunk_overlap` is written as the value in effect.
@@ -50,10 +33,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the name is empty unless `N3MC_AGENT_NAME` or the client name gives one.
 - An unexpected error in a tool is answered `Error: <message>` again, as in
   1.x, without the exception type name.
-- Tests restored or strengthened: `delete_memories_by_session`, `owner_id`
-  mismatch, the final-score product, the `--stop-server` failure paths, the
-  exact texts of the thin client when the server is not available, the
-  stdout of the MCP entry, and the unreadable-date messages.
+- The specification's test list restores or strengthens the tests of
+  `delete_memories_by_session`, `owner_id` mismatch, the final-score product,
+  the `--stop-server` failure paths, the exact texts of the MCP entry when the
+  server is not available, the stdout of the MCP entry, and the
+  unreadable-date messages (`1969-12-31` is checked on Windows only).
 
 ## [2.0.2] — 2026-11-25
 
