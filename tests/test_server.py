@@ -119,3 +119,53 @@ class TestEncodingSafetyE2E:
     def test_query_surrogate(self, runner):
         out = runner.call("search_memory", {"query": "記憶\udc00"}, nudge=False)
         assert not out.startswith("Error")
+
+
+class TestDeleteBySession:
+    """delete_memories_by_session end to end: counts, other sessions kept, guards, second call."""
+
+    def _save(self, runner, content, sid):
+        res = _j(runner.call("save_memory", {"content": content, "session_id": sid}, nudge=False))
+        assert res["saved"], res
+        return res
+
+    def test_counts_and_other_sessions(self, runner, rconn):
+        self._save(runner, SHIRANUI, "sess-A")
+        self._save(runner, "first fact of session A", "sess-A")
+        self._save(runner, "second fact of session A", "sess-A")
+        kept = self._save(runner, "a fact of session B", "sess-B")
+        doc_keys = [k for k in rconn.scan_iter("doc:*")]
+        assert len(doc_keys) == 1
+        n_chunks = len(rconn.hget(doc_keys[0], "chunk_ids").split())
+        assert n_chunks > 1
+        out = _j(runner.call("delete_memories_by_session", {"session_id": "sess-A"}, nudge=False))
+        assert out == {"status": "deleted", "session_id": "sess-A", "documents_deleted": 1,
+                       "chunks_deleted": n_chunks, "singles_deleted": 2, "deleted": 1 + n_chunks + 2}
+        assert rconn.exists("mem:" + kept["id"])
+        assert not list(rconn.scan_iter("doc:*")) and not list(rconn.scan_iter("docsha:*"))
+        # the guards went with the records: the same texts can be saved again
+        assert self._save(runner, "first fact of session A", "sess-A")["status"] == "saved"
+        assert self._save(runner, SHIRANUI, "sess-A")["status"] == "saved"
+
+    def test_second_call_and_empty(self, runner):
+        self._save(runner, "only fact of session C", "sess-C")
+        assert _j(runner.call("delete_memories_by_session", {"session_id": "sess-C"}, nudge=False))["deleted"] == 1
+        assert _j(runner.call("delete_memories_by_session", {"session_id": "sess-C"}, nudge=False)) == \
+            {"status": "not_found", "session_id": "sess-C", "deleted": 0}
+        assert _j(runner.call("delete_memories_by_session", {"session_id": "  "}, nudge=False)) == \
+            {"status": "error", "reason": "session_id required"}
+
+    def test_guard_of_another_record_is_kept(self, runner, rconn):
+        res = self._save(runner, "fact whose guard was taken over", "sess-D")
+        guards = [k for k in rconn.scan_iter("mem:sha:*") if rconn.get(k) == res["id"].encode()]
+        assert len(guards) == 1
+        rconn.set(guards[0], "someone-else", keepttl=True)
+        out = _j(runner.call("delete_memories_by_session", {"session_id": "sess-D"}, nudge=False))
+        assert out["singles_deleted"] == 1 and not rconn.exists("mem:" + res["id"])
+        assert rconn.get(guards[0]) == b"someone-else"
+
+
+class TestOwnerMismatch:
+    def test_save_with_other_owner(self, runner):
+        out = _j(runner.call("save_memory", {"content": "not mine", "owner_id": "another-owner"}, nudge=False))
+        assert out == {"status": "error", "saved": False, "reason": "owner_id mismatch"}

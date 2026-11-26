@@ -362,6 +362,17 @@ class TestConfigRanges:
         cfg = config.load_config()
         assert cfg["chunk_overlap"] == 25 and any("chunk_overlap" in n for n in cfg["_notices"])
 
+    def test_only_threshold_lowered(self, isolate):
+        # §6: chunk_overlap absent -> its default; not below the threshold -> threshold // 4, with no notice.
+        # The filled-in file must not make the next start report a chunk_overlap the user never wrote.
+        conftest.write_test_config(str(isolate["data"]), chunk_threshold=100)
+        for _ in range(2):
+            cfg = config.load_config()
+            assert cfg["chunk_overlap"] == 25
+            assert not any(n.startswith("config_type:") for n in cfg["_notices"]), cfg["_notices"]
+        with open(os.path.join(str(isolate["data"]), "config.json"), encoding="utf-8") as f:
+            assert json.load(f)["chunk_overlap"] == 25
+
     def test_min_results_zero_ok(self):
         assert config.config_value_ok("min_results", 0)
 
@@ -809,7 +820,7 @@ class TestNudgeOnErrors:
         assert out.startswith("Error:") and out.endswith(g)
         monkeypatch.setattr(runner.db, "list_memories", lambda *a: 1 / 0)
         out = runner.call("list_memories", {})
-        assert out.startswith("Error:") and out.endswith(g)
+        assert out == "Error: division by zero" + g      # §4.4: the message, as in 1.x
         monkeypatch.setattr(runner.db, "ensure_connected", lambda *a, **k: "hint text")
         out = runner.call("search_memory", {"query": "x"})
         assert out.startswith("Error: memory backend unreachable.") and out.endswith(g)

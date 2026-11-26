@@ -220,7 +220,10 @@ class TestRolePrefix:
         cfg["skip_code_blocks"] = True
         cli.hook_submit(_submit("look ```code``` here"))
         assert not _records(rconn)
-        assert any("```code```" in json.dumps(r, ensure_ascii=False) for r in _audit()) or True
+        # The raw text is kept in audit.log by the hook entry, before the CLI runs (§12, audit first);
+        # hook_submit itself writes no copy of it.
+        lite_hook.audit_first("UserPromptSubmit", _submit("look ```code``` here").encode())
+        assert _audit()[-1]["payload"]["prompt"] == "look ```code``` here"
 
 
 class TestDirectSave:

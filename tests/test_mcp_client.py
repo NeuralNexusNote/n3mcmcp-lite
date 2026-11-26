@@ -97,6 +97,23 @@ class TestForwarding:
         assert thin.prepare_args("save_memory", {"content": "c"})["agent_name"] == "env-agent"
         assert thin.prepare_args("save_memory", {"content": "c", "agent_name": "arg"})["agent_name"] == "arg"
 
+    def test_blank_agent_name_is_never_spaces(self, sent, monkeypatch):
+        # §4.6 6.3: blank and no other source -> empty, never the spaces themselves
+        monkeypatch.delenv("N3MC_AGENT_NAME", raising=False)
+        assert thin.prepare_args("save_memory", {"content": "c", "agent_name": "  "})["agent_name"] == ""
+        thin._state["client_name"] = "   "
+        assert thin.prepare_args("save_memory", {"content": "c", "agent_name": " 	"})["agent_name"] == ""
+        thin._state["client_name"] = "client-y"
+        assert thin.prepare_args("save_memory", {"content": "c", "agent_name": "  "})["agent_name"] == "client-y"
+
+    def test_exception_text(self, monkeypatch):
+        # §4.6 6.6: "Error: <message>" + the reminder, as in 1.x (no exception type name)
+        def boom(name, args):
+            raise RuntimeError("kaput")
+        monkeypatch.setattr(thin, "forward", boom)
+        res = _call(thin.build_server(), "search_memory", {"query": "q"})
+        assert res.content[0].text == "Error: kaput" + _NUDGE_GENERIC and res.isError is False
+
     def test_nan_reaches_server(self, sent):
         _call(thin.build_server(), "save_memory", {"content": "x", "importance": "nan"})
         assert sent[-1][1]["importance"] == "nan"
@@ -112,6 +129,8 @@ class TestThinNoServer:
         res = json.JSONDecoder().raw_decode(text)[0]
         assert res["saved"] and res["warning"] == "embedding_unavailable"
         assert res["detail"].startswith("The N3MC Lite memory server was not available (")
+        assert res["detail"].endswith("), so this entry was saved without a vector. It is found by keywords now "
+                                      "and gets its vector from repair_memory once the server runs.")
         assert text.endswith(_NUDGE_AFTER_SAVE)
         assert b"embedding" not in rconn.hgetall("mem:" + res["id"])
 
@@ -122,13 +141,17 @@ class TestThinNoServer:
         assert text.endswith(_NUDGE_GENERIC)
 
     def test_repair(self):
-        assert json.JSONDecoder().raw_decode(thin.forward("repair_memory", {}))[0]["status"] == "error"
+        out = json.JSONDecoder().raw_decode(thin.forward("repair_memory", {}))[0]
+        assert out["status"] == "error"
+        assert out["message"].startswith("The N3MC Lite memory server is not available (")
+        assert out["message"].endswith("). Retry in a minute.")
 
     def test_redis_down_too(self, isolate):
         conftest.write_test_config(str(isolate["data"]), redis_url=conftest.DEAD_URL)
         text = thin.forward("save_memory", {"content": "nowhere"})
         res = json.JSONDecoder().raw_decode(text)[0]
         assert res == {"status": "error", "saved": False, "reason": res["reason"]} and "Redis Stack" in res["reason"]
+        assert "docker start redis-stack" in res["reason"]
         assert text.endswith(_NUDGE_GENERIC)
 
     def test_delete_states(self, monkeypatch, capsys):
@@ -191,7 +214,16 @@ class TestRedisDisplayAndCodeVersion:
         monkeypatch.setattr(cli, "_wait_port_free", lambda p, total=15: True)
         assert cli.main(["--stop-server"]) == 0 and "Stopped the N3MC Lite server (pid 77)." in capsys.readouterr().out
         monkeypatch.setattr(cli, "_wait_port_free", lambda p, total=15: False)
-        assert cli.main(["--stop-server"]) == 1 and "Could not stop" in capsys.readouterr().err
+        err = (cli.main(["--stop-server"]), capsys.readouterr().err)
+        assert err[0] == 1 and "Could not stop the N3MC Lite server (pid 77): the port was still in use" in err[1]
+        # §13: the request failed but the server went down anyway -> a stop
+        monkeypatch.setattr(cli, "_request_shutdown", lambda *a, **k: False)
+        monkeypatch.setattr(cli, "_wait_port_free", lambda p, total=15: True)
+        assert cli.main(["--stop-server"]) == 0 and "Stopped the N3MC Lite server (pid 77)." in capsys.readouterr().out
+        # the request failed and the port is still taken -> not a stop
+        monkeypatch.setattr(cli, "_wait_port_free", lambda p, total=15: False)
+        err = (cli.main(["--stop-server"]), capsys.readouterr().err)
+        assert err[0] == 1 and "Could not stop the N3MC Lite server (pid 77): the stop request failed." in err[1]
 
 
 class TestThinStart:
@@ -242,6 +274,33 @@ class TestThinNoModel:
         p = subprocess.run([sys.executable, "-m", "n3mc_mcp"], input=b"", capture_output=True, timeout=120,
                            cwd=conftest.REPO_ROOT)
         assert p.stdout == b""
+
+    def test_stdout_only_mcp_answers(self):
+        # initialize + tools/list: stdout holds exactly the two JSON-RPC answers and nothing else
+        with open(paths.start_failed_path(), "w") as f:
+            f.write("test")
+        init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
+        p = subprocess.Popen([sys.executable, "-m", "n3mc_mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, cwd=conftest.REPO_ROOT)
+        try:
+            p.stdin.write((json.dumps(init) + "\n").encode())
+            p.stdin.flush()
+            first = json.loads(p.stdout.readline())
+            p.stdin.write((json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode())
+            p.stdin.write((json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n").encode())
+            p.stdin.flush()
+            second = json.loads(p.stdout.readline())
+            p.stdin.close()
+            rest = p.stdout.read()
+            p.wait(timeout=60)
+        finally:
+            if p.poll() is None:
+                p.kill()
+        assert first["id"] == 1 and first["result"]["serverInfo"] == {"name": "n3mc-workingmemory", "version": __version__}
+        assert first["result"]["instructions"] == INSTRUCTIONS
+        assert second["id"] == 2 and len(second["result"]["tools"]) == 7
+        assert rest.strip() == b""
 
 
 class TestThinSubprocess:

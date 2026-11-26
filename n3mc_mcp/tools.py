@@ -112,7 +112,7 @@ class ToolRunner:
             self.db.mark_down()
             return backend_error_text(name, self.db.hint()) + generic
         except Exception as e:  # noqa: BLE001
-            return f"Error: {type(e).__name__}: {e}" + generic
+            return f"Error: {e}" + generic   # §4.4: the message, as in 1.x
         if not nudge:
             return text
         if not ok:
