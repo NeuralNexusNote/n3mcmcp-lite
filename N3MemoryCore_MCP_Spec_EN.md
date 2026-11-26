@@ -2747,9 +2747,9 @@ pytest tests/ -v -k "not TestEmbedding"
 > - Make only the data folder temporary. Even when `HOME` / `USERPROFILE` are changed, keep `HF_HOME` pointing at the real model cache (`~/.cache/huggingface`), so the model (about 1.1 GB) is not downloaded again.
 > - While fixing, run only the pytest files (§9) that concern the change; run the whole suite once, before this evaluation (as above).
 
-> **How to call the tools in items 1–6**: run each tool through the CLI, so that the results are recorded the same way in every configuration (Claude Code with hooks only has no MCP tools). The CLI calls the same handler and prints the same text without the reminder (§13): `search_memory` → `python -m n3mc_mcp.cli --search` (it runs the same search of §3.14 and prints the rows inside the hook's heading); `save_memory` → `--buffer`; `list_memories` → `--list`; `delete_memories_by_session` → `--delete-session` (Claude Code asks for permission: approve it); `repair_memory` → `--repair`. Items 7 (inside Claude Code) and 10 (in a temporary folder) check the MCP path itself.
+> **How to call the tools in items 1–6**: call each tool **through MCP**: the `n3mc-workingmemory` tools in the Claude Code session that was restarted after `n3mc-lite --init` (Appendix B, Phase 3). MCP is Lite's default connection, so the checks go the way users use it: the MCP entry (the thin client, §4.6), the resident server and Redis. Before item 1, confirm that the MCP gate of item 7.1 prints `OK` and that the session has the seven tools of §4.3. **If the tools are not there, stop and ask the user to restart Claude Code (the template of §8); do not fall back to the CLI.** Claude Code asks for permission for `delete_memories_by_session` (it is not pre-approved, §8): approve it. Use the CLI of §13 (`--search`, `--buffer`, `--list`, `--delete-session`, `--repair`) only in the hooks-only configuration, which has no MCP tools, and say so in the report. For each item the report names the path that was used (MCP or CLI). Item 1 (d) is a microbenchmark of the server-side functions, and the Redis-down check of item 1 uses the MCP entry of item 10 (see item 1). Item 10 also checks the MCP entry in a temporary folder.
 
-1. **Latency & process health**: measure separately: (a) the MCP entry's answer to `initialize` (recorded); (b) the time from the server start until `/health` answers (recorded; the library import takes about 10 s, §3.9); (c) the first search after the model has loaded (recorded); (d) the median of 10 later searches, as server-side processing (embedding + Redis KNN/BM25 + ranking, measured with a microbenchmark that calls the `processor` / `database` functions directly). **Pass: (d) ≤0.5 s on CPU.** (a)–(c) depend on the PC and are reported, not judged. Also confirm that calling any tool while Redis Stack is down does **not** crash the server — it must return the "start Redis Stack" hint. (Also confirm the PID file is created while the server runs, and that after `config.json` is edited the next call starts a new server.)
+1. **Latency & process health**: measure separately: (a) the MCP entry's answer to `initialize` (recorded); (b) the time from the server start until `/health` answers (recorded; the library import takes about 10 s, §3.9); (c) the first search after the model has loaded (recorded); (d) the median of 10 later searches, as server-side processing (embedding + Redis KNN/BM25 + ranking, measured with a microbenchmark that calls the `processor` / `database` functions directly). **Pass: (d) ≤0.5 s on CPU.** (a)–(c) depend on the PC and are reported, not judged. Also confirm that calling any tool while Redis Stack is down does **not** crash the server — it must return the "start Redis Stack" hint. Check this through the MCP entry of item 10 (a temporary data folder whose `redis_url` is the test Redis of §9): `docker pause redis-stack-test`, call a tool, then `docker unpause redis-stack-test`. **Never stop or pause the user's Redis**: its persistence is off (§3.4), so a restart deletes every memory. (Also confirm the PID file is created while the server runs, and that after `config.json` is edited the next call starts a new server.)
 
    > **⚠️ Interpreting the measurement**: "≤0.5 s steady state" is a target for **pure server-side processing** (embedding generation + Redis KNN/BM25 + ranking). Measured *through* an MCP client (e.g. Claude Code), the **JSON-RPC round-trip plus client-side LLM processing time is added on top**, and the end-to-end median can be **5–10 s** (this is not a spec violation). To measure the pure server side, use a microbenchmark that calls the `processor`/`database` functions directly. Also note, per §3.9, that the model load is backgrounded, so **a call that arrives before the background load finishes waits at most 20 s** (`MODEL_WAIT_SECONDS`, §3.9) and then runs keyword-only with the "still loading" notice; the first call after the model is loaded takes a few seconds.
 
@@ -3236,7 +3236,7 @@ All three extensions are additive — none of them require changes to the Redis 
 
 ## Appendix B: Recommended AI-Assisted Workflow
 
-> **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code. The AI does not advance to the next phase on its own. Method A registers the MCP entry in Claude Code (and adds the hooks when they were asked for, §8). The MCP tools are exercised inside Claude Code (§10 item 7) and through the thin client in a test folder (§10 item 10).
+> **This appendix is a human operator guide.** At each phase, copy the prompt inside ``` and paste it into Claude Code. The AI does not advance to the next phase on its own. Method A registers the MCP entry in Claude Code (and adds the hooks when they were asked for, §8). The MCP tools are exercised inside Claude Code (§10 items 1–7, after the restart) and through the thin client in a test folder (§10 item 10).
 
 | Phase | What you do | Model |
 |---|---|---|
@@ -3331,15 +3331,18 @@ When all three are done, proceed to phase 3.
 
 ### Phase 3: Evidence Report
 
-> **Fully exit and relaunch Claude Code before running this phase** (see the "⚠️ A full Claude Code restart is required before Phase 3" box above). Without the restart, the hooks of a changed installation may not be in effect, and §10-1's first-call timing after a server start cannot be captured.
+> **Fully exit and relaunch Claude Code before running this phase** (see the "⚠️ A full Claude Code restart is required before Phase 3" box above). Without the restart, the session has no MCP tools (the registration of `n3mc-lite --init` is read at startup) and the hooks of a changed installation may not be in effect, so items 1–6 cannot be run through MCP, and §10-1's first-call timing after a server start cannot be captured.
 
 The model can be **Sonnet** or **Opus** — Sonnet is sufficient to verify the items; Opus tends to grade harder. After the restart, paste:
 
 ```
 For n3mcmcp-lite:
-Run the §10 Evidence Report from the spec. Use the CLI commands of §13
-(python -m n3mc_mcp.cli ...) for items 1-6, 8 and 9, the MCP tools inside
-Claude Code for item 7, and the MCP client test of item 10, and verify items 1 through 11 in order. Score each item on a
+Run the §10 Evidence Report from the spec. Use the MCP tools of this
+Claude Code session (n3mc-workingmemory) for items 1-7; if they are not
+available, stop and ask me to restart Claude Code. Use the CLI commands of
+§13 (python -m n3mc_mcp.cli ...) for items 8 and 9, and the MCP client test
+of item 10, and verify items 1 through 11 in order. Name the path used
+(MCP or CLI) for each item. Score each item on a
 1–5 ⭐ scale and write up a short Evidence Report.
 
 Be explicit about:
