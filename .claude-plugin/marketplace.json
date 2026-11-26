@@ -10,11 +10,40 @@
   },
   "plugins": [
     {
+      "name": "n3mc-workingmemory-mcp",
+      "source": "./plugins/n3mc-workingmemory-mcp",
+      "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory MCP server for Claude Code, backed by Redis Stack. Multilingual (NFKC + bigram for CJK / Hangul / Thai / Lao / Myanmar / Khmer + diacritic fold). Requires a Redis Stack container running on localhost:6379 and uv (for uvx) on PATH.",
+      "category": "memory",
+      "tags": [
+        "memory",
+        "rag",
+        "redis",
+        "vector-search",
+        "bm25",
+        "embedding",
+        "ephemeral",
+        "multilingual",
+        "japanese",
+        "cjk"
+      ]
+    },
+    {
       "name": "n3mc-workingmemory",
       "source": "./plugins/n3mc-workingmemory",
-      "description": "Ephemeral (7-day TTL) hybrid vector + BM25 memory for Claude Code, backed by Redis Stack. Multilingual (NFKC + bigram for CJK / Hangul / Thai / Lao / Myanmar / Khmer + diacritic fold). Requires a Redis Stack container running on localhost:6379 and uv (for uvx) on PATH.",
+      "description": "Full recall: the same MCP server plus hooks that save every message and reply and add matching memories to every turn. Ephemeral (7-day TTL), backed by Redis Stack. Requires a Redis Stack container running on localhost:6379 and uv (for uvx) on PATH. Do not enable it together with n3mc-workingmemory-mcp.",
       "category": "memory",
-      "tags": ["memory", "rag", "redis", "vector-search", "bm25", "embedding", "ephemeral", "multilingual", "japanese", "cjk"]
+      "tags": [
+        "memory",
+        "rag",
+        "redis",
+        "vector-search",
+        "bm25",
+        "embedding",
+        "ephemeral",
+        "multilingual",
+        "japanese",
+        "cjk"
+      ]
     }
   ]
 }

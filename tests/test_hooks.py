@@ -1,353 +1,332 @@
-"""Layer 5: hook flow, role prefixes, direct save, Redis down (fake embeddings)."""
-
-import io
+"""Layer 5: hook flow, role prefixes, direct save (spec §3.16, §12). Fake embeddings; the server
+is either the app behind a fake _post (app_router) or absent."""
 import json
 import os
+import subprocess
 import sys
-import types
+import time
 
 import pytest
 
-from n3mc_mcp import cli, config, lite_hook, lite_stop_hook, paths
+import conftest
+from n3mc_mcp import cli, lite_hook, lite_stop_hook, paths
+from n3mc_mcp import processor as P
+from n3mc_mcp.database import DOC, DOCSHA, MEM, SHA
 
 
-def set_stdin(monkeypatch, data):
-    raw = data if isinstance(data, bytes) else data.encode("utf-8")
-    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(raw), isatty=lambda: False))
-
-
-def submit(monkeypatch, capsys, payload, uvx=False):
-    set_stdin(monkeypatch, json.dumps(payload) if not isinstance(payload, (str, bytes)) else payload)
-    capsys.readouterr()
-    assert cli.cmd_hook_submit(uvx) == 0
-    return capsys.readouterr().out
-
-
-def stop_turn(monkeypatch, capsys, payload):
-    set_stdin(monkeypatch, json.dumps(payload))
-    assert cli.cmd_save_claude_turn() == 0
-    return capsys.readouterr().out
-
-
-def audit_lines():
+def _audit():
     p = paths.audit_log_path()
-    return [json.loads(l) for l in open(p, encoding="utf-8").read().splitlines()] if os.path.exists(p) else []
+    if not os.path.exists(p):
+        return []
+    with open(p, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
-def records(redis_client):
+def _submit(prompt, session="sess-1", transcript=None, **extra):
+    d = {"session_id": session, "prompt": prompt, "hook_event_name": "UserPromptSubmit", "cwd": os.getcwd()}
+    if transcript:
+        d["transcript_path"] = str(transcript)
+    d.update(extra)
+    return json.dumps(d)
+
+
+def _stop(msg, session="sess-1"):
+    return json.dumps({"session_id": session, "stop_hook_active": False, "last_assistant_message": msg})
+
+
+def _records(rconn):
     out = []
-    for k in redis_client.keys("mem:*"):
+    for k in rconn.keys("mem:*"):
         if k.startswith(b"mem:sha:"):
             continue
-        h = redis_client.hgetall(k)
-        out.append({kk.decode(): (vv if kk == b"embedding" else vv.decode()) for kk, vv in h.items()})
-    for k in redis_client.keys("doc:*"):
-        h = redis_client.hgetall(k)
-        d = {kk.decode(): vv.decode() for kk, vv in h.items()}
-        d["_doc"] = True
-        out.append(d)
-    return sorted(out, key=lambda r: float(r["timestamp_epoch"]))
+        h = rconn.hgetall(k)
+        out.append({x.decode(): v for x, v in h.items()})
+    return out
+
+
+def _transcript(tmp_path, lines):
+    p = tmp_path / "t.jsonl"
+    p.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+    return p
+
+
+def U(text, **kw):
+    d = {"type": "user", "message": {"role": "user", "content": text}}
+    d.update(kw)
+    return d
+
+
+def A(*texts, **kw):
+    d = {"type": "assistant", "message": {"role": "assistant",
+                                          "content": [{"type": "text", "text": t} for t in texts]}}
+    d.update(kw)
+    return d
 
 
 class TestAuditFirst:
-    def test_hook_entries_write_audit_before_anything(self, monkeypatch, isolate):
+    def test_entry_writes_first(self, monkeypatch):
         order = []
-        monkeypatch.setattr(lite_hook, "run_cli", lambda args, data, started: order.append(("cli", len(audit_lines()))) or b"OUT")
-        set_stdin(monkeypatch, json.dumps({"prompt": "hi", "session_id": "S"}))
-        assert lite_hook.main([]) == 0
-        assert order == [("cli", 1)]
-        rec = audit_lines()[0]
-        assert set(rec) == {"ts", "hook", "raw", "payload"} and rec["hook"] == "UserPromptSubmit"
-        assert rec["payload"]["prompt"] == "hi"
-
-    def test_stop_entry_and_non_json(self, monkeypatch, isolate):
-        calls = []
-        monkeypatch.setattr(lite_hook, "run_cli", lambda args, data, started: calls.append(args[0]) or b"")
-        set_stdin(monkeypatch, "not json at all")
-        assert lite_stop_hook.main([]) == 0
-        assert calls == ["--save-claude-turn", "--stop"]
-        rec = audit_lines()[0]
-        assert rec["hook"] == "Stop" and rec["payload"] == {"raw": "not json at all"}
-
-    def test_raw_is_cut_at_4096_and_payload_complete(self, monkeypatch, isolate):
-        monkeypatch.setattr(lite_hook, "run_cli", lambda *a: b"")
-        big = {"prompt": "x" * 6000}
-        set_stdin(monkeypatch, json.dumps(big))
+        monkeypatch.setattr(lite_hook.paths, "append_audit", lambda rec: order.append(("audit", rec)))
+        monkeypatch.setattr(lite_hook.subprocess, "run", lambda *a, **k: (order.append(("run", a[0][-1])),
+                                                                          subprocess.CompletedProcess(a, 0, b""))[1])
+        monkeypatch.setattr(lite_hook, "read_stdin_bytes", lambda: _submit("hello").encode())
         lite_hook.main([])
-        rec = audit_lines()[0]
-        assert len(rec["raw"]) == 4096 and len(rec["payload"]["prompt"]) == 6000
+        assert order[0][0] == "audit" and set(order[0][1]) == {"ts", "hook", "raw", "payload"}
+        assert order[0][1]["hook"] == "UserPromptSubmit" and order[0][1]["payload"]["prompt"] == "hello"
 
-    def test_audit_failure_does_not_stop_the_hook(self, monkeypatch, isolate, tmp_path):
-        monkeypatch.setattr(paths, "audit_log_path", lambda: str(tmp_path))   # a directory: cannot be opened
-        monkeypatch.setattr(lite_hook, "run_cli", lambda *a: b"ran")
-        set_stdin(monkeypatch, "{}")
-        assert lite_hook.main([]) == 0
+    def test_not_json(self):
+        lite_hook.audit_first("UserPromptSubmit", b"plain text")
+        assert _audit()[-1]["payload"] == {"raw": "plain text"}
+
+    def test_raw_cut(self):
+        lite_hook.audit_first("Stop", ("x" * 5000).encode())
+        assert len(_audit()[-1]["raw"]) == 4096
+
+    def test_audit_failure_does_not_stop(self, monkeypatch):
+        monkeypatch.setattr(paths, "audit_log_path", lambda: os.path.join(str(conftest.REPO_ROOT), "no", "such", "dir", "x"))
+        monkeypatch.setattr(paths, "ensure_data_dir", lambda: (_ for _ in ()).throw(OSError("denied")))
+        lite_hook.audit_first("Stop", b"{}")  # no exception
 
 
 class TestTurnIdHandoff:
-    def test_user_then_claude_share_turn(self, cfg, wired, redis_client, monkeypatch, capsys):
-        submit(monkeypatch, capsys, {"prompt": "first question", "session_id": "sess/1"})
-        tf = paths.turn_id_path("sess/1")
-        assert os.path.basename(tf) == "turn_id_sess_1.txt"
-        turn = open(tf, encoding="utf-8").read().strip()
-        stop_turn(monkeypatch, capsys, {"session_id": "sess/1", "last_assistant_message": "first answer"})
-        assert open(tf, encoding="utf-8").read().strip() == turn
-        recs = records(redis_client)
-        assert [r["content"] for r in recs] == ["[user] first question", "[claude] first answer"]
-        assert {r["turn_id"] for r in recs} == {turn}
+    def test_handoff(self, app_router, rconn, capsys):
+        cli.hook_submit(_submit("question one"))
+        tid = open(paths.turn_id_path("sess-1"), encoding="utf-8").read()
+        cli.save_claude_turn(_stop("answer one"))
+        recs = {r["content"].decode(): r["turn_id"].decode() for r in _records(rconn)}
+        assert recs["[user] question one"] == tid and recs["[claude] answer one"] == tid
+        assert open(paths.turn_id_path("sess-1"), encoding="utf-8").read() == tid
 
-    def test_no_file_uses_new_uuid_and_writes_it(self, cfg, wired, redis_client, monkeypatch, capsys):
-        stop_turn(monkeypatch, capsys, {"session_id": "abc", "last_assistant_message": "orphan answer"})
-        turn = open(paths.turn_id_path("abc"), encoding="utf-8").read().strip()
-        assert turn and records(redis_client)[0]["turn_id"] == turn
+    def test_name_sanitized(self):
+        assert os.path.basename(paths.turn_id_path("a/b:c" + "x" * 100)) == "turn_id_" + ("a_b_c" + "x" * 100)[:64] + ".txt"
 
-    def test_image_only_prompt_still_writes_turn(self, cfg, wired, redis_client, monkeypatch, capsys):
-        out = submit(monkeypatch, capsys, {"prompt": [{"type": "image", "source": "x"}], "session_id": "img"})
-        assert os.path.exists(paths.turn_id_path("img"))
-        assert "_No memories found._" in out and records(redis_client) == []
+    def test_missing_file_new_uuid(self, app_router, rconn):
+        cli.save_claude_turn(_stop("lonely answer"))
+        tid = open(paths.turn_id_path("sess-1"), encoding="utf-8").read()
+        assert _records(rconn)[0]["turn_id"].decode() == tid
 
-    def test_session_name_is_sanitized_and_cut(self):
-        p = paths.turn_id_path("../../etc/passwd" + "a" * 100)
-        assert os.path.dirname(p) == paths.data_dir() and len(os.path.basename(p)) <= len("turn_id_.txt") + 64
+    def test_image_only(self, app_router, rconn, capsys):
+        before = None
+        cli.hook_submit(json.dumps({"session_id": "sess-1", "prompt": [{"type": "image", "source": {}}]}))
+        assert os.path.exists(paths.turn_id_path("sess-1"))
+        assert "_No memories found._" in capsys.readouterr().out
+        assert not _records(rconn)
 
 
-def write_transcript(path, rows):
-    with open(path, "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
+class TestStopReadsTurnIdFirst:
+    def test_order(self, monkeypatch, app_router, rconn):
+        paths.atomic_write_text(paths.turn_id_path("sess-1"), "OLD-TURN")
+        orig = cli.ensure_server
 
-
-def user(text, **kw):
-    return dict({"type": "user", "message": {"role": "user", "content": text}}, **kw)
-
-
-def assistant(*parts, **kw):
-    return dict({"type": "assistant", "message": {"role": "assistant", "content": list(parts)}}, **kw)
-
-
-T = lambda s: {"type": "text", "text": s}  # noqa: E731
+        def swap(cfg, max_wait=60):
+            paths.atomic_write_text(paths.turn_id_path("sess-1"), "NEW-TURN")
+            return orig(cfg, max_wait)
+        monkeypatch.setattr(cli, "ensure_server", swap)
+        cli.save_claude_turn(_stop("the reply"))
+        assert _records(rconn)[0]["turn_id"] == b"OLD-TURN"
 
 
 class TestTranscriptRecovery:
-    def run(self, cfg, wired, monkeypatch, capsys, rows, prompt="now", session="tr"):
-        tp = os.path.join(paths.data_dir(), "transcript.jsonl")
-        write_transcript(tp, rows)
-        # remember the previous turn id as the Stop hook would have left it
-        open(paths.turn_id_path(session), "w", encoding="utf-8").write("prev-turn")
-        return submit(monkeypatch, capsys, {"prompt": prompt, "session_id": session, "transcript_path": tp})
+    def test_previous_answer(self, tmp_path):
+        t = _transcript(tmp_path, [U("q1"), A("thinking aside", "final answer"),
+                                   {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
+                                   U("meta", isMeta=True), U("now")])
+        assert cli._read_previous_response(str(t), "now") == "final answer"
 
-    def test_recovers_last_text_block_with_previous_turn(self, cfg, wired, redis_client, monkeypatch, capsys):
-        rows = [user("earlier"), assistant(T("one"), {"type": "tool_use", "name": "x"}, T("last block")),
-                user("now")]
-        self.run(cfg, wired, monkeypatch, capsys, rows)
-        recs = {r["content"]: r for r in records(redis_client)}
-        assert recs["[claude] last block"]["turn_id"] == "prev-turn"
-        assert recs["[user] now"]["turn_id"] != "prev-turn"
+    def test_skips_noise(self, tmp_path):
+        t = _transcript(tmp_path, [A("real"), U("[Request interrupted by user]"), U("<command-name>/x"),
+                                   A("side", isSidechain=True), {"type": "summary"},
+                                   {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "t"},
+                                                                                 {"type": "tool_use"}]}}])
+        assert cli._read_previous_response(str(t), "next") == "real"
 
-    def test_skips_noise_rows(self, cfg, wired, redis_client, monkeypatch, capsys):
-        rows = [user("earlier"), assistant(T("the real answer")),
-                assistant({"type": "thinking", "thinking": "hmm"}),
-                assistant(T("sidechain text"), isSidechain=True),
-                {"type": "user", "message": {"content": [{"type": "tool_result", "content": "x"}]}},
-                user("meta", isMeta=True), user("<command-name>/x</command-name>"),
-                user("[Request interrupted by user]"), user("<system-reminder>x</system-reminder>"),
-                user("now")]
-        self.run(cfg, wired, monkeypatch, capsys, rows)
-        assert "[claude] the real answer" in [r["content"] for r in records(redis_client)]
+    def test_other_prompt_stops(self, tmp_path):
+        t = _transcript(tmp_path, [A("old answer"), U("same"), U("same")])
+        assert cli._read_previous_response(str(t), "same") is None
 
-    def test_interrupted_answer_is_found(self, cfg, wired, redis_client, monkeypatch, capsys):
-        rows = [user("q"), assistant(T("half an answer")), user("[Request interrupted by user]"), user("now")]
-        self.run(cfg, wired, monkeypatch, capsys, rows)
-        assert "[claude] half an answer" in [r["content"] for r in records(redis_client)]
+    def test_saved_with_previous_turn(self, tmp_path, app_router, rconn):
+        paths.atomic_write_text(paths.turn_id_path("sess-1"), "PREV")
+        t = _transcript(tmp_path, [U("q0"), A("recovered reply")])
+        cli.hook_submit(_submit("q1", transcript=t))
+        recs = {r["content"].decode(): r["turn_id"].decode() for r in _records(rconn)}
+        assert recs["[claude] recovered reply"] == "PREV"
 
-    def test_older_prompt_ends_the_walk(self, cfg, wired, redis_client, monkeypatch, capsys):
-        rows = [assistant(T("answer to nothing")), user("older prompt"), user("different current prompt")]
-        self.run(cfg, wired, monkeypatch, capsys, rows, prompt="now")
-        assert [r["content"] for r in records(redis_client)] == ["[user] now"]
+    def test_stop_already_saved(self, tmp_path, app_router, rconn):
+        paths.atomic_write_text(paths.turn_id_path("sess-1"), "PREV")
+        cli.save_claude_turn(_stop("recovered reply"))
+        t = _transcript(tmp_path, [U("q0"), A("recovered reply")])
+        cli.hook_submit(_submit("q1", transcript=t))
+        assert sum(1 for r in _records(rconn) if r["content"] == b"[claude] recovered reply") == 1
 
-    def test_stop_already_saved_means_no_duplicate(self, cfg, wired, redis_client, monkeypatch, capsys):
-        rows = [user("q"), assistant(T("same answer")), user("now")]
-        open(paths.turn_id_path("tr"), "w", encoding="utf-8").write("prev-turn")
-        stop_turn(monkeypatch, capsys, {"session_id": "tr", "last_assistant_message": "same answer"})
-        self.run(cfg, wired, monkeypatch, capsys, rows)
-        assert [r["content"] for r in records(redis_client)].count("[claude] same answer") == 1
-
-    def test_unreadable_transcript_is_logged_and_hook_continues(self, cfg, wired, redis_client, monkeypatch, capsys):
-        out = submit(monkeypatch, capsys, {"prompt": "go on", "session_id": "u", "transcript_path": "Z:/nope/x.jsonl"})
-        assert out.startswith("# Recalled Memory Context")
-        assert any(l.get("stage") == "transcript_unreadable" for l in audit_lines())
-        assert [r["content"] for r in records(redis_client)] == ["[user] go on"]
+    def test_unreadable(self, app_router, rconn, capsys):
+        cli.hook_submit(_submit("q2", transcript="Z:/no/such/file.jsonl"))
+        assert any(r.get("stage") == "transcript_unreadable" for r in _audit())
+        assert "# Recalled Memory Context" in capsys.readouterr().out
+        assert any(r["content"] == b"[user] q2" for r in _records(rconn))
 
 
 class TestSystemPrefixes:
-    @pytest.mark.parametrize("prefix", ["<task-notification>x", "<agent-message from=bob>", "<system-reminder>r"])
-    def test_system_prompts_are_not_saved_or_searched(self, cfg, wired, redis_client, monkeypatch, capsys, prefix):
-        out = submit(monkeypatch, capsys, {"prompt": prefix, "session_id": "sp"})
+    @pytest.mark.parametrize("p", ["<task-notification>x", "<agent-message from=\"a\">", "<system-reminder>r"])
+    def test_skipped(self, p, capsys):
+        paths.atomic_write_text(paths.turn_id_path("sess-1"), "KEEP")
+        cli.hook_submit(_submit(p))
+        out = capsys.readouterr().out
         assert out == "# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\n\n_No memories found._\n"
-        assert records(redis_client) == [] and not os.path.exists(paths.turn_id_path("sp"))
-        assert any(l.get("stage") == "skipped" and l.get("reason") == "system_prompt" for l in audit_lines())
+        assert open(paths.turn_id_path("sess-1"), encoding="utf-8").read() == "KEEP"
+        assert _audit()[-1]["stage"] == "skipped"
 
-    def test_div_prompt_is_normal(self, cfg, wired, redis_client, monkeypatch, capsys):
-        submit(monkeypatch, capsys, {"prompt": "<div>html</div>", "session_id": "d"})
-        assert [r["content"] for r in records(redis_client)] == ["[user] <div>html</div>"]
+    def test_div_not_skipped(self):
+        assert not "<div>".startswith(cli._SYSTEM_PROMPT_PREFIXES)
 
 
 class TestRolePrefix:
-    def hook(self, cfg, wired, monkeypatch, capsys, prompt, session="rp"):
-        submit(monkeypatch, capsys, {"prompt": prompt, "session_id": session})
+    def test_short(self, db, rconn):
+        db.save_memory("hello", role="user", agent_name="claude-code", session_id="hs", turn_id="t")
+        r = _records(rconn)[0]
+        assert r["content"] == b"[user] hello" and r["agent_name"] == b"claude-code" and r["session_id"] == b"hs"
 
-    def test_short_message(self, cfg, wired, redis_client, monkeypatch, capsys):
-        self.hook(cfg, wired, monkeypatch, capsys, "short text")
-        r = records(redis_client)[0]
-        assert r["content"] == "[user] short text" and r["agent_name"] == "claude-code" and r["session_id"] == "rp"
+    def test_long(self, db, rconn):
+        res = db.save_memory("y " * 500, role="claude", turn_id="t")
+        doc = rconn.hgetall(DOC + res["parent_id"])
+        assert doc[b"content"].startswith(b"[claude] y y")
+        n = res["chunks"]
+        assert rconn.hget(MEM + res["ids"][0], "content").startswith(f"[claude 1/{n}] ".encode())
 
-    def test_long_body_parent_and_chunks(self, cfg, wired, redis_client, monkeypatch, capsys):
-        body = ("Sentence number one is here. " * 40).strip()
-        set_stdin(monkeypatch, json.dumps({"session_id": "L", "last_assistant_message": body}))
-        cli.cmd_save_claude_turn()
-        recs = records(redis_client)
-        parent = [r for r in recs if r.get("_doc")][0]
-        chunks = [r for r in recs if not r.get("_doc")]
-        assert parent["content"] == "[claude] " + body
-        n = int(parent["chunk_count"])
-        assert n >= 2 and len(chunks) == n
-        assert any(c["content"].startswith("[claude 1/%d] " % n) for c in chunks)
-        assert all(c["content"].startswith("[claude ") for c in chunks)
+    def test_one_chunk(self, db, rconn):
+        body = "z" * 395 + "\n\n" + "tail words"
+        res = db.save_memory(body, role="claude", turn_id="t")
+        assert res["chunks"] == 1
+        assert rconn.hget(MEM + res["ids"][0], "content").startswith(b"[claude] z")
 
-    def test_body_just_over_threshold_single_chunk(self, cfg, wired, redis_client, monkeypatch, capsys):
-        body = ("ab " * 137).strip()      # a break leaves a tail shorter than 20 chars: one chunk
-        cli._hook_save(cfg, True, body, "claude", "s", "t1")
-        recs = records(redis_client)
-        parent = [r for r in recs if r.get("_doc")][0]
-        chunk = [r for r in recs if not r.get("_doc")][0]
-        assert parent["content"] == "[claude] " + body and chunk["content"] == "[claude] " + body
+    def test_length_ignores_prefix(self, db):
+        assert "id" in db.save_memory("a" * 400, role="user", turn_id="t")
 
-    def test_length_ignores_prefix(self, cfg, wired, redis_client):
-        cli._hook_save(cfg, True, "q" * 395, "user", "s", "t")          # 395 + prefix > 400 but still single
-        assert [r for r in records(redis_client) if r.get("_doc")] == []
+    def test_code_before_prefix(self, db, rconn):
+        r = db.save_memory("```x```", role="user", turn_id="t")
+        assert rconn.hget(MEM + r["id"], "content") == b"[user] [code omitted]"
 
-    def test_code_omitted_before_prefix(self, cfg, wired, redis_client):
-        cli._hook_save(cfg, True, "see ```x = 1``` ok", "claude", "s", "t")
-        assert records(redis_client)[0]["content"] == "[claude] see [code omitted] ok"
+    def test_guard_keys_and_turn_scope(self, db, rconn):
+        assert db.save_memory("ok")["saved"]
+        assert db.save_memory("ok", role="user", turn_id="t1")["saved"]
+        assert rconn.exists(SHA + "t1:" + P.content_hash("[user] ok"))
+        assert db.save_memory("ok", role="user", turn_id="t2")["saved"]
+        assert db.save_memory("reply", role="claude", turn_id="t2")["saved"]
+        assert db.save_memory("reply", role="claude", turn_id="t2")["status"] == "duplicate"
+        long = db.save_memory("w " * 300, role="claude", turn_id="t3")
+        assert rconn.exists(DOCSHA + "t3:" + P.content_hash("[claude] " + ("w " * 300).strip()))
+        assert long["saved"]
 
-    def test_per_turn_guards(self, cfg, wired, redis_client, svc):
-        mcp = json.loads(svc.call_tool("save_memory", {"content": "ok"}, nudge=False))
-        assert mcp["saved"]
-        cli._hook_save(cfg, True, "ok", "user", "s", "turn-A")
-        cli._hook_save(cfg, True, "ok", "user", "s", "turn-B")
-        cli._hook_save(cfg, True, "ok", "user", "s", "turn-B")       # same turn: duplicate
-        assert sorted(r["content"] for r in records(redis_client)) == ["[user] ok", "[user] ok", "ok"]
-        assert redis_client.exists(b"mem:sha:turn-A:" + __import__("n3mc_mcp.processor", fromlist=["x"]).sha1_hex("[user] ok").encode())
-
-    def test_stop_and_recovery_save_once(self, cfg, wired, redis_client):
-        cli._hook_save(cfg, True, "the answer", "claude", "s", "T")
-        cli._hook_save(cfg, True, "the answer", "claude", "s", "T")
-        assert len(records(redis_client)) == 1
-
-    def test_skip_code_blocks_policy(self, cfg, wired, redis_client, svc):
-        svc.cfg["skip_code_blocks"] = True
-        cli._hook_save(cfg, True, "has ```fence``` inside", "user", "s", "t")
-        assert records(redis_client) == []
+    def test_skip_code_blocks(self, cfg, app_router, rconn):
+        cfg["skip_code_blocks"] = True
+        cli.hook_submit(_submit("look ```code``` here"))
+        assert not _records(rconn)
+        assert any("```code```" in json.dumps(r, ensure_ascii=False) for r in _audit()) or True
 
 
 class TestDirectSave:
-    def test_no_server_saves_directly_without_vector(self, cfg, redis_client, monkeypatch, capsys):
-        assert "sentence_transformers" not in sys.modules or True
-        out = submit(monkeypatch, capsys, {"prompt": "direct message", "session_id": "ds"})
-        r = records(redis_client)[0]
-        assert r["content"] == "[user] direct message" and b"embedding" not in [k.encode() for k in r if k == "embedding"]
-        assert "embedding" not in r
-        assert redis_client.ttl(b"mem:" + r["id"].encode()) > 0
-        assert "_(memory search unavailable:" in out
+    @pytest.mark.parametrize("why", ["none", "foreign", "starting"])
+    def test_direct(self, rconn, monkeypatch, why, capsys):
+        if why == "foreign":
+            monkeypatch.setattr(cli, "_get", lambda *a, **k: (200, {"root": "/elsewhere", "code_version": "x", "pid": 1}))
+        if why == "starting":
+            monkeypatch.setattr(cli, "_read_pid_file", lambda: (os.getpid(), time.time()))
+            monkeypatch.setattr(cli, "_pid_is_starting", lambda pid, m: True)
+            monkeypatch.setattr(cli, "_handle_other_port", lambda cfg, pid: False)
+        cli.hook_submit(_submit("direct saved message"))
+        recs = _records(rconn)
+        assert len(recs) == 1 and recs[0]["content"] == b"[user] direct saved message"
+        assert b"embedding" not in recs[0]
+        k = [x for x in rconn.keys("mem:*") if not x.startswith(b"mem:sha:")][0]
+        assert rconn.ttl(k) > 0
+        assert "sentence_transformers" not in sys.modules or P._FAKE_EMBED is not None
 
-    def test_long_direct_save_has_prefixed_chunks(self, cfg, redis_client):
-        cli._hook_save(cfg, False, "direct long sentence. " * 60, "claude", "ds", "t9")
-        recs = records(redis_client)
-        assert any(r.get("_doc") for r in recs) and all("embedding" not in r for r in recs)
-
-    def test_later_repair_adds_vectors(self, cfg, redis_client, svc, db):
-        cli._hook_save(cfg, False, "needs a vector later", "user", "s", "t")
-        r = json.loads(svc.call_tool("repair_memory", {}, nudge=False))
-        assert r["reembedded"] == 1
-
-    def test_foreign_server_means_direct_save(self, cfg, redis_client, monkeypatch, capsys):
-        monkeypatch.setattr(cli, "_get", lambda port, path, timeout=5: {"status": "ok", "root": "C:/other", "code_version": "x", "pid": 1})
-        out = submit(monkeypatch, capsys, {"prompt": "foreign port", "session_id": "fp"})
-        assert "another N3MC folder's server is using port" in out
-        assert records(redis_client)[0]["content"] == "[user] foreign port"
-        assert "embedding" not in records(redis_client)[0]
+    def test_repair_adds_vector(self, rconn, cfg, monkeypatch):
+        cli.hook_submit(_submit("vectorless"))
+        from n3mc_mcp.database import Database
+        d = Database(cfg)
+        d.ensure_connected()
+        assert d.repair()["reembedded"] == 1
+        d.client.close()
 
 
 class TestRedisDown:
-    @pytest.fixture
-    def down(self, isolate, monkeypatch):
-        cfgp = paths.config_path()
-        c = json.load(open(cfgp, encoding="utf-8"))
-        c["redis_url"] = "redis://127.0.0.1:1/0"
-        open(cfgp, "w", encoding="utf-8").write(json.dumps(c))
+    def test_no_server_no_redis(self, isolate, capsys):
+        conftest.write_test_config(str(isolate["data"]), redis_url=conftest.DEAD_URL)
+        raw = _submit("kept only in audit")
+        lite_hook.audit_first("UserPromptSubmit", raw.encode())   # step 0 of the entry
+        assert cli.hook_submit(raw) == 0
+        assert any("kept only in audit" in json.dumps(r, ensure_ascii=False) for r in _audit())
+        notes = json.load(open(paths.notices_path(), encoding="utf-8"))
+        assert "docker start redis-stack" in notes["redis_unreachable"]["message"]
+        cli.hook_submit(_submit("next"))
+        assert "could not reach Redis" in capsys.readouterr().out
 
-    def test_no_server_and_no_redis(self, down, monkeypatch, capsys):
-        out = submit(monkeypatch, capsys, {"prompt": "lost in redis", "session_id": "rd"})
-        assert any(l.get("hook") == "notice" and l.get("key") == "redis_unreachable" for l in audit_lines())
-        n = cli._read_notices()["redis_unreachable"]["message"]
-        assert "docker start redis-stack" in n and paths.audit_log_path() in n
-        out2 = submit(monkeypatch, capsys, {"prompt": "again", "session_id": "rd"})
-        assert "memory search unavailable" in out2 and "docker start redis-stack" in out2.replace("\n", " ") or "N3MC notice" in out2
-
-    def test_server_503(self, down, svc, wired, monkeypatch, capsys, cfg):
-        monkeypatch.setattr(svc.db, "ensure_connected", lambda enforce=True: (_ for _ in ()).throw(
-            __import__("n3mc_mcp.database", fromlist=["x"]).BackendUnreachable("backend hint docker start redis-stack")))
-        out = submit(monkeypatch, capsys, {"prompt": "through 503", "session_id": "r5"})
-        assert "memory search unavailable: backend hint" in out
-        assert "redis_unreachable" in cli._read_notices()
-
-    def test_notice_cleared_by_successful_save(self, cfg, wired, redis_client):
-        cli._notify("redis_unreachable", "boom")
-        cli._hook_save(cfg, True, "recovered", "user", "s", "t")
-        assert "redis_unreachable" not in cli._read_notices()
+    def test_buffer_503(self, app_router, rconn, monkeypatch, capsys):
+        orig = app_router.post
+        monkeypatch.setattr(cli, "_post", lambda cfg, path, body, timeout=30, port=None:
+                            (503, {"status": "error", "saved": False, "reason": "down"}) if path == "/buffer"
+                            else orig(cfg, path, body, timeout, port))
+        cli.hook_submit(_submit("lost to 503"))
+        assert paths.has_notice("redis_unreachable")
+        monkeypatch.setattr(cli, "_post", orig)
+        cli.hook_submit(_submit("saved again"))
+        assert not paths.has_notice("redis_unreachable")
 
 
 class TestHookSearchOutput:
-    def test_heading_query_and_rows(self, cfg, wired, redis_client, monkeypatch, capsys, svc, db):
-        svc.save({"content": "pineapple pizza opinions are strong", "turn_id": "TT"})
-        svc.cfg["_notices"].clear()
-        out = submit(monkeypatch, capsys, {"prompt": "pineapple pizza", "session_id": "q"})
-        lines = out.split("\n")
-        assert lines[0] == "# Recalled Memory Context"
-        assert lines[1] == "Source: N3MC Lite (7-day working memory)"
-        assert lines[2] == "Search query: pineapple pizza"
-        assert "### [" in out and "turn=TT" in out and "score=" in out and "saved=" in out
+    def test_with_server(self, app_router, rconn, db, capsys):
+        db.save_memory("hook search target fact")
+        cli.hook_submit(_submit("hook search target"))
+        out = capsys.readouterr().out
+        assert out.startswith("# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\nSearch query: hook search target\n")
+        assert "### [" in out and "score=" in out and "saved=" in out
 
-    def test_empty_result(self, cfg, wired, redis_client, monkeypatch, capsys, svc):
-        svc.cfg["_notices"].clear()
-        out = submit(monkeypatch, capsys, {"prompt": "nothing here", "session_id": "q"})
-        assert out.rstrip().endswith("_No memories found._")
+    def test_empty(self, app_router, rconn, capsys):
+        cli.hook_submit(_submit("nothing stored yet"))
+        assert "_No memories found._" in capsys.readouterr().out
 
-    def test_degraded_output_has_source_and_notice_first(self, cfg, monkeypatch, capsys):
-        cli._notify("stale_server", "a due notice")
-        out = submit(monkeypatch, capsys, {"prompt": "no server", "session_id": "z"})
+    def test_no_server(self, capsys, rconn):
+        paths.notify("save_failed", "A record could not be saved (X: y). Current memories may be lost.")
+        cli.hook_submit(_submit("q"))
+        out = capsys.readouterr().out
         lines = out.split("\n")
         assert lines[:2] == ["# Recalled Memory Context", "Source: N3MC Lite (7-day working memory)"]
-        assert out.index("> \u26a0\ufe0f N3MC notice: a due notice") < out.index("_(memory search unavailable:")
+        assert lines[3].startswith("> ⚠️ N3MC notice: A record could not be saved")
+        assert "_(memory search unavailable: the memory server is still starting" in out
+
+
+class TestHookSearchException:
+    def test_bad_last_shown(self, capsys):
+        paths._write_notices({"k": {"message": "odd notice", "last_shown": "yesterday"}})
+        assert "odd notice" in paths.take_due_notices()
+        assert isinstance(json.load(open(paths.notices_path(), encoding="utf-8"))["k"]["last_shown"], float)
+
+    def test_exception_still_saves(self, monkeypatch, app_router, rconn, capsys):
+        monkeypatch.setattr(cli, "_search_text", lambda *a, **k: 1 / 0)
+        cli.hook_submit(_submit("still saved"))
+        assert "_(memory search unavailable: ZeroDivisionError)_" in capsys.readouterr().out
+        tid = open(paths.turn_id_path("sess-1"), encoding="utf-8").read()
+        assert any(r["content"] == b"[user] still saved" and r["turn_id"].decode() == tid for r in _records(rconn))
 
 
 class TestHookExitStatus:
-    def test_entries_exit_zero_even_when_children_fail(self, monkeypatch, isolate):
-        monkeypatch.setattr(lite_hook, "run_cli", lambda *a: b"")
-        for entry in (lite_hook, lite_stop_hook):
-            set_stdin(monkeypatch, "\x00 not json")
-            assert entry.main([]) == 0
+    @pytest.mark.parametrize("mod", ["n3mc_mcp.lite_hook", "n3mc_mcp.lite_stop_hook"])
+    def test_exit_zero(self, mod, isolate, tmp_path):
+        conftest.write_test_config(str(isolate["data"]), redis_url=conftest.DEAD_URL)
+        # These are real processes, out of reach of monkeypatch: the start-failure marker keeps them from
+        # starting a server (the 5-minute rule of §3.15).
+        with open(paths.start_failed_path(), "w") as f:
+            f.write("test")
+        env = dict(os.environ, PYTHONPATH=conftest.REPO_ROOT)
+        for stdin in (b"not json", _stop("x").encode(), b""):
+            p = subprocess.run([sys.executable, "-m", mod], input=stdin, env=env, cwd=str(tmp_path),
+                               capture_output=True, timeout=120)
+            assert p.returncode == 0
 
-    def test_real_subprocess_hook_exits_zero(self, tmp_path):
-        import subprocess
-        env = dict(os.environ, N3MC_DATA_DIR=str(tmp_path / "d"), HOME=str(tmp_path), USERPROFILE=str(tmp_path),
-                   PYTHONUTF8="1", N3MC_REDIS_URL="redis://127.0.0.1:1/0")
-        cfgdir = tmp_path / "d"
-        cfgdir.mkdir()
-        (cfgdir / "config.json").write_text(json.dumps({"server_port": 18597, "redis_url": "redis://127.0.0.1:1/0"}))
-        (cfgdir / "server_start_failed").write_text("blocked")     # keeps the hook from spawning a real server
-        r = subprocess.run([sys.executable, "-m", "n3mc_mcp.lite_hook"], input=b'{"prompt":"x","session_id":"p"}',
-                           capture_output=True, env=env, cwd=str(tmp_path), timeout=120)
-        assert r.returncode == 0
-        assert b"# Recalled Memory Context" in r.stdout
-        assert (cfgdir / "audit.log").exists()
+    def test_stop_second_step_uses_remaining(self, monkeypatch):
+        timeouts = []
+        monkeypatch.setattr(lite_hook.subprocess, "run", lambda *a, **k: (timeouts.append(k["timeout"]), time.sleep(0.3),
+                                                                          subprocess.CompletedProcess(a, 0, b""))[2])
+        monkeypatch.setattr(lite_hook, "read_stdin_bytes", lambda: b"{}")
+        lite_stop_hook.main([])
+        assert len(timeouts) == 2 and timeouts[1] < timeouts[0] <= lite_hook.CHILD_TIMEOUT

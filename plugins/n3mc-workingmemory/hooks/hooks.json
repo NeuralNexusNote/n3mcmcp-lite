@@ -14,14 +14,22 @@
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-hook --uvx", "timeout": 60 }
+          {
+            "type": "command",
+            "command": "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-hook --uvx",
+            "timeout": 60
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-stop-hook --uvx", "timeout": 60 }
+          {
+            "type": "command",
+            "command": "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-stop-hook --uvx",
+            "timeout": 60
+          }
         ]
       }
     ]

@@ -1,239 +1,355 @@
-"""Layer 10: --init, plugin files, coexistence with Free / Pro. Temporary HOME only."""
-
+"""Layer 10: --init (MCP and hooks), the plugin files, coexistence with Free / Pro (spec §8, §12.8,
+§12.9, §14). A temporary HOME only: the real ~/.claude and ~/.claude.json are never touched."""
 import glob
+import importlib.util
 import json
 import os
+import pathlib
 import sys
-import tomllib
 
 import pytest
 
-from n3mc_mcp import cli, config, paths
+import conftest
+from n3mc_mcp import __version__, cli, config, paths
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def settings_path(isolate):
-    return os.path.join(isolate["home"], ".claude", "settings.json")
+REPO = conftest.REPO_ROOT
+PIN = f"n3memorycore-mcp-lite=={__version__}"
 
 
-def load(isolate):
-    return json.load(open(settings_path(isolate), encoding="utf-8"))
+@pytest.fixture
+def home(isolate):
+    return isolate["home"]
 
 
-def write_settings(isolate, obj):
-    os.makedirs(os.path.dirname(settings_path(isolate)), exist_ok=True)
-    open(settings_path(isolate), "w", encoding="utf-8").write(json.dumps(obj, indent=2))
+def _settings(home):
+    return home / ".claude" / "settings.json"
 
 
-def cmds(settings, event):
-    return [h["command"] for g in settings.get("hooks", {}).get(event, []) for h in g["hooks"]]
+def _cj(home):
+    return home / ".claude.json"
 
 
-def backups(isolate):
-    return glob.glob(settings_path(isolate) + ".bak-n3mc-lite-*")
+def _write(p, data):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _read(p):
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _hook_cmds(home, event):
+    s = _read(_settings(home))
+    return [h.get("command") for e in s.get("hooks", {}).get(event, []) for h in e.get("hooks", [])]
+
+
+def _backups(home):
+    return [os.path.join(d, n) for d, _, files in os.walk(home) for n in files if ".bak-n3mc-lite-" in n]
+
+
+def _load_ip():
+    path = os.path.join(REPO, "plugins", "n3mc-workingmemory", "hooks", "install_permissions.py")
+    spec = importlib.util.spec_from_file_location("ip_coexist", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestInitMcp:
+    def test_entry(self, home):
+        _write(_cj(home), {"numStartups": 3, "mcpServers": {"other": {"command": "x"},
+                                                             "n3mc-workingmemory": {"command": "uvx", "args": ["--from", "n3memorycore-mcp-lite", "n3mc-workingmemory"]}}})
+        assert cli.init() == 0
+        cj = _read(_cj(home))
+        e = cj["mcpServers"]["n3mc-workingmemory"]
+        assert e["type"] == "stdio" and e["args"] == [] and os.path.isabs(e["command"]) and not e["command"].startswith('"')
+        assert e["env"] == {"N3MC_AGENT_NAME": "claude-code", "N3MC_DATA_DIR": paths.data_dir()}
+        assert cj["numStartups"] == 3 and cj["mcpServers"]["other"] == {"command": "x"}
+
+    def test_rules_and_deny(self, home):
+        _write(_settings(home), {"permissions": {"deny": ["mcp__n3mc-workingmemory", "Bash(rm *)"]}})
+        cli.init()
+        p = _read(_settings(home))["permissions"]
+        assert all(r in p["allow"] for r in cli.MCP_PERMISSION_RULES)
+        assert not any("delete" in r for r in p["allow"]) and p["deny"] == ["Bash(rm *)"]
+
+    def test_creates_claude_json(self, home):
+        cli.init()
+        assert "n3mc-workingmemory" in _read(_cj(home))["mcpServers"]
+
+    def test_unreadable_claude_json(self, home):
+        _cj(home).write_text("{bad", encoding="utf-8")
+        _write(_settings(home), {"a": 1})
+        before = _settings(home).read_text(encoding="utf-8")
+        assert cli.init() == 1
+        assert _cj(home).read_text(encoding="utf-8") == "{bad" and _settings(home).read_text(encoding="utf-8") == before
+
+    def test_rerun_writes_nothing(self, home):
+        cli.init()
+        snap = (_cj(home).read_bytes(), _settings(home).read_bytes(), len(_backups(home)))
+        cli.init()
+        assert snap == (_cj(home).read_bytes(), _settings(home).read_bytes(), len(_backups(home)))
+
+    def test_backup(self, home):
+        _write(_cj(home), {"x": 1})
+        _write(_settings(home), {"y": 1})
+        cli.init()
+        assert len(_backups(home)) == 2
+
+    def test_other_scopes_reported(self, home, tmp_path, monkeypatch, capsys):
+        _write(_cj(home), {"projects": {"C:/p": {"mcpServers": {"n3mc-workingmemory": {}}}}})
+        proj = tmp_path / "proj"
+        _write(proj / ".mcp.json", {"mcpServers": {"n3mc-workingmemory": {"command": "old"}}})
+        monkeypatch.chdir(proj)
+        cli.init()
+        out = capsys.readouterr().out
+        assert "(project C:/p)" in out and str(proj / ".mcp.json") in out
+        assert _read(proj / ".mcp.json")["mcpServers"]["n3mc-workingmemory"] == {"command": "old"}
+
+    @pytest.mark.parametrize("plugin", ["n3mc-workingmemory-mcp@neuralnexusnote", "n3mc-workingmemory@neuralnexusnote"])
+    def test_plugin_enabled(self, home, plugin, capsys):
+        _write(_settings(home), {"enabledPlugins": {plugin: True}})
+        _write(_cj(home), {"mcpServers": {"n3mc-workingmemory": {"command": "x"}}})
+        cli.init()
+        assert "n3mc-workingmemory" not in _read(_cj(home))["mcpServers"]
+        assert "registers the N3MC Lite MCP server, so n3mc-lite --init added no MCP server" in capsys.readouterr().out
+
+    def test_hooks_kept(self, home):
+        cli.init(hooks=True)
+        cli.init()
+        assert any("n3mc-lite-hook" in c or "lite_hook" in c for c in _hook_cmds(home, "UserPromptSubmit"))
+
+
+class TestInitHooksChoice:
+    def test_plain_init_no_hooks(self, home):
+        _write(_settings(home), {"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "x"}]}]}})
+        cli.init()
+        assert _read(_settings(home))["hooks"] == {"PreToolUse": [{"hooks": [{"type": "command", "command": "x"}]}]}
+
+    def test_init_hooks_both(self, home):
+        cli.init(hooks=True)
+        assert "n3mc-workingmemory" in _read(_cj(home))["mcpServers"]
+        assert len(_hook_cmds(home, "UserPromptSubmit")) == 1 and len(_hook_cmds(home, "Stop")) == 1
+
+    def test_refresh_existing(self, home, capsys):
+        _write(_settings(home), {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "C:/old/n3mc-lite-hook.exe"}]}]}})
+        cli.init()
+        out = capsys.readouterr().out
+        assert "also refreshed them (MCP + hooks)" in out
+        cmds = _hook_cmds(home, "UserPromptSubmit")
+        assert len(cmds) == 1 and "C:/old" not in cmds[0] and len(_hook_cmds(home, "Stop")) == 1
+        assert "n3mc-workingmemory" in _read(_cj(home))["mcpServers"]
+
+    def test_hooks_without_init(self):
+        with pytest.raises(SystemExit) as e:
+            cli.main(["--hooks"])
+        assert e.value.code == 2
 
 
 class TestInit:
-    def test_registers_two_hooks_and_rules(self, isolate, capsys):
-        assert cli.cmd_init() == 0
-        s = load(isolate)
-        up, st = cmds(s, "UserPromptSubmit"), cmds(s, "Stop")
-        assert len(up) == 1 and len(st) == 1
-        assert "n3mc-lite-hook" in up[0] and "n3mc-lite-stop-hook" in st[0] and "\\" not in up[0]
-        assert s["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"] == 60
-        for rule in cli.permission_rules(cli.shell_path(sys.executable)):
-            assert rule in s["permissions"]["allow"]
-        assert not any("--delete" in r for r in s["permissions"]["allow"])
-        assert "N3MC Lite hooks registered in" in capsys.readouterr().out
+    def test_hook_commands(self, home):
+        cli.init(hooks=True)
+        for ev, name in (("UserPromptSubmit", "n3mc-lite-hook"), ("Stop", "n3mc-lite-stop-hook")):
+            c = _hook_cmds(home, ev)[0]
+            assert "\\" not in c and (name in c or "-m n3mc_mcp" in c)
+        allow = _read(_settings(home))["permissions"]["allow"]
+        assert all(r in allow for r in cli.permission_rules())
+        entry = _read(_settings(home))["hooks"]["Stop"][0]["hooks"][0]
+        assert entry["timeout"] == 60 and entry["type"] == "command"
 
-    def test_second_run_writes_nothing(self, isolate):
-        cli.cmd_init()
-        before = open(settings_path(isolate), "rb").read()
-        mtime = os.path.getmtime(settings_path(isolate))
-        cli.cmd_init()
-        assert open(settings_path(isolate), "rb").read() == before and os.path.getmtime(settings_path(isolate)) == mtime
+    def test_shell_path(self, monkeypatch):
+        monkeypatch.setattr(cli, "_short_path", lambda p: "")
+        assert cli.shell_path("C:/Python312/python.exe") == "C:/Python312/python.exe"
+        assert cli.shell_path("C:/PROGRA~1/Python/python.exe") == "C:/PROGRA~1/Python/python.exe"
+        assert cli.shell_path("C:/Program Files/py.exe") == '"C:/Program Files/py.exe"'
+        assert cli.shell_path("C:/O'Brien/py.exe") == '"C:/O\'Brien/py.exe"'
+        assert cli.shell_path("C:/A&B/py.exe") == '"C:/A&B/py.exe"'
+        assert cli.shell_path("C:/a $b`c/py.exe") == '"C:/a \\$b\\`c/py.exe"'
 
-    def test_backup_before_change(self, isolate):
-        write_settings(isolate, {"theme": "dark", "permissions": {"allow": ["Bash(ls)"]}})
-        cli.cmd_init()
-        assert len(backups(isolate)) == 1
-        assert json.load(open(backups(isolate)[0], encoding="utf-8"))["theme"] == "dark"
-        s = load(isolate)
-        assert s["theme"] == "dark" and "Bash(ls)" in s["permissions"]["allow"]
+    def test_obrien(self, home, tmp_path, monkeypatch):
+        scripts = tmp_path / "O'Brien" / "Scripts"
+        scripts.mkdir(parents=True)
+        for n in ("n3mc-lite-hook.exe", "n3mc-lite-stop-hook.exe"):
+            (scripts / n).write_text("")
+        monkeypatch.setattr(cli.sysconfig, "get_path", lambda *a, **k: str(scripts))
+        monkeypatch.setattr(cli, "_short_path", lambda p: "")
+        cli.init(hooks=True)
+        c = _hook_cmds(home, "UserPromptSubmit")[0]
+        assert c.startswith('"') and cli.is_own_hook(c, "UserPromptSubmit")
+        cli.init(hooks=True)
+        assert len(_hook_cmds(home, "UserPromptSubmit")) == 1
 
-    def test_invalid_settings_unchanged_exit_1(self, isolate, capsys):
-        os.makedirs(os.path.dirname(settings_path(isolate)))
-        open(settings_path(isolate), "w", encoding="utf-8").write("{ nope")
-        assert cli.cmd_init() == 1
-        assert open(settings_path(isolate), encoding="utf-8").read() == "{ nope"
-        write_settings(isolate, {"hooks": []})
-        assert cli.cmd_init() == 1
+    def test_rerun_and_backup(self, home):
+        _write(_settings(home), {"x": 1})
+        cli.init(hooks=True)
+        n = len(_backups(home))
+        snap = _settings(home).read_bytes()
+        cli.init(hooks=True)
+        assert _settings(home).read_bytes() == snap and len(_backups(home)) == n >= 1
 
-    @pytest.mark.parametrize("old", [
-        "C:\\Python\\Scripts\\n3mc-lite-hook.exe",
-        "python -m n3mc_mcp.lite_hook",
-        "\"C:/Program Files/Py/python.exe\" -m n3mc_mcp.lite_hook",
-        "n3mc-lite-hook",
-    ])
-    def test_own_forms_are_replaced_not_duplicated(self, isolate, old):
-        write_settings(isolate, {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": old}]}]}})
-        cli.cmd_init()
-        c = cmds(load(isolate), "UserPromptSubmit")
-        assert len(c) == 1 and c[0] != old
+    def test_bad_settings(self, home):
+        _settings(home).parent.mkdir()
+        _settings(home).write_text("[1]", encoding="utf-8")
+        assert cli.init(hooks=True) == 1 and _settings(home).read_text(encoding="utf-8") == "[1]"
 
-    def test_shell_path_quotes_shell_characters(self):
-        assert cli.shell_path("C:/Users/me/Scripts/n3mc-lite-hook.exe") == "C:/Users/me/Scripts/n3mc-lite-hook.exe"
-        assert cli.shell_path("C:/PROGRA~1/Py/python.exe") == "C:/PROGRA~1/Py/python.exe"
-        assert cli.shell_path("C:/No Such Dir/n3mc-lite-hook.exe") == '"C:/No Such Dir/n3mc-lite-hook.exe"'
-        assert cli.shell_path("C:/NoSuch/O'Brien/x.exe") == "\"C:/NoSuch/O'Brien/x.exe\""
-        assert cli.shell_path("C:/NoSuch/A&B/x.exe") == '"C:/NoSuch/A&B/x.exe"'
-        assert cli.shell_path("C:/NoSuch/a$b`c/x.exe") == '"C:/NoSuch/a\\$b\\`c/x.exe"'
+    @pytest.mark.parametrize("old", ["C:\\Python\\Scripts\\n3mc-lite-hook.exe", "/usr/bin/n3mc-lite-hook",
+                                     "python -m n3mc_mcp.lite_hook", "C:\\Py\\python.exe -m n3mc_mcp.lite_hook",
+                                     f"python {os.path.join(cli.PKG_DIR, 'lite_hook.py')}"])
+    def test_own_forms_replaced(self, home, old):
+        _write(_settings(home), {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": old}]}]}})
+        cli.init(hooks=True)
+        cmds = _hook_cmds(home, "UserPromptSubmit")
+        assert len(cmds) == 1 and cmds[0] != old
 
-    def test_quoted_hook_path_is_recognised_on_rerun(self, isolate, monkeypatch, tmp_path):
-        folder = tmp_path / "O'Brien" / "Scripts"
-        folder.mkdir(parents=True)
-        (folder / "n3mc-lite-hook.exe").write_bytes(b"")
-        (folder / "n3mc-lite-stop-hook.exe").write_bytes(b"")
-        monkeypatch.setattr(cli.sysconfig, "get_path", lambda *a, **k: str(folder))
-        cli.cmd_init()
-        up = cmds(load(isolate), "UserPromptSubmit")
-        assert len(up) == 1 and up[0].startswith('"') and "O'Brien" in up[0]
-        assert cli.is_own_hook(up[0], "UserPromptSubmit")
-        assert cli.is_own_hook('"C:/a\\$b\\`c/Scripts/n3mc-lite-hook.exe"', "UserPromptSubmit")
-        before = open(settings_path(isolate), "rb").read()
-        cli.cmd_init()
-        assert open(settings_path(isolate), "rb").read() == before
-        assert len(cmds(load(isolate), "UserPromptSubmit")) == 1 and len(cmds(load(isolate), "Stop")) == 1
 
-    def test_no_mcp_files_touched(self, isolate, monkeypatch, tmp_path, capsys):
-        claude_json = os.path.join(isolate["home"], ".claude.json")
-        body = json.dumps({"mcpServers": {"n3mc-workingmemory": {"command": "x"}},
-                           "projects": {"C:/p": {"mcpServers": {"n3mc-workingmemory": {"command": "x"}}}}})
-        open(claude_json, "w", encoding="utf-8").write(body)
-        proj = tmp_path / "proj"
-        proj.mkdir()
-        mcp = proj / ".mcp.json"
-        mcp.write_text(json.dumps({"mcpServers": {"n3mc-workingmemory": {"command": "y"}}}))
-        monkeypatch.chdir(proj)
-        cli.cmd_init()
-        out = capsys.readouterr().out
-        assert open(claude_json, encoding="utf-8").read() == body
-        assert json.loads(mcp.read_text())["mcpServers"]["n3mc-workingmemory"] == {"command": "y"}
-        assert "claude mcp remove n3mc-workingmemory -s user" in out
-        assert "claude mcp remove n3mc-workingmemory -s local" in out and "project C:/p" in out
-        assert 'remove the "n3mc-workingmemory" entry from' in out
+class TestInitNonStringCommand:
+    def test_kept(self, home):
+        _write(_settings(home), {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": None},
+                                                               {"type": "command", "command": 5}]}]}})
+        assert cli.init(hooks=True) == 0
+        cmds = _hook_cmds(home, "Stop")
+        assert None in cmds and 5 in cmds and len(cmds) == 3
 
 
 class TestKeepsOtherProducts:
-    def test_free_and_pro_entries_kept_and_reported(self, isolate, capsys):
-        write_settings(isolate, {"hooks": {
-            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "C:/Py/Scripts/n3mc-hook.exe"}]},
-                                 {"hooks": [{"type": "command", "command": "python \"C:/x/N3MC-Pro/n3mc_hook.py\""}]},
-                                 {"hooks": [{"type": "command", "command": "echo unrelated"}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": "n3mc-stop-hook"}]}]}})
-        cli.cmd_init()
-        s = load(isolate)
-        up = cmds(s, "UserPromptSubmit")
-        assert "C:/Py/Scripts/n3mc-hook.exe" in up and any("n3mc_hook.py" in c for c in up) and "echo unrelated" in up
-        assert "n3mc-stop-hook" in cmds(s, "Stop")
+    OTHERS = ["C:/Py/Scripts/n3mc-hook.exe", "n3mc-stop-hook", 'python "C:/pro/n3mc_hook.py"',
+              "python -m n3memorycore.n3mc_hook", "echo unrelated"]
+
+    def test_kept_and_reported(self, home, capsys):
+        _write(_settings(home), {"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": c}]} for c in self.OTHERS]}})
+        cli.init(hooks=True)
+        cmds = _hook_cmds(home, "UserPromptSubmit")
+        assert all(c in cmds for c in self.OTHERS) and len(cmds) == len(self.OTHERS) + 1
         out = capsys.readouterr().out
-        assert "Another N3MC hook is registered for UserPromptSubmit and was left in place: C:/Py/Scripts/n3mc-hook.exe" in out
-        assert "echo unrelated" not in out
+        assert "Another N3MC hook is registered for UserPromptSubmit and was left in place: n3mc-stop-hook" in out
 
-    @pytest.mark.parametrize("command", ["n3mc-hook", "C:/x/n3mc-stop-hook.exe", "python -m n3memorycore.n3mc_hook",
-                                         "python C:/free/n3memorycore/n3mc_hook.py", "n3mc-pro-hook"])
-    def test_lite_does_not_claim_other_products(self, command):
-        assert not cli.is_own_hook(command, "UserPromptSubmit") and not cli.is_own_hook(command, "Stop")
-
-    def test_lite_claims_its_own(self):
-        assert cli.is_own_hook('"C:\\a b\\Scripts\\n3mc-lite-hook.exe"', "UserPromptSubmit")
-        assert cli.is_own_hook("py -m n3mc_mcp.lite_stop_hook", "Stop")
-        assert not cli.is_own_hook("n3mc-lite-stop-hook", "UserPromptSubmit")
+    @pytest.mark.parametrize("c", ["n3mc-hook", "n3mc-hook.exe", "C:/x/n3mc-stop-hook", "python -m n3memorycore.n3mc_hook",
+                                   "python -m n3memorycore.n3mc_stop_hook", "python C:/free/n3memorycore/n3mc_hook.py"])
+    def test_free_rules_not_ours(self, c):
+        assert not cli.is_own_hook(c, "UserPromptSubmit") and not cli.is_own_hook(c, "Stop")
 
 
 class TestPluginEnabled:
-    def test_init_registers_no_hooks(self, isolate, capsys):
-        write_settings(isolate, {"enabledPlugins": {"n3mc-workingmemory@neuralnexusnote": True},
-                                 "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "n3mc-lite-stop-hook"}]}]}})
-        cli.cmd_init()
-        s = load(isolate)
-        assert cmds(s, "UserPromptSubmit") == [] and cmds(s, "Stop") == []
-        assert cli.permission_rules(cli.shell_path(sys.executable))[0] in s["permissions"]["allow"]
-        assert "The n3mc-workingmemory plugin is enabled and registers the N3MC Lite hooks, so n3mc-lite --init added no hooks." in capsys.readouterr().out
+    def test_init_hooks_with_full_plugin(self, home, capsys):
+        _write(_settings(home), {"enabledPlugins": {"n3mc-workingmemory@neuralnexusnote": True}})
+        cli.init(hooks=True)
+        s = _read(_settings(home))
+        assert not any(s.get("hooks", {}).get(ev) for ev in ("UserPromptSubmit", "Stop"))
+        assert not _cj(home).exists() or "n3mc-workingmemory" not in _read(_cj(home)).get("mcpServers", {})
+        assert all(r in s["permissions"]["allow"] for r in cli.permission_rules())
+        out = capsys.readouterr().out
+        assert "registers the N3MC Lite hooks, so n3mc-lite --init added no hooks" in out
+        assert "registers the N3MC Lite MCP server" in out
+
+    def test_script_reports_init_hooks(self, home, capsys):
+        cli.init(hooks=True)
+        capsys.readouterr()
+        ip = _load_ip()
+        ip.main([])
+        msg = json.loads(capsys.readouterr().out)["systemMessage"]
+        assert "The N3MC Lite hooks are registered twice" in msg
+        ip.main(["--mcp"])
+        out = capsys.readouterr().out
+        assert "hooks are registered twice" not in out
+
+    @pytest.mark.parametrize("argv,tag", [([], "[n3mc-workingmemory]"), (["--mcp"], "[n3mc-workingmemory-mcp]")])
+    def test_mcp_twice(self, home, capsys, argv, tag):
+        _write(_cj(home), {"mcpServers": {"n3mc-workingmemory": {"command": "x"}}})
+        before = _cj(home).read_bytes()
+        _load_ip().main(argv)
+        msg = json.loads(capsys.readouterr().out)["systemMessage"]
+        assert f"{tag} The N3MC Lite MCP server is registered twice in Claude Code" in msg
+        assert _cj(home).read_bytes() == before
+
+    def test_full_with_mcp_plugin(self, home, capsys):
+        _write(_settings(home), {"enabledPlugins": {"n3mc-workingmemory-mcp@neuralnexusnote": True}})
+        _load_ip().main([])
+        assert "The n3mc-workingmemory-mcp plugin is enabled too" in json.loads(capsys.readouterr().out)["systemMessage"]
+        _load_ip().main(["--mcp"])
+        assert "enabled too" not in capsys.readouterr().out
+
+    def test_mcp_plugin_plus_init_hooks_quiet(self, home, capsys, monkeypatch):
+        cli.init(hooks=True)
+        cj = _read(_cj(home))
+        cj["mcpServers"].pop("n3mc-workingmemory")
+        _write(_cj(home), cj)
+        capsys.readouterr()
+        ip = _load_ip()
+        monkeypatch.setattr(ip.shutil, "which", lambda n: "uvx")
+        ip.main(["--mcp"])
+        assert capsys.readouterr().out == ""
 
 
-class TestNoMcpInClaudeCode:
-    def plugin_dir(self):
-        return os.path.join(ROOT, "plugins", "n3mc-workingmemory")
+class TestClaudeCodePlugins:
+    def _load(self, plugin, *parts):
+        with open(os.path.join(REPO, "plugins", plugin, *parts), encoding="utf-8") as f:
+            return json.load(f)
 
-    def test_plugin_json_has_no_mcp_servers(self):
-        data = json.load(open(os.path.join(self.plugin_dir(), ".claude-plugin", "plugin.json"), encoding="utf-8")) \
-            if os.path.exists(os.path.join(self.plugin_dir(), ".claude-plugin", "plugin.json")) else {}
-        if "mcpServers" in data or not data:
-            pytest.skip("plugins/ still holds the v1.12.2 files (not regenerated: kept as instructed)")
-        assert "mcpServers" not in data
+    def test_mcp_servers(self):
+        want = {"n3mc-workingmemory": {"command": "uvx", "args": ["--from", PIN, "n3mc-workingmemory"],
+                                       "env": {"N3MC_AGENT_NAME": "claude-code"}}}
+        for p in ("n3mc-workingmemory", "n3mc-workingmemory-mcp"):
+            m = self._load(p, ".claude-plugin", "plugin.json")
+            assert m["mcpServers"] == want and m["name"] == p and m["version"] == __version__
 
-    def test_hooks_json_has_three_hooks(self):
-        data = json.load(open(os.path.join(self.plugin_dir(), "hooks", "hooks.json"), encoding="utf-8"))
-        if "UserPromptSubmit" not in data.get("hooks", {}):
-            pytest.skip("plugins/ still holds the v1.12.2 files (not regenerated: kept as instructed)")
-        assert set(data["hooks"]) == {"SessionStart", "UserPromptSubmit", "Stop"}
+    def test_full_hooks(self):
+        h = self._load("n3mc-workingmemory", "hooks", "hooks.json")["hooks"]
+        assert set(h) == {"SessionStart", "UserPromptSubmit", "Stop"}
+        assert h["UserPromptSubmit"][0]["hooks"][0] == {"type": "command", "command": f"uvx --from {PIN} n3mc-lite-hook --uvx", "timeout": 60}
+        assert h["Stop"][0]["hooks"][0] == {"type": "command", "command": f"uvx --from {PIN} n3mc-lite-stop-hook --uvx", "timeout": 60}
+        cmd = h["SessionStart"][0]["hooks"][0]["command"]
+        assert cmd.startswith('python "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || py ') and "--mcp" not in cmd
+
+    def test_mcp_hooks(self):
+        h = self._load("n3mc-workingmemory-mcp", "hooks", "hooks.json")["hooks"]
+        assert set(h) == {"SessionStart"}
+        cmd = h["SessionStart"][0]["hooks"][0]["command"]
+        assert 'install_permissions.py" --mcp || py ' in cmd and "[n3mc-workingmemory-mcp] Python was not found" in cmd
+
+    def test_same_script(self):
+        a = pathlib.Path(REPO, "plugins", "n3mc-workingmemory", "hooks", "install_permissions.py").read_bytes()
+        b = pathlib.Path(REPO, "plugins", "n3mc-workingmemory-mcp", "hooks", "install_permissions.py").read_bytes()
+        assert a == b
 
 
 class TestSeparateNames:
-    def test_nothing_is_shared_with_other_products(self):
-        assert config.DEFAULTS["server_port"] == 18524 and config.DEFAULTS["server_port"] not in (18520, 18521, 18522, 18523)
-        assert not paths.data_dir().endswith(".n3mc") and not paths.data_dir().endswith(".n3mc-pro")
-        assert os.path.basename(paths.pid_path()) == "n3mc-lite.pid"
-        assert cli._RULES_MD_TEMPLATE.startswith("<!-- n3mc-lite-behavior v1 -->")
-        scripts = tomllib.load(open(os.path.join(ROOT, "pyproject.toml"), "rb"))["project"]["scripts"]
-        assert set(scripts) == {"n3mc-workingmemory", "n3mc-mcp-lite", "n3mc-lite", "n3mc-lite-hook", "n3mc-lite-stop-hook"}
-
-    def test_default_data_folder_name(self, monkeypatch):
+    def test_names(self, monkeypatch):
         monkeypatch.delenv("N3MC_DATA_DIR")
-        assert os.path.basename(paths.data_dir()) == ".n3mc-workingmemory"
+        assert config.DEFAULTS["server_port"] == 18524 not in (18520, 18521)
+        assert paths.data_dir().endswith(".n3mc-workingmemory") and not paths.data_dir().endswith(".n3mc")
+        assert cli.RULES_NAME == "n3mc-lite-behavior.md" != "n3mc-behavior.md"
+        assert paths.PID_NAME == "n3mc-lite.pid"
+        assert all(n.startswith("n3mc-lite") for n, _ in cli.OURS.values())
 
 
 class TestRulesFile:
-    def rules(self, folder):
-        return os.path.join(str(folder), ".claude", "rules", "n3mc-lite-behavior.md")
+    def _path(self, proj):
+        return proj / ".claude" / "rules" / "n3mc-lite-behavior.md"
 
-    def test_pip_form_and_uvx_form(self, isolate, tmp_path):
-        a, b = tmp_path / "a", tmp_path / "b"
-        cli._ensure_rules_md(str(a), uvx=False)
-        cli._ensure_rules_md(str(b), uvx=True)
-        ta, tb = open(self.rules(a), encoding="utf-8").read(), open(self.rules(b), encoding="utf-8").read()
-        assert "-m n3mc_mcp.cli --search" in ta and "uvx" not in ta
-        assert "uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite --search" in tb
-        assert ta.split("\n")[0] == "<!-- n3mc-lite-behavior v1 -->"
-
-    def test_other_form_is_replaced_with_backup(self, isolate, tmp_path):
-        cli._ensure_rules_md(str(tmp_path), uvx=True)
+    def test_pip_form(self, tmp_path):
         cli._ensure_rules_md(str(tmp_path), uvx=False)
-        assert "uvx" not in open(self.rules(tmp_path), encoding="utf-8").read()
-        assert len(glob.glob(self.rules(tmp_path) + ".bak-n3mc-lite-*")) == 1
+        text = self._path(tmp_path).read_text(encoding="utf-8")
+        assert text.startswith("<!-- n3mc-lite-behavior v1 -->\n")
+        assert f"{cli.shell_path(sys.executable)} -m n3mc_mcp.cli --search" in text and "{cli}" not in text
 
-    def test_same_content_does_nothing(self, isolate, tmp_path):
-        cli._ensure_rules_md(str(tmp_path))
-        m = os.path.getmtime(self.rules(tmp_path))
-        cli._ensure_rules_md(str(tmp_path))
-        assert os.path.getmtime(self.rules(tmp_path)) == m
-        assert glob.glob(self.rules(tmp_path) + ".bak-*") == []
+    def test_uvx_form_replaces_other(self, tmp_path):
+        cli._ensure_rules_md(str(tmp_path), uvx=False)
+        cli._ensure_rules_md(str(tmp_path), uvx=True)
+        text = self._path(tmp_path).read_text(encoding="utf-8")
+        assert f"uvx --from {PIN} n3mc-lite --search" in text
+        assert glob.glob(str(self._path(tmp_path)) + ".bak-n3mc-lite-*")
 
-    def test_hand_edited_file_is_kept(self, isolate, tmp_path):
-        cli._ensure_rules_md(str(tmp_path))
-        p = self.rules(tmp_path)
-        open(p, "a", encoding="utf-8").write("\nmy own rule\n")
-        cli._ensure_rules_md(str(tmp_path))
-        assert "my own rule" in open(p, encoding="utf-8").read()
-        notes = [k for k in cli._read_notices() if k.startswith("rules_md_edited:")]
-        assert len(notes) == 1 and len(notes[0].split(":")[1]) == 12
+    def test_old_pin_replaced(self, tmp_path):
+        cli._ensure_rules_md(str(tmp_path), uvx=True)
+        p = self._path(tmp_path)
+        p.write_text(p.read_text(encoding="utf-8").replace(PIN, "n3memorycore-mcp-lite==2.0.0"), encoding="utf-8")
+        cli._ensure_rules_md(str(tmp_path), uvx=True)
+        assert PIN in p.read_text(encoding="utf-8")
 
-    def test_crlf_file_counts_as_same(self, isolate, tmp_path):
-        cli._ensure_rules_md(str(tmp_path))
-        p = self.rules(tmp_path)
-        data = open(p, "rb").read().replace(b"\n", b"\r\n")
-        open(p, "wb").write(data)
-        cli._ensure_rules_md(str(tmp_path))
-        assert glob.glob(p + ".bak-*") == [] and not [k for k in cli._read_notices() if k.startswith("rules_md")]
+    def test_hand_edited(self, tmp_path):
+        cli._ensure_rules_md(str(tmp_path), uvx=False)
+        p = self._path(tmp_path)
+        p.write_text(p.read_text(encoding="utf-8") + "\nmy own note\n", encoding="utf-8")
+        cli._ensure_rules_md(str(tmp_path), uvx=True)
+        assert "my own note" in p.read_text(encoding="utf-8")
+        assert any(k.startswith("rules_md_edited:") for k in json.load(open(paths.notices_path(), encoding="utf-8")))

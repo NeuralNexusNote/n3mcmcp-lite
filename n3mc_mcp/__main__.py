@@ -1,5 +1,4 @@
-"""Entry point: python -m n3mc_mcp (= the MCP thin client, run())."""
-
+"""Entry point: python -m n3mc_mcp — the MCP thin client (spec §4.6)."""
 import os as _os
 import sys as _sys
 
