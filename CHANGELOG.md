@@ -33,6 +33,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   full-text index field is `content_fts` (the index is created again once),
   Lite checks tool arguments itself instead of the MCP SDK, and the memory
   tools are pre-approved one by one without the delete tools.
+- The self-evaluation (§10) runs items 1–7 through MCP: the memory tools of
+  the Claude Code session restarted after `n3mc-lite --init`. When the tools
+  are missing, the AI stops and asks for a restart instead of switching to the
+  CLI; the CLI is used only in the hooks-only configuration. The Redis-down
+  check of item 1 uses the MCP entry of item 10 with the test Redis, never the
+  user's Redis. The Phase 3 prompt of Appendix B says the same.
 
 ### Fixed
 - Lowering only `chunk_threshold` to 100 or less no longer reports a
