@@ -78,6 +78,8 @@ def prepare_args(name: str, args) -> dict:
     if name == "save_memory":
         an = args.get("agent_name")
         if not isinstance(an, str) or not an.strip():
+            if isinstance(an, str):
+                args["agent_name"] = ""   # blank: never stored as spaces (§4.6 6.3)
             for cand in (os.environ.get("N3MC_AGENT_NAME"), _state["client_name"]):
                 if isinstance(cand, str) and cand.strip():
                     args["agent_name"] = cand.strip()
@@ -115,7 +117,7 @@ async def handle_call(name: str, arguments) -> list:
         text = await asyncio.to_thread(forward, name, prepare_args(name, arguments))
     except Exception as e:  # noqa: BLE001
         print(f"n3mc-workingmemory: {name} failed ({type(e).__name__}: {e})", file=sys.stderr)
-        text = f"Error: {type(e).__name__}: {e}" + _NUDGE_GENERIC
+        text = f"Error: {e}" + _NUDGE_GENERIC   # §4.6 6.6, as in 1.x
     return [types.TextContent(type="text", text=text)]
 
 

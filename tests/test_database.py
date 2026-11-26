@@ -231,3 +231,30 @@ class TestSha1:
 
     def test_long(self):
         assert len(P.sha1_hex("x" * 100000)) == 40
+
+
+
+class TestFinalScoreProduct:
+    """§3.6: score = base × time_decay × b_local × b_session (the lexical bonus is added afterwards)."""
+
+    def test_factors_multiply(self, db, monkeypatch):
+        monkeypatch.setattr(P, "lexical_bonus", lambda *a, **k: 0.0)
+        # Each search bumps access_count, which rewrites the hash; in a one-record test index the BM25
+        # score then falls towards 0. The keyword part is fixed so only the product is measured.
+        monkeypatch.setattr(P, "keyword_relevance", lambda *a, **k: 1.0)
+        db.save_memory("orbital harbor lantern schedule", session_id="S1")
+
+        def score(sid):
+            rows = _normal(db, "orbital harbor lantern schedule", session_id=sid)
+            assert rows, sid
+            return rows[0]["score"]
+
+        monkeypatch.setattr(P, "time_decay", lambda *a, **k: 1.0)
+        base = score("S1")                                   # importance 1.0, same session: the base score
+        assert 0 < base <= 1.0
+        assert score("S2") == pytest.approx(base * 0.6)      # b_session mismatch
+        monkeypatch.setattr(P, "time_decay", lambda *a, **k: 0.5)
+        assert score("S1") == pytest.approx(base * 0.5)      # time_decay
+        monkeypatch.setattr(P, "b_local", lambda *a, **k: 1.5)
+        assert score("S1") == pytest.approx(base * 0.5 * 1.5)
+        assert score("S2") == pytest.approx(base * 0.5 * 1.5 * 0.6)

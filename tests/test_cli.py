@@ -3,6 +3,7 @@ import http.server
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -213,7 +214,16 @@ class TestCommands:
     def test_bad_time(self, sent, capsys, argv):
         assert cli.main(argv) == 2
         err = capsys.readouterr().err
-        assert err.startswith("Error: ") and not sent
+        key, value = argv[2].lstrip("-"), argv[3]
+        assert err == (f"Error: {key} must be an ISO 8601 date or datetime, e.g. 2026-11-13 or "
+                       f"2026-11-13T09:00:00+09:00 (got '{value}')\n") and not sent
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="the conversion fails only on Windows (§3.12)")
+    def test_before_1970_on_windows(self, sent, capsys):
+        # 1969-12-31 in the local time zone cannot be converted on Windows: unreadable, one line, exit 2
+        assert cli.main(["--search", "x", "--since", "1969-12-31"]) == 2
+        err = capsys.readouterr().err
+        assert err.startswith("Error: since must be an ISO 8601") and err.count("\n") == 1 and not sent
 
     @pytest.mark.parametrize("argv,path,body", [
         (["--buffer", "fact"], "/tools/save_memory?nudge=0", {"content": "fact", "agent_name": "claude-code"}),

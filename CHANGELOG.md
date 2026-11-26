@@ -28,6 +28,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `mcp__n3mc-workingmemory` from `permissions.deny`, which the earlier Method A
   added and which hides the MCP tools from Claude Code. The README shows the
   three configurations.
+- The specification's "What changed in v2.0.0" table now also lists four
+  changes that v1.12.2 users see: a search no longer extends a TTL, the
+  full-text index field is `content_fts` (the index is created again once),
+  Lite checks tool arguments itself instead of the MCP SDK, and the memory
+  tools are pre-approved one by one without the delete tools.
+
+### Fixed
+- Lowering only `chunk_threshold` to 100 or less no longer reports a
+  `config_type` notice about `chunk_overlap` on every start; the missing
+  `chunk_overlap` is written as the value in effect.
+- `n3mc-lite --stop-server` reports the stop when the stop request failed but
+  the server went down anyway (exit 0), as the specification says.
+- An MCP `save_memory` whose `agent_name` is blank no longer stores the spaces;
+  the name is empty unless `N3MC_AGENT_NAME` or the client name gives one.
+- An unexpected error in a tool is answered `Error: <message>` again, as in
+  1.x, without the exception type name.
+- Tests restored or strengthened: `delete_memories_by_session`, `owner_id`
+  mismatch, the final-score product, the `--stop-server` failure paths, the
+  exact texts of the thin client when the server is not available, the
+  stdout of the MCP entry, and the unreadable-date messages.
 
 ## [2.0.2] — 2026-11-25
 

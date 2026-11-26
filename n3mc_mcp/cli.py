@@ -1357,8 +1357,10 @@ def stop_server() -> int:
         return 0
     pid = h.get("pid")
     ok = _request_shutdown(cfg, _own_root())
-    freed = _wait_port_free(port, 15.0) if ok else not _port_in_use(port)
-    if ok and freed:
+    # The request can fail while the server is already going down (the answer is lost), so the port is
+    # waited for either way: a freed port is a stop (§13 "--stop-server").
+    freed = _wait_port_free(port, 15.0)
+    if freed:
         print(f"Stopped the N3MC Lite server (pid {pid}).")
         return 0
     reason = "the stop request failed" if not ok else "the port was still in use after 15 seconds"

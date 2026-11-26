@@ -97,6 +97,10 @@ Claude Code, optional ──hooks / CLI (HTTP)───────────�
 | `skip_code_blocks: true` は、フェンス付きの `save_memory` を断った | 同じ設定で、フェンスを含むフックのメッセージや応答も、すべて保存しない（§3.16）。既定の `false` なら `[code omitted]` にして保存する |
 | 最初の `uvx` の取得とモデルのダウンロードは、MCP サーバーの起動のときに起きた | モデルのダウンロードは、常駐サーバーが裏で行う（§3.15）。MCP：入口は `initialize` にすぐ答え、ツールはモデルを最大 20 秒待ち、そのあとキーワードだけで答える（§3.9、§4.6）。フック：フックはサーバーを待たない（§12.3）ので、モデルの準備ができるまで、最初のメッセージはベクトルなしで保存され、キーワードだけで検索される |
 | `agent_name` のない `save_memory` は空の名前を保存した | MCP：`N3MC_AGENT_NAME`、なければクライアントの `clientInfo.name`、なければ空（§4.6）。Claude Code の MCP の登録は `N3MC_AGENT_NAME=claude-code` を付ける（§8）。フック：`claude-code` |
+| 検索は、上位の結果の TTL を張り直していた（`ttl_refresh_on_search`、既定 `true`） | **検索は TTL を変えない**。どのレコードも、それを書いた保存から 7 日で消える（§3.3）。`ttl_refresh_on_search` はもう設定ではなく、`config.json` に残っていても無視する（§6）。`access_count` は数え続ける（§3.14） |
+| 全文検索は、索引 `n3mc_idx` の `content` の欄を使っていた | `content_fts`（役割の接頭辞と `[code omitted]` を除いた本文）を使う（§3.7）。古い形の索引は、起動のときに一度だけ消して作り直す。レコードそのものは残る。それより前に保存したレコードには `content_fts` がないので、期限で消えるまで、BM25 は `content_ngram` だけでそれを見つける（§3.7） |
+| MCP の SDK が、ツールの引数をスキーマで確かめ、`Input validation error: …` と答えていた（たとえば 100 を超える `limit`、文字列の `importance`、数の `turn_id`） | Lite が自分で引数を確かめ、自分の文で答える（§4.3、§4.6 の 5）。たとえば 100 を超える `limit` は受け付け（1 未満は 1 にする）、文字列でない `turn_id` には `{"status": "error", "saved": false, "reason": "turn_id must be a string (got int)"}` を返す |
+| プラグインは、ワイルドカード `mcp__plugin_n3mc-workingmemory_n3mc-workingmemory__*` と `mcp__n3mc-workingmemory__*` で、削除の 2 ツールも含めてツールを事前に許可していた | プラグインと `--init` は、記憶のツールを 1 つずつ事前に許可し、削除の 2 ツールは**入れない**（§8）。`settings.json` にすでにあるワイルドカードの規則には触れない |
 | — | フック：`--stop` は、Claude Code がターンを終えた各プロジェクトの根のフォルダに `.claude/rules/n3mc-lite-behavior.md` を書く（§12.4、§12.9） |
 | `examples/claude_code_mcp.json` が Claude Code への MCP の登録を示していた | 消した。Claude Code への MCP の登録は `n3mc-lite --init` か `claude mcp add` で行う（§8） |
 | Redis の案内と README は `docker run … -p 6379:6379 …`（すべてのインターフェース）と書いていた | **（表示の変更）** `-p 127.0.0.1:6379:6379` と書く。記憶がネットワークから届かなくなる。すでに作ったコンテナは、自分の設定のままである。変えるには作り直す（`docker rm -f redis-stack`、そのあと新しい `docker run`）。そのとき、そのコンテナの記憶は、ほかの再起動と同じく消える（§3.4） |
@@ -112,7 +116,7 @@ Claude Code, optional ──hooks / CLI (HTTP)───────────�
 | フックの塊を受けて動くモデル | 指示のルール 1 と 2（§5）は、フックの塊があるときは、モデルに毎ターンの検索と保存をさせない。そのため、MCP が戻っても、検索と保存の大部分はフックが行う |
 | 方法 A が `permissions.deny` に足した `mcp__n3mc-workingmemory` | 残っていると MCP のツールが Claude Code に出ない。`n3mc-lite --init` がこの行を外す（§8） |
 
-**変わらないもの**：PyPI の名前 `n3memorycore-mcp-lite`、Python パッケージ `n3mc_mcp`、MCP のコマンドとサーバー名 `n3mc-workingmemory`（別名 `n3mc-mcp-lite`）、同じ名前・引数・出力の文を持つ 7 つのツール（ただし `search_memory` の文は `context_max_chars` に収まるようになった、§3.17）、Redis のレイアウトと設定（`redis_url`、`N3MC_REDIS_URL`）、7 日の TTL、データフォルダ `~/.n3mc-workingmemory`（`N3MC_DATA_DIR`）、プラグイン名 `n3mc-workingmemory`（MCP サーバーとフックを登録する完全記憶のプラグイン。MCP だけのプラグインは `n3mc-workingmemory-mcp`）、§3 の検索と保存のすべての決まり。v1.12.2 が保存したレコードはそのまま読める（同じ索引、同じフィールド）。
+**変わらないもの**：PyPI の名前 `n3memorycore-mcp-lite`、Python パッケージ `n3mc_mcp`、MCP のコマンドとサーバー名 `n3mc-workingmemory`（別名 `n3mc-mcp-lite`）、同じ名前・引数・出力の文を持つ 7 つのツール（ただし `search_memory` の文は `context_max_chars` に収まるようになった、§3.17）、Redis のレイアウトと設定（`redis_url`、`N3MC_REDIS_URL`）、保存から数えて 7 日の TTL、データフォルダ `~/.n3mc-workingmemory`（`N3MC_DATA_DIR`）、プラグイン名 `n3mc-workingmemory`（MCP サーバーとフックを登録する完全記憶のプラグイン。MCP だけのプラグインは `n3mc-workingmemory-mcp`）、上の表の変更を除く §3 の検索と保存の決まり。v1.12.2 が保存したレコードはそのまま読める（キーとフィールドは同じ。索引は一度だけ作り直す。上の表を参照）。
 
 ---
 
@@ -2016,7 +2020,7 @@ _SOFT_BREAKS = (
 | `ttl_seconds` | 整数 | ≥ 1 |
 | `search_result_limit`, `search_query_max_chars`, `embedding_dim` | 整数 | ≥ 1 |
 | `chunk_threshold` | 整数 | ≥ 50 |
-| `chunk_overlap` | 整数 | ≥ 0 かつ < `chunk_threshold`（`chunk_threshold` を確認したあとの有効な値）。設定値 — キーがないか拒否されたときは既定の 100 — が `chunk_threshold` 未満でなければ、`chunk_threshold // 4` を使う（`chunk_threshold` だけを 100 以下に下げても保存が壊れてはならない） |
+| `chunk_overlap` | 整数 | ≥ 0 かつ < `chunk_threshold`（`chunk_threshold` を確認したあとの有効な値）。設定値 — キーがないか拒否されたときは既定の 100 — が `chunk_threshold` 未満でなければ、`chunk_threshold // 4` を使う（`chunk_threshold` だけを 100 以下に下げても保存が壊れてはならない）。確かめて知らせるのは、利用者が書いたキーだけである。`chunk_overlap` がないときは、有効な値（この場合は `chunk_threshold // 4`）でファイルを補う。そうしないと、次の起動で、利用者が書いていない `chunk_overlap` を知らせてしまう |
 | `ttl_refresh_top_k`, `version_min_chars`, `min_results` | 整数 | ≥ 0 |
 | `half_life_days` | 数値 | > 0 |
 | `bm25_min_threshold`, `access_count_weight`, `access_count_max_boost`, `rerank_weight`, `rerank_phrase_weight` | 数値 | ≥ 0 |
@@ -2530,6 +2534,7 @@ n3mcmcp-lite/
 | `TestTimeDecay` | 現在→1.0、半減期、フロア値、不正タイムスタンプ→1.0 | 半減期 |
 | `TestKeywordRelevance` | 閾値以下切り捨て、正規化、ゼロ最大値 | BM25 正規化 |
 | `TestFinalScore` | `(cos·0.7 + bm25·0.3)·decay·b_local`、`b_local` クランプ | ランキング式 |
+| `TestFinalScoreProduct`（*Redis*、test_database.py） | キーワードの部分を固定し、語彙の加点を 0 にすると、検索の点数は基本点 × `time_decay` × `b_local` × `b_session`（不一致は 0.6）になる。どれか 1 つの因子だけを変えると、点数はその因子の分だけ変わる | ランキング式（§3.6） |
 | `TestAccessCountBoost` | `stored_importance + access_boost`、0.5〜2.0 クランプ、無効化フラグ | 自動 importance |
 | `TestLexicalRerank` | 語彙被覆、フレーズブースト、短文優先、ゼロ被覆は非劣化 | 軽量リランカー |
 | `TestPurification` | 複数行コードブロック→`[code omitted]`、インラインコード保持、複数ブロック | 整形 |
@@ -2543,6 +2548,8 @@ n3mcmcp-lite/
 |---|---|---|
 | `TestToolRegistration` | 7 ツール登録（`recall_thread` 含む）、スキーマ型、description 非空 | MCP 登録 |
 | `TestSaveAndSearch` | 保存→検索往復、完全重複拒否、空内容拒否、コードブロック purify（§10.3）| 単一チャンク |
+| `TestDeleteBySession`（*Redis*） | 親文書 1 つと単独の記録 2 つを持つセッションの `delete_memories_by_session`：結果の JSON がちょうど（`documents_deleted` 1、`chunks_deleted` は親のチャンクの数、`singles_deleted` 2、`deleted` はその和）になる。ほかのセッションの記録は残る。`doc:` / `docsha:` のキーは残らず、同じ文をまた保存できる。2 回目は `{"status": "not_found", "session_id": …, "deleted": 0}`。空白の `session_id` は `session_id required`。値がほかの記録の id のガードはそのまま残る | §4.3 |
+| `TestOwnerMismatch`（*Redis*） | ほかの `owner_id` を付けた `save_memory` は `{"status": "error", "saved": false, "reason": "owner_id mismatch"}` を返す | §4.3 |
 | `TestListAndDelete` | 新着 3 件の列挙、存在しない ID の削除 | 一覧・削除 |
 | `TestRepair` | 空 DB に対する `repair_memory`→ok | 修復 |
 | `TestUnknownTool` | 未登録ツール名→エラー文字列 | ディスパッチ |
@@ -2565,7 +2572,7 @@ n3mcmcp-lite/
 | `TestFilterScore` | 現セッションの新しい記録が cos 0.86 で先頭にあるとき、cos 0.95〜0.99 の同じセッションの 3 日前の記録と別セッションの 1 日前の記録が、相対カットと `min_score` を生き残る。並び順は引き続き最終スコアによる |
 | `TestRedisTimeouts`（*Redis*） | クライアントが `socket_timeout=5` で作られる。接続を受け付けて応答しないサーバーソケットで、`ensure_connected()` が約 5 秒以内にバックエンドエラーで戻る。つなぎ直しで古いクライアントが閉じられる |
 | `TestConfigCreate` | 複数のプロセスが同時に `config.json` を作成しても `owner_id` は 1 つになる（どのプロセスもファイルの ID を使う）。ID のない既存の `config.json` から 2 つのプロセスを同時に起動すると、どちらもディスクの `owner_id` / `local_id` で終わり、利用者の設定は残り、両方が保存した記録は再起動後に一覧に出る。更新は一時ファイルと `os.replace` を通る。旧来の場所からの引き継ぎは排他的作成の規則（一時ファイル＋`os.link`）を使う |
-| `TestConfigRanges` | `ttl_seconds` の `604800.5` / `0`、`embedding_dim` の `768.0`、`chunk_overlap >= chunk_threshold`、`chunk_threshold` 10、`half_life_days` 0、`min_score` 1.5 が `config_type` 付きで無視される（`min_results` の `-1` と `1.5` も同じ。`0` は受け付ける）。区切りのない本文で `chunk_text(text, 100, 100)` が終わる |
+| `TestConfigRanges` | `ttl_seconds` の `604800.5` / `0`、`embedding_dim` の `768.0`、`chunk_overlap >= chunk_threshold`、`chunk_threshold` 10、`half_life_days` 0、`min_score` 1.5 が `config_type` 付きで無視される（`min_results` の `-1` と `1.5` も同じ。`0` は受け付ける）。区切りのない本文で `chunk_text(text, 100, 100)` が終わる。`chunk_threshold: 100` だけのファイルでは、`chunk_overlap` は 25 で `config_type` は出ない（次の起動でも出ない）。補ったファイルには 25 が入る |
 | `TestLongSaveAtomic`（*Redis*） | 長文の保存の途中で埋め込みが失敗しても `doc:` / `docsha:` のキーが残らず、そのあと同じ本文を保存できる。ガード、親、すべてのチャンクは 1 つの `SAVE_WITH_GUARD` スクリプトで書かれる |
 | `TestGuardScriptAndPortReload`（*Redis*） | スクリプトを送るところで中断した保存（短文と長文）はガードを残さず、やり直しは `saved`（レコード 1 件、または親とすべてのチャンク）、3 回目は `duplicate`。ガード、親、チャンクに TTL がある。失敗のあとは、この保存の id を持つガードだけを削除する。開いたままの MCP エントリーは、`server_port` を変えたあとの 2 回目の呼び出しを新しいポートに送る。読めない `config.json` では、最後に読めた設定（同じ `owner_id`）を使い続ける |
 | `TestIndexFailure` | `FT.CREATE` が `unknown command` で失敗しても `_main()` が終わらない。ツールは「Redis Stack が必要」の案内を返す。次の呼び出しで索引を再試行する。既存の索引の `DIM` が違えば `index_dim_mismatch` が加わる |
@@ -2584,7 +2591,7 @@ n3mcmcp-lite/
 | `TestAccessCountNoGhost`（*Redis*） | 検索と `access_count` の加算の間に失効したか削除されたレコードは、`HINCRBY` で作り直されない：キーが 1 つも残らない（`access_count` だけのハッシュも、`mem:sha:` / `docsha:` ガードも残らない） |
 | `TestRecallOrphanChunks`（*Redis*） | 親があるとき、`recall_thread` は親を 1 回だけ出し（`[doc×N]`、全文）、チャンクは出さない。`doc:<id>` を消したあとは、`not_found` ではなく、その turn の各チャンクをチャンクの本文で出す |
 | `TestDeleteIdPrefix`（*Redis*） | `doc:<uuid>` を渡した `delete_memory` は、前置きのない親の ID と同じく連鎖削除する。`mem:<uuid>` は単独レコードとそのガードを消す。応答の `id` は前置きのない UUID。`doc:doc:<uuid>`（前置き 2 つ）は `not_found` |
-| `TestNudgeOnErrors` | 数値でない `importance` の JSON、読めない `since` の `Error:`、予期しない例外、`search_memory` のバックエンドエラーが、どれもエラーの文で始まり、リマインダで終わる |
+| `TestNudgeOnErrors` | 数値でない `importance` の JSON、読めない `since` の `Error:`、予期しない例外、`search_memory` のバックエンドエラーが、どれもエラーの文で始まり、リマインダで終わる。予期しない例外は、ちょうど `Error: <メッセージ>` + リマインダになる（1.x と同じく、例外の型名を付けない） |
 | `TestConditionalWrites`（*Redis*） | `INCR_IF_EXISTS`・`HSET_IF_EXISTS` は、レコードがあれば書き込んで TTL を保ち、なければ何も作らない。`SCAN` のあとに消えたレコードに対する `repair_memory` はキーを作らず、`reembedded` に数えない。保存・検索・修復のあと、テスト DB のすべてのキー（テスト用の印を除く）に TTL がある |
 | `TestHangulFiller` | `U+3164`、`U+115F`、`U+1160`、`U+FFA0`、`U+2800` だけの本文は見える文字なしとして拒否される。見える文字と一緒なら verbatim に保存される |
 | `TestPluginHook`（追加分） | `settings.json` を書く直前に読み直し、アトミックに置き換える。フォールバックの文面に "or the permission script failed" が入る。`uvx` がないときは、§8 の案内の文がそのまま入る |
@@ -2638,7 +2645,7 @@ n3mcmcp-lite/
 | `TestServerCwd` | `_start_server` の `Popen` の `cwd` はデータフォルダである。このパッケージの親フォルダを今のフォルダにして動かしたときは、そのフォルダである |
 | `TestStaleServerUnstoppable` | 自分の古いサーバーが止まらないとき（差し替え）、`/health` をもう一度見て、`ok` ならそれを使い、答えがなければ起動し、まだ古いサーバーが答えるなら使わない（`ensure_server` は使えるサーバーなしで戻り、フックは直接保存し、検索は `an old N3MC Lite memory server could not be stopped` を出す） |
 | `TestNoProxy` | `HTTP_PROXY` がほかのローカルのサーバーを指していても、`_get` は N3MC Lite のサーバーに届き、プロキシには何も届かない |
-| `TestCommands` | `--search` → `max_chars` なしの `/search`。`--search --since/--until` はそのまま渡す。読めない `--since` は `Error:` の文を stderr に出し、exit 2 で終わる。`--buffer` → `/tools/save_memory?nudge=0`。`--list` → `list_memories`。`--recall-thread` → `--before` / `--after` 付きの `recall_thread`。`--delete` → `delete_memory`。`--delete-session` → `delete_memories_by_session`。`--repair` → `repair_memory`。どれも応答の文をそのまま出力する。`--until 9999-12-31` と `--since 1969-12-31` は `Error:` の 1 行を stderr に出して exit 2 で終わり、`search_memory` / `/search` は §4.3.1 の `Error:` の文を返す（`/search` は 400） |
+| `TestCommands` | `--search` → `max_chars` なしの `/search`。`--search --since/--until` はそのまま渡す。読めない `--since` は `Error:` の文を stderr に出し、exit 2 で終わる。`--buffer` → `/tools/save_memory?nudge=0`。`--list` → `list_memories`。`--recall-thread` → `--before` / `--after` 付きの `recall_thread`。`--delete` → `delete_memory`。`--delete-session` → `delete_memories_by_session`。`--repair` → `repair_memory`。どれも応答の文をそのまま出力する。`--since yesterday`、`--until 9999-12-31`、`--since 2026-13-01` は、§4.3.1 の `Error:` の 1 行をちょうど stderr に出して exit 2 で終わる（Windows では `--since 1969-12-31` も。そこでは変換できないため。ほかの OS ではこのテストを飛ばす）。`search_memory` / `/search` は §4.3.1 の `Error:` の文を返す（`/search` は 400） |
 | `TestServerPidAndIdentity` | `_write_own_pid` は、別の番号の入った PID ファイルを上書きし、ないファイルは作る。`run_server` はそれを 2 回呼び、2 回目は待ち受けの前。PID ファイルのサーバーが別のポートで待ち受け、その `/health` がこのフォルダを返すとき、`_handle_other_port` はそのポートに `/shutdown` を送る。`redis_url_mismatch` を出したあと、`redis` の一致する自分のサーバーが答えると消える。`run_server` は Redis への接続とモデルの読み込みより前に `code_version` を計算し、その値を `create_app(..., code_version=...)` に渡す |
 | `TestForeignPort` | ポートにほかのフォルダのサーバーがいるとき：検索は `port_conflict` の代わりの出力を出し、`--list` / `--delete` はバックエンドエラーを出し、フックの保存は直接入る |
 | `TestStop` | `--stop` はルールファイルを書き（§12）、30 日より古い `turn_id_*.txt` を消し、50 MB を超えた `audit.log` をローテーションし（閾値は差し替える）、何も出力せず、サーバーは止めない。フックの `cwd`（なければ作業フォルダ）がホームフォルダのとき、`--stop` は `.claude/rules/` に何も作らない（§12.4 の手順 1）。**プロジェクトのフォルダ**: `CLAUDE_PROJECT_DIR` が別の一時フォルダを指すときは、規則ファイルをそこに作り、フックの `cwd` には何も作らない。変数がないときはフックの `cwd` に作る。変数がホームを指すときは何も作らない |
@@ -2651,11 +2658,11 @@ n3mcmcp-lite/
 |---|---|
 | `TestThinNames` | `n3mc-workingmemory` と `n3mc-mcp-lite` は `n3mc_mcp.__main__:run` に対応する。`serverInfo.name` は `n3mc-workingmemory`。`pyproject.toml` はバージョン `2.0.2` と `mcp>=1.0.0,<2.0.0` を宣言する |
 | `TestThinTools` | `tools/list` は、サーバーなしで §5 (3) の 7 つの定義をそのまま返す。指示は §5 (1) の文そのまま。ハンドラは `validate_input=False` で登録する（拒まれたらなしで） |
-| `TestForwarding` | 各ツールは引数を付けて `POST /tools/<name>?nudge=1` として送り、応答の文をそのまま（バイト単位で同じに）返す。`session_id` は `search_memory` / `save_memory` で、ないときだけ埋める（引数 → `N3MC_SESSION_ID` → プロセスの UUID。どの呼び出しでも同じ）。`agent_name` を埋める（引数 → `N3MC_AGENT_NAME` → `clientInfo.name` → 空）。どの結果も `isError` を設定しない。`importance: "nan"` はサーバーに届き、Lite の JSON を受け取る（SDK の検証エラーではない） |
+| `TestForwarding` | 各ツールは引数を付けて `POST /tools/<name>?nudge=1` として送り、応答の文をそのまま（バイト単位で同じに）返す。`session_id` は `search_memory` / `save_memory` で、ないときだけ埋める（引数 → `N3MC_SESSION_ID` → プロセスの UUID。どの呼び出しでも同じ）。`agent_name` を埋める（引数 → `N3MC_AGENT_NAME` → `clientInfo.name` → 空。空白の引数でほかに値がなければ空にし、空白のまま保存しない）。ハンドラの中の例外は、ちょうど `Error: <メッセージ>` + `_NUDGE_GENERIC` になる。どの結果も `isError` を設定しない。`importance: "nan"` はサーバーに届き、Lite の JSON を受け取る（SDK の検証エラーではない） |
 | `TestThinNoServer` | サーバーがない / まだ起動中 / 起動に失敗した / ほかのフォルダのサーバー：`save_memory` は直接保存する（`embedding` フィールドなし、§4.6 の `warning` と `detail`）。ほかのツールは §4.6 の文を返す。Redis も止まっている → バックエンドエラーの JSON。`delete_memory` / `delete_memories_by_session` と `--delete` / `--delete-session`：未送信 → "Nothing was deleted"、完了 → 通常の応答、削除後に応答が失われた（タイムアウトを差し込む）→ `"status": "unknown"` |
-| `TestRedisDisplayAndCodeVersion` | 利用者とパスワードを含む正しい URL の `redis_display` はホスト・ポート・DB だけを示す。解析できない URL（`redis://u:secret@host:abc/0`）では `<unparseable redis_url>` になり、`/health` にも `redis_url_mismatch` の通知（stderr、`notices.json`、`audit.log`）にも `secret` が入らない。何も変えなければサーバーの `code_version` はクライアントと一致し（補完して書いたあとも）、`load_config()` と起動の間に `config.json` が変わると `stale`、再起動後に `ok`。`--stop-server`：止めた、動いていない、ほかのフォルダのサーバー、止められなかった（exit 1） |
+| `TestRedisDisplayAndCodeVersion` | 利用者とパスワードを含む正しい URL の `redis_display` はホスト・ポート・DB だけを示す。解析できない URL（`redis://u:secret@host:abc/0`）では `<unparseable redis_url>` になり、`/health` にも `redis_url_mismatch` の通知（stderr、`notices.json`、`audit.log`）にも `secret` が入らない。何も変えなければサーバーの `code_version` はクライアントと一致し（補完して書いたあとも）、`load_config()` と起動の間に `config.json` が変わると `stale`、再起動後に `ok`。`--stop-server`：止めた、動いていない、ほかのフォルダのサーバー、止められなかった（exit 1）：要求は通ったがポートが使われたまま、要求が失敗してポートも使われたまま。要求が失敗してもポートが空いたら、止めた（exit 0） |
 | `TestThinStart` | `ensure_server` は、始まったときにバックグラウンドのスレッドで 1 回（それが止まっている間も `initialize` に応答する。差し替えて確かめる）と、毎回のツール呼び出しの前に動く。入口は決して `/shutdown` を呼ばない |
-| `TestThinNoModel` | 薄いクライアントを import して動かしても、`sentence_transformers` や `torch` を import しない（`sys.modules`）。MCP のメッセージ以外は stdout に何も書かない（取り込んで確かめる） |
+| `TestThinNoModel` | 薄いクライアントを import して動かしても、`sentence_transformers` や `torch` を import しない（`sys.modules`）。MCP のメッセージ以外は stdout に何も書かない（取り込んで確かめる）：stdin が空なら stdout も空。`initialize` と `tools/list` のあとは、ちょうど 2 つの応答（`serverInfo`、そのままの指示、7 つのツール）だけがある |
 | `TestThinSubprocess`（*Redis*） | 一時的な `N3MC_DATA_DIR` と、`HF_HOME` に本物の Hugging Face のキャッシュのフォルダ（fixture が `HOME` を差し替える前に求める。モデルがそのキャッシュになければ飛ばす。テストが約 1.1 GB を取りに行くことはない）を付けて子プロセスとして起動した `n3mc-workingmemory` と、`mcp.client.stdio.stdio_client` で話す：2 秒以内の `initialize`、7 つのツール、テスト用のポートの本物のサーバーを通した `save_memory` から `search_memory` への往復。クライアントを閉じた後もサーバーは動いており、テストがそれを止める。ただし、クライアントのジョブがサーバーも終わらせることがある（§3.15）ので、閉じた後にサーバーが動いていれば止め、なくなっていれば次の CLI の呼び出しで起動し直すことを確かめる（どちらでも合格） |
 
 ### Layer 9: `tests/test_context_limit.py`

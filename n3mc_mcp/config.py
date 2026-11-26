@@ -119,6 +119,22 @@ def config_value_ok(key, value, chunk_threshold=None) -> bool:
     return True
 
 
+def _fill_defaults(data: dict) -> None:
+    """Fill the missing fields with their defaults (§6). A missing chunk_overlap is written as the value
+    in effect: the default 100 is not below a chunk_threshold of 100 or less, and writing it would make
+    every later start report a chunk_overlap the user never wrote."""
+    ct = data.get("chunk_threshold", DEFAULTS["chunk_threshold"])
+    if not config_value_ok("chunk_threshold", ct):
+        ct = DEFAULTS["chunk_threshold"]
+    for k in DEFAULTS:
+        if k in data:
+            continue
+        v = DEFAULTS[k]
+        if k == "chunk_overlap" and v >= ct:
+            v = ct // 4
+        data[k] = v
+
+
 def _read_bytes_retry(path: str) -> bytes:
     deadline = time.monotonic() + 1.0
     while True:
@@ -303,6 +319,7 @@ def load_config() -> dict:
         missing_ids = not (isinstance(data.get("owner_id"), str) and data.get("owner_id")) or \
             not (isinstance(data.get("local_id"), str) and data.get("local_id"))
         missing = [k for k in DEFAULTS if k not in data]
+        written = {k for k in DEFAULTS if k in data}   # the keys the user wrote (only these are checked)
         if missing_ids or missing:
             try:
                 if missing_ids:
@@ -314,14 +331,12 @@ def load_config() -> dict:
                         for k in ("owner_id", "local_id"):
                             if not (isinstance(data.get(k), str) and data.get(k)):
                                 data[k] = str(uuid.uuid4())
-                        for k in DEFAULTS:
-                            data.setdefault(k, DEFAULTS[k])
+                        _fill_defaults(data)
                         content = _dump(data)
                         _replace_atomic(path, content)
                         raw = content
                 else:
-                    for k in DEFAULTS:
-                        data.setdefault(k, DEFAULTS[k])
+                    _fill_defaults(data)
                     content = _dump(data)
                     _replace_atomic(path, content)
                     raw = content
@@ -335,7 +350,7 @@ def load_config() -> dict:
         if not config_value_ok("chunk_threshold", ct):
             ct = DEFAULTS["chunk_threshold"]
         for k in DEFAULTS:
-            if k not in data:
+            if k not in data or k not in written:
                 continue
             v = data[k]
             if config_value_ok(k, v, chunk_threshold=ct):
