@@ -1,6 +1,7 @@
-"""Stop hook entry (`n3mc-lite-stop-hook`): audit.log first, then `cli --save-claude-turn`, then `cli --stop`
-(spec section 12.1)."""
-
+"""Stop hook entry `n3mc-lite-stop-hook` (spec §12.1): step 0 appends the audit record, then
+`python -m n3mc_mcp.cli --save-claude-turn` and `python -m n3mc_mcp.cli --stop`, both with the same
+stdin. Always exits 0.
+"""
 import os as _os
 import sys as _sys
 
@@ -24,27 +25,27 @@ for _stream_name in ("stdin", "stdout", "stderr"):
     if _stream is not None and hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
-import time
+import time  # noqa: E402
 
-from n3mc_mcp import lite_hook
+from n3mc_mcp import lite_hook  # noqa: E402
 
 
-def main(argv=None):
-    started = time.monotonic()
-    argv = sys.argv[1:] if argv is None else argv
-    extra = ["--uvx"] if "--uvx" in argv else []
+def main() -> int:
+    deadline = time.monotonic() + lite_hook.CHILD_TIMEOUT
     try:
-        data = sys.stdin.buffer.read()
-    except Exception:  # noqa: BLE001
-        data = b""
-    raw = data.decode("utf-8", errors="surrogateescape")
-    lite_hook.audit("Stop", raw, lite_hook.parse(raw))
-    lite_hook.run_cli(["--save-claude-turn", *extra], data, started)
-    # --stop reads the same JSON for its `cwd`; the remaining time of the shared budget is used.
-    lite_hook.run_cli(["--stop", *extra], data, started)
+        uvx = ["--uvx"] if "--uvx" in sys.argv[1:] else []
+        data = lite_hook.read_stdin()
+        lite_hook.audit_first("Stop", data)
+        lite_hook.run_step(["--save-claude-turn", *uvx], data, deadline)
+        lite_hook.run_step(["--stop", *uvx], data, deadline)
+    except Exception as e:  # noqa: BLE001
+        try:
+            sys.stderr.write(f"[n3mc-lite] stop hook: {type(e).__name__}: {e}\n")
+        except Exception:  # noqa: BLE001
+            pass
     return 0
 
 

@@ -1,42 +1,51 @@
-"""Redis layer: connection, index, CRUD, TTL, dedup, hybrid search (spec sections 3.3 - 3.5, 3.8 - 3.16)."""
-
-import re
+"""The Redis layer (spec §3.3–§3.14, §3.16): connection and per-call check, enforce_ephemeral, the
+RediSearch index, saving with the guard script, hybrid search and result shaping, list, recall,
+delete, repair.
+"""
+import hashlib
+import math
+import os
+import struct
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 import redis
 
 from . import processor
+from .config import _hostport, backend_hint, index_hint, config_unreadable_detail, redis_db_index
+from .config import redis_display  # noqa: F401  (re-exported)
 
-MEM = "mem:"
-DOC = "doc:"
-MEM_SHA = "mem:sha:"
-DOC_SHA = "docsha:"
 INDEX = "n3mc_idx"
+MEM = "mem:"
+SHA = "mem:sha:"
+DOC = "doc:"
+DOCSHA = "docsha:"
 TEST_MARKER = "__n3mc_test_db__"
 
+CONN_ERRORS = (redis.ConnectionError, redis.TimeoutError)
+
+ROW_FIELDS = ["content", "timestamp", "timestamp_epoch", "owner_id", "local_id", "agent_name",
+              "session_id", "turn_id", "importance", "access_count", "parent_id"]
+
 SAVE_WITH_GUARD = """
--- KEYS[1] = guard key, KEYS[2..] = record keys
--- ARGV[1] = guard value, ARGV[2] = ttl_seconds, then per record: <pair count>, <field>, <value>, ...
-local ok = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2])
-if not ok then
+if not redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then
   return 0
 end
-local i = 3
-for k = 2, #KEYS do
-  local n = tonumber(ARGV[i])
-  i = i + 1
+local pos = 3
+for i = 2, #KEYS do
+  local n = tonumber(ARGV[pos])
+  pos = pos + 1
   local args = {}
   for j = 1, n do
-    args[#args + 1] = ARGV[i]
-    args[#args + 1] = ARGV[i + 1]
-    i = i + 2
+    args[#args + 1] = ARGV[pos]
+    args[#args + 1] = ARGV[pos + 1]
+    pos = pos + 2
   end
-  redis.call('HSET', KEYS[k], unpack(args))
-  redis.call('EXPIRE', KEYS[k], ARGV[2])
+  redis.call('HSET', KEYS[i], unpack(args))
+  redis.call('EXPIRE', KEYS[i], ARGV[2])
 end
 return 1
 """
@@ -56,816 +65,1078 @@ end
 return 0
 """
 
+# KEYS[1] = guard, KEYS[2] = the record (mem:<id> or doc:<id>), KEYS[3..] = chunks; ARGV[1] = id.
+# The guard goes only when it still points at this record.
 DELETE_WITH_GUARD = """
--- KEYS[1] = record key, KEYS[2] = its guard key; ARGV[1] = the record's bare id
--- The guard is deleted only when it points at this record (2026-11-22, review #6).
-local n = redis.call('DEL', KEYS[1])
-if redis.call('GET', KEYS[2]) == ARGV[1] then
-  redis.call('DEL', KEYS[2])
+local chunks = 0
+for i = 3, #KEYS do
+  chunks = chunks + redis.call('DEL', KEYS[i])
 end
-return n
+local rec = redis.call('DEL', KEYS[2])
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+end
+return {rec, chunks}
 """
 
-_SEARCH_FIELDS = ["content", "timestamp", "timestamp_epoch", "owner_id", "agent_name", "session_id",
-                  "turn_id", "importance", "access_count", "parent_id"]
+# Release a guard after a failed save: only when it holds this save's id and the record is absent.
+RELEASE_GUARD = """
+if redis.call('GET', KEYS[1]) == ARGV[1] and redis.call('EXISTS', KEYS[2]) == 0 then
+  redis.call('DEL', KEYS[1])
+  return 1
+end
+return 0
+"""
 
 
-class BackendUnreachable(Exception):
-    """Redis (or RediSearch) cannot be used; str(exc) is the recovery hint."""
+class BackendError(Exception):
+    """Redis (or RediSearch) is not usable; the message is the recovery hint."""
 
 
-def _hostport(redis_url: str) -> str:
-    try:
-        u = urlparse(redis_url)
-        host = u.hostname or "localhost"
-        port = u.port or 6379
-        return "%s:%s" % (host, port)
-    except Exception:  # noqa: BLE001
-        return "localhost:6379"
+def sha1_hex(text: str) -> str:
+    return hashlib.sha1(processor.normalize_text(text).encode("utf-8")).hexdigest()
 
 
-def backend_hint(redis_url: str) -> str:
-    return ("Redis Stack is not reachable at %s. If Docker itself is not running, start Docker "
-            "(Docker Desktop) first. Then run: docker start redis-stack (first time: docker run -d "
-            "--name redis-stack -p 127.0.0.1:6379:6379 redis/redis-stack-server:latest). The memory "
-            "server reconnects automatically — no restart needed; just retry." % _hostport(redis_url))
+def vec_to_bytes(vec) -> bytes:
+    """FLOAT32, little endian (spec §3.5)."""
+    vec = list(vec)
+    return struct.pack(f"<{len(vec)}f", *vec)
 
 
-def redis_display(redis_url: str) -> str:
-    """host:port/db without user name or password."""
-    try:
-        u = urlparse(redis_url)
-        db = (u.path or "/0").lstrip("/") or "0"
-        return "%s:%s/%s" % (u.hostname or "localhost", u.port or 6379, db)
-    except Exception:  # noqa: BLE001
-        # never any part of the input: it may hold a password (2026-11-22, review #1)
-        return "<unparseable redis_url>"
+def bytes_to_vec(b):
+    if not b:
+        return None
+    return list(struct.unpack(f"<{len(b) // 4}f", b))
 
 
-def _text(v):
+def _s(v, default=""):
+    if v is None:
+        return default
     if isinstance(v, bytes):
         return v.decode("utf-8", "replace")
-    return v if v is not None else ""
+    return str(v)
 
 
-def _bare(key) -> str:
-    key = _text(key)
-    return key[len(MEM):] if key.startswith(MEM) else key
+def _f(v, default=0.0):
+    try:
+        return float(_s(v))
+    except (TypeError, ValueError):
+        return default
 
 
-def _new_id() -> str:
-    import uuid_utils
-    return str(uuid_utils.uuid7())
+def _doc_bare_id(key) -> str:
+    k = _s(key)
+    return k[len(MEM):] if k.startswith(MEM) else k
 
 
-def _iso_epoch():
+def is_hook_content(content: str) -> bool:
+    return isinstance(content, str) and (content.startswith("[user") or content.startswith("[claude"))
+
+
+def guard_key(content: str, turn_id, doc: bool) -> str:
+    """The exact-duplicate guard of a stored content (spec §3.8, §3.16)."""
+    prefix = DOCSHA if doc else SHA
+    if turn_id and is_hook_content(content):
+        return f"{prefix}{turn_id}:{sha1_hex(content)}"
+    return f"{prefix}{sha1_hex(content)}"
+
+
+def _utc_now():
     now = datetime.now(timezone.utc)
     return now.isoformat(), now.timestamp()
 
 
-def guard_key_for(record_key_prefix: str, content: str, turn_id: str):
-    """Guard key for a stored record: hook records (turn_id and a role prefix) are guarded per turn."""
-    sha = processor.sha1_hex(content)
-    base = MEM_SHA if record_key_prefix == MEM else DOC_SHA
-    if turn_id and (content.startswith("[user") or content.startswith("[claude")):
-        return "%s%s:%s" % (base, turn_id, sha)
-    return base + sha
+def _new_id() -> str:
+    try:
+        import uuid_utils
+        return str(uuid_utils.uuid7())
+    except Exception:  # noqa: BLE001
+        return str(uuid.uuid4())
+
+
+def _parse_search(res):
+    """[(key, score or None, {field: value})] from a RESP2 (or RESP3 dict) FT.SEARCH reply."""
+    out = []
+    if isinstance(res, dict):
+        for r in res.get(b"results", res.get("results", [])) or []:
+            attrs = r.get(b"extra_attributes", r.get("extra_attributes", {})) or {}
+            fields = {_s(k): v for k, v in attrs.items()}
+            out.append((_s(r.get(b"id", r.get("id"))), r.get(b"score", r.get("score")), fields))
+        return out
+    return out
+
+
+def _parse_search_list(res, withscores):
+    out = []
+    if isinstance(res, dict):
+        return _parse_search(res)
+    if not res:
+        return out
+    i = 1
+    while i < len(res):
+        key = res[i]
+        i += 1
+        score = None
+        if withscores:
+            score = res[i]
+            i += 1
+        fields = {}
+        if i < len(res) and isinstance(res[i], list):
+            arr = res[i]
+            for j in range(0, len(arr) - 1, 2):
+                fields[_s(arr[j])] = arr[j + 1]
+            i += 1
+        out.append((_s(key), score, fields))
+    return out
+
+
+def _flatten(x):
+    if isinstance(x, (list, tuple)):
+        for y in x:
+            yield from _flatten(y)
+    elif isinstance(x, dict):
+        for k, v in x.items():
+            yield k
+            yield from _flatten(v)
+    else:
+        yield x
 
 
 class Database:
-    def __init__(self, cfg, default_session=None):
+    def __init__(self, cfg, default_session=None, enforce_on_connect=True):
         self.cfg = cfg
-        self.default_session = default_session
-        self.r = None
+        self.enforce_on_connect = enforce_on_connect
+        self.url = cfg["redis_url"]
+        self.client = None
+        self.index_ok = False
         self.index_error = None
         self._lock = threading.RLock()
-        self._nlock = threading.Lock()
-        self._down_logged = False
+        self._notice_lock = threading.Lock()
+        self._state = None
+        env_session = os.environ.get("N3MC_SESSION_ID", "").strip()
+        self.default_session = default_session or env_session or str(uuid.uuid4())
         self._scripts = {}
 
-    # ------------------------------------------------------------------ connection
-    def add_notice(self, message: str):
-        with self._nlock:
-            if message not in self.cfg["_notices"]:
-                self.cfg["_notices"].append(message)
-                try:
-                    print(message, file=sys.stderr)
-                except Exception:  # noqa: BLE001
-                    pass
+    # ── notices ──────────────────────────────────────────────────────────────
 
-    def _build_client(self):
-        old = self.r
-        if old is not None:
-            try:
-                old.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self.r = redis.from_url(self.cfg["redis_url"], decode_responses=False, protocol=2,
-                                socket_connect_timeout=2, socket_timeout=5)
-        self._scripts = {
-            "save": self.r.register_script(SAVE_WITH_GUARD),
-            "incr": self.r.register_script(INCR_IF_EXISTS),
-            "hset": self.r.register_script(HSET_IF_EXISTS),
-            "delete": self.r.register_script(DELETE_WITH_GUARD),
-        }
-        return self.r
-
-    @property
-    def client(self):
-        return self.r
-
-    def hint(self) -> str:
-        return backend_hint(self.cfg["redis_url"])
-
-    def mark_down(self):
-        with self._lock:
-            if not self._down_logged:
-                self._down_logged = True
-                try:
-                    print("N3MC Lite: lost the connection to Redis", file=sys.stderr)
-                except Exception:  # noqa: BLE001
-                    pass
-            if self.r is not None:
-                try:
-                    self.r.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            self.r = None
-
-    def ensure_connected(self, enforce=True):
-        """PING; (re)connect when needed; then enforce_ephemeral + ensure_index. Raises BackendUnreachable."""
-        with self._lock:
-            if self.r is not None:
-                try:
-                    self.r.ping()
-                    if self.index_error is None:
-                        return "ok"
-                except (redis.ConnectionError, redis.TimeoutError):
-                    self.mark_down()
-                except redis.RedisError:
-                    self.mark_down()
-            if self.r is None:
-                try:
-                    self._build_client()
-                    self.r.ping()
-                except (redis.RedisError, OSError):
-                    try:
-                        self.r.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self.r = None
-                    if not self._down_logged:
-                        self._down_logged = True
-                        print("N3MC Lite: Redis is not reachable at %s" % _hostport(self.cfg["redis_url"]),
-                              file=sys.stderr)
-                    raise BackendUnreachable(self.hint())
-                if self._down_logged:
-                    self._down_logged = False
-                    print("N3MC Lite: reconnected to Redis", file=sys.stderr)
-                if enforce:
-                    self.enforce_ephemeral()
-            try:
-                self.ensure_index()
-            except (redis.ConnectionError, redis.TimeoutError):
-                self.mark_down()
-                raise BackendUnreachable(self.hint())
-            if self.index_error:
-                raise BackendUnreachable(
-                    "The Redis at %s does not provide RediSearch (FT.CREATE failed: %s). N3MC Lite needs "
-                    "Redis Stack, not plain Redis: docker run -d --name redis-stack -p 127.0.0.1:6379:6379 "
-                    "redis/redis-stack-server:latest" % (_hostport(self.cfg["redis_url"]), self.index_error))
-        return "ok"
-
-    # ------------------------------------------------------------------ ephemeral + index
-    def enforce_ephemeral(self):
-        r = self.r
-        url = _hostport(self.cfg["redis_url"])
-        shared = ("shared_redis: the Redis at %s also holds keys that are not N3MC's, so its persistence "
-                  "settings were left unchanged. N3MC memories in it may survive a Redis restart. Use a "
-                  "dedicated container (docker run -d --name redis-stack -p 127.0.0.1:6379:6379 "
-                  "redis/redis-stack-server:latest) for Lite." % url)
+    def add_notice(self, message: str) -> None:
+        with self._notice_lock:
+            lst = self.cfg.setdefault("_notices", [])
+            if message not in lst:
+                lst.append(message)
         try:
-            try:
-                db = int((urlparse(self.cfg["redis_url"]).path or "/0").lstrip("/") or 0)
-            except ValueError:
-                db = 0
-            other = False
-            try:
-                info = r.info("keyspace")
-                for name, val in info.items():
-                    m = re.match(r"db(\d+)$", str(name))
-                    if m and int(m.group(1)) != db:
-                        keys = val.get("keys", 0) if isinstance(val, dict) else 0
-                        if int(keys) > 0:
-                            other = True
-            except redis.ResponseError:
-                other = True
-            if not other:
-                for key in r.scan_iter(count=1000):
-                    k = _text(key)
-                    if not (k.startswith(MEM) or k.startswith(DOC) or k.startswith(DOC_SHA)):
-                        other = True
-                        break
-            if other:
-                self.add_notice(shared)
-                return
-            try:
-                r.config_set("appendonly", "no")
-                r.config_set("save", "")
-            except redis.ResponseError as exc:
-                print("N3MC Lite: CONFIG SET was refused (%s)" % exc, file=sys.stderr)
-                self.add_notice("config_refused: the Redis at %s refused CONFIG SET, so its persistence "
-                                "settings could not be turned off. N3MC memories in it may survive a Redis "
-                                "restart. Use a dedicated container (docker run -d --name redis-stack "
-                                "-p 127.0.0.1:6379:6379 redis/redis-stack-server:latest) for Lite." % url)
-        except (redis.ConnectionError, redis.TimeoutError):
-            raise
-
-    def ensure_index(self):
-        r = self.r
-        dim = self.cfg["embedding_dim"]
-        try:
-            r.execute_command(
-                "FT.CREATE", INDEX, "ON", "HASH", "PREFIX", "1", MEM, "SCHEMA",
-                "content", "TEXT", "WEIGHT", "1.0",
-                "content_ngram", "TEXT", "WEIGHT", "0.8",
-                "timestamp_epoch", "NUMERIC", "SORTABLE",
-                "owner_id", "TAG", "local_id", "TAG", "agent_name", "TAG", "session_id", "TAG",
-                "turn_id", "TAG", "importance", "NUMERIC", "access_count", "NUMERIC", "parent_id", "TAG",
-                "embedding", "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", str(dim),
-                "DISTANCE_METRIC", "COSINE")
-        except redis.ResponseError as exc:
-            if "already exists" in str(exc).lower():
-                self.index_error = None
-                self._check_dim()
-                return
-            self.index_error = str(exc)
-            return
-        self.index_error = None
-
-    def _check_dim(self):
-        try:
-            info = self.r.execute_command("FT.INFO", INDEX)
-        except redis.ResponseError:
-            return
-        flat = []
-
-        def walk(x):
-            if isinstance(x, (list, tuple)):
-                for y in x:
-                    walk(y)
-            else:
-                flat.append(_text(x) if isinstance(x, bytes) else x)
-
-        walk(info)
-        old = None
-        for i, v in enumerate(flat[:-1]):
-            if isinstance(v, str) and v.lower() == "dim":
-                old = flat[i + 1]
-                break
-        try:
-            if old is not None and int(old) != int(self.cfg["embedding_dim"]):
-                self.add_notice(
-                    "index_dim_mismatch: the existing index n3mc_idx was built for %s dimensions but "
-                    "embedding_dim is %s; new vectors are not indexed. Drop the index (FT.DROPINDEX "
-                    "n3mc_idx) or flush the test DB, then restart." % (old, self.cfg["embedding_dim"]))
-        except (TypeError, ValueError):
+            sys.stderr.write(f"[n3mc-lite] {message}\n")
+        except Exception:  # noqa: BLE001
             pass
 
-    # ------------------------------------------------------------------ save
-    def _fields(self, rec_id, content, agent_name, session_id, turn_id, importance, parent_id, vec,
-                ts_iso, ts_epoch):
-        f = {
-            "id": rec_id, "content": content, "content_ngram": processor.ngram_text(content),
-            "timestamp": ts_iso, "timestamp_epoch": repr(ts_epoch),
-            "owner_id": self.cfg["owner_id"], "local_id": self.cfg["local_id"],
-            "agent_name": agent_name, "session_id": session_id, "turn_id": turn_id,
-            "importance": repr(float(importance)), "access_count": "0", "parent_id": parent_id,
+    # ── connection (spec §3.9) ───────────────────────────────────────────────
+
+    def _new_client(self):
+        return redis.Redis.from_url(self.url, decode_responses=False, socket_connect_timeout=2,
+                                    socket_timeout=5, protocol=2)
+
+    def _register_scripts(self):
+        c = self.client
+        self._scripts = {
+            "save": c.register_script(SAVE_WITH_GUARD),
+            "incr": c.register_script(INCR_IF_EXISTS),
+            "hset": c.register_script(HSET_IF_EXISTS),
+            "delete": c.register_script(DELETE_WITH_GUARD),
+            "release": c.register_script(RELEASE_GUARD),
         }
-        if vec is not None:
-            f["embedding"] = processor.pack_vector(vec)
-        return f
 
-    @staticmethod
-    def _flat(fields: dict):
-        out = []
-        for k, v in fields.items():
-            out.append(k)
-            out.append(v if isinstance(v, bytes) else str(v).encode("utf-8"))
-        return out
+    def _set_state(self, state, detail=None):
+        if state != self._state:
+            if state == "down":
+                sys.stderr.write(f"[n3mc-lite] Redis is not reachable ({detail}). {backend_hint(self.url)}\n")
+            elif state == "up" and self._state == "down":
+                sys.stderr.write(f"[n3mc-lite] Redis at {_hostport(self.url)} is reachable again.\n")
+            self._state = state
 
-    def _run_save(self, guard_key, guard_value, ttl, records):
-        """records: list of (key, fields dict). One Lua script: guard NX + all HSET/EXPIRE."""
-        keys = [guard_key] + [k for k, _ in records]
-        args = [guard_value, str(ttl)]
-        for _, fields in records:
-            flat = self._flat(fields)
-            args.append(str(len(flat) // 2))
-            args.extend(flat)
-        try:
-            return int(self._scripts["save"](keys=keys, args=args))
-        except (redis.ConnectionError, redis.TimeoutError):
-            raise
-        except Exception:
+    def mark_disconnected(self):
+        with self._lock:
+            if self.client is not None:
+                try:
+                    self.client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.client = None
+            self.index_ok = False
+            self._set_state("down", "connection lost")
+
+    def close(self):
+        with self._lock:
+            if self.client is not None:
+                try:
+                    self.client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.client = None
+
+    def ensure_connected(self, enforce: bool = True) -> str:
+        """'ok', or raises BackendError with the recovery hint (spec §3.9)."""
+        with self._lock:
+            if self.client is not None:
+                try:
+                    self.client.ping()
+                except Exception:  # noqa: BLE001
+                    try:
+                        self.client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.client = None
+                    self.index_ok = False
+                else:
+                    if not self.index_ok:
+                        try:
+                            self._try_index()
+                        except CONN_ERRORS as e:
+                            self.mark_disconnected()
+                            self._set_state("down", f"{type(e).__name__}: {e}")
+                            raise BackendError(backend_hint(self.url))
+                    if not self.index_ok:
+                        raise BackendError(index_hint(self.url, self.index_error))
+                    return "ok"
+            c = None
             try:
-                if _text(self.r.get(guard_key)) == guard_value and not self.r.exists(records[0][0]):
-                    self.r.delete(guard_key)
-            except Exception:  # noqa: BLE001
-                pass
-            raise
+                c = self._new_client()
+                c.ping()
+            except Exception as e:  # noqa: BLE001
+                if c is not None:
+                    try:
+                        c.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                self._set_state("down", f"{type(e).__name__}: {e}")
+                raise BackendError(backend_hint(self.url))
+            self.client = c
+            self._register_scripts()
+            try:
+                if enforce:
+                    self.enforce_ephemeral()
+                self._try_index()
+            except CONN_ERRORS as e:
+                self.mark_disconnected()
+                self._set_state("down", f"{type(e).__name__}: {e}")
+                raise BackendError(backend_hint(self.url))
+            self._set_state("up")
+            if not self.index_ok:
+                raise BackendError(index_hint(self.url, self.index_error))
+            return "ok"
 
-    def save_memory(self, content, agent_name="", session_id="", turn_id="", importance=1.0,
-                    role=None, embed=True, no_model_wait=False, owner_id=None):
-        """Save one memory (spec 3.8, 3.11, 3.13, 3.16). Returns the result dict of section 4.3."""
+    def _require(self):
+        if self.client is None:
+            self.ensure_connected(enforce=self.enforce_on_connect)
+
+    def _try_index(self):
+        try:
+            self.ensure_index()
+            self.index_ok = True
+            self.index_error = None
+        except CONN_ERRORS:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.index_ok = False
+            self.index_error = f"{type(e).__name__}: {e}" if not isinstance(e, redis.ResponseError) else str(e)
+
+    # ── persistence (spec §3.4) ──────────────────────────────────────────────
+
+    def _shared_notice(self):
+        return (f"shared_redis: the Redis at {_hostport(self.url)} also holds keys that are not N3MC's, so its "
+                "persistence settings were left unchanged. N3MC memories in it may survive a Redis restart. "
+                "Use a dedicated container (docker run -d --name redis-stack -p 127.0.0.1:6379:6379 "
+                "redis/redis-stack-server:latest) for Lite.")
+
+    def enforce_ephemeral(self):
+        c = self.client
+        db = redis_db_index(self.url)
+        try:
+            ks = c.info("keyspace")
+        except redis.ResponseError:
+            self.add_notice(self._shared_notice())
+            return
+        for k, v in (ks or {}).items():
+            name = _s(k)
+            keys = v.get("keys", 0) if isinstance(v, dict) else 0
+            if name != f"db{db}" and name.startswith("db") and keys:
+                self.add_notice(self._shared_notice())
+                return
+        cursor = 0
+        while True:
+            cursor, keys = c.scan(cursor=cursor, count=1000)
+            for key in keys:
+                k = _s(key)
+                if not (k.startswith(MEM) or k.startswith(DOC) or k.startswith(DOCSHA)):
+                    self.add_notice(self._shared_notice())
+                    return
+            if int(cursor) == 0:
+                break
+        try:
+            c.config_set("appendonly", "no")
+            c.config_set("save", "")
+        except redis.ResponseError as e:
+            sys.stderr.write(f"[n3mc-lite] CONFIG SET was refused: {e}\n")
+            self.add_notice(
+                f"config_refused: the Redis at {_hostport(self.url)} refused CONFIG SET ({e}), so its "
+                "persistence could not be turned off and N3MC memories in it may survive a Redis restart. "
+                "Use a dedicated container (docker run -d --name redis-stack -p 127.0.0.1:6379:6379 "
+                "redis/redis-stack-server:latest) for Lite.")
+
+    # ── index (spec §3.5, §3.7, §3.9 step 3) ─────────────────────────────────
+
+    def _ft_info(self):
+        """(attribute names, vector DIM) of the index, or None when it does not exist."""
+        try:
+            info = self.client.execute_command("FT.INFO", INDEX)
+        except redis.ResponseError as e:
+            msg = str(e).lower()
+            if "unknown index" in msg or "no such index" in msg or "not found" in msg:
+                return None
+            raise
+        d = {}
+        if isinstance(info, dict):
+            d = {_s(k): v for k, v in info.items()}
+        else:
+            for i in range(0, len(info) - 1, 2):
+                d[_s(info[i])] = info[i + 1]
+        names = set()
+        dim = None
+        for attr in d.get("attributes", []) or []:
+            flat = list(_flatten(attr))
+            for j in range(len(flat) - 1):
+                key = _s(flat[j]).lower()
+                if key in ("identifier", "attribute"):
+                    names.add(_s(flat[j + 1]))
+                if key == "dim":
+                    try:
+                        dim = int(_s(flat[j + 1]))
+                    except ValueError:
+                        pass
+        return names, dim
+
+    def _ft_create(self):
+        dim = int(self.cfg["embedding_dim"])
+        self.client.execute_command(
+            "FT.CREATE", INDEX, "ON", "HASH", "PREFIX", 1, MEM, "SCHEMA",
+            "content_fts", "TEXT", "WEIGHT", 1.0,
+            "content_ngram", "TEXT", "WEIGHT", 0.8,
+            "timestamp_epoch", "NUMERIC", "SORTABLE",
+            "owner_id", "TAG", "local_id", "TAG", "agent_name", "TAG", "session_id", "TAG", "turn_id", "TAG",
+            "importance", "NUMERIC", "access_count", "NUMERIC", "parent_id", "TAG",
+            "embedding", "VECTOR", "FLAT", 6, "TYPE", "FLOAT32", "DIM", dim, "DISTANCE_METRIC", "COSINE")
+
+    def ensure_index(self):
+        if self.client is None:
+            raise redis.ConnectionError("not connected")
+        info = self._ft_info()
+        if info is None:
+            try:
+                self._ft_create()
+                return
+            except redis.ResponseError as e:
+                if "already exists" not in str(e).lower():
+                    raise
+                info = self._ft_info()
+                if info is None:
+                    return
+        names, dim = info
+        want = int(self.cfg["embedding_dim"])
+        if dim is not None and dim != want:
+            self.add_notice(
+                f"index_dim_mismatch: the existing index {INDEX} was built for {dim} dimensions but embedding_dim "
+                f"is {want}; new vectors are not indexed. Drop the index (FT.DROPINDEX {INDEX}) or flush the test "
+                "DB, then restart.")
+            return
+        if "content_fts" not in names:
+            try:
+                self.client.execute_command("FT.DROPINDEX", INDEX)
+            except redis.ResponseError as e:
+                if "unknown index" not in str(e).lower():
+                    raise
+            try:
+                self._ft_create()
+            except redis.ResponseError as e:
+                if "already exists" not in str(e).lower():
+                    raise
+
+    # ── save (spec §3.8, §3.11, §3.13, §3.16) ────────────────────────────────
+
+    def _check_str(self, name, value):
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be a string (got {type(value).__name__})")
+        return processor.sanitize_surrogates(value)
+
+    def save_memory(self, content, agent_name=None, owner_id=None, importance=None, session_id=None,
+                    turn_id=None, role=None, embed=True, no_model_wait=False) -> dict:
         cfg = self.cfg
-        for name, val in (("agent_name", agent_name), ("session_id", session_id), ("turn_id", turn_id)):
-            if not isinstance(val, str):
-                return {"status": "error", "saved": False, "reason": "%s must be a string" % name}
-        if not session_id and self.default_session:
-            session_id = self.default_session
-        content = processor.sanitize_surrogates(content)
-        agent_name = processor.sanitize_surrogates(agent_name)
-        session_id = processor.sanitize_surrogates(session_id)
-        turn_id = processor.sanitize_surrogates(turn_id)
+        if owner_id is not None and owner_id != "" and owner_id != cfg["owner_id"]:
+            return {"status": "error", "saved": False, "reason": "owner_id mismatch"}
+        if importance is None:
+            imp = 1.0
+        else:
+            ok = isinstance(importance, (int, float)) and not isinstance(importance, bool)
+            if not ok or (isinstance(importance, float) and math.isnan(importance)):
+                return {"saved": False, "status": "error", "reason": f"importance must be numeric (got {importance})"}
+            imp = max(0.5, min(2.0, float(importance)))
+        if content is None:
+            content = ""
         if not isinstance(content, str):
             return {"status": "error", "saved": False, "reason": "content must be a string"}
-        content = content.strip()
-        if not content:
+        try:
+            agent_name = self._check_str("agent_name", agent_name)
+            session_id = self._check_str("session_id", session_id)
+            turn_id = self._check_str("turn_id", turn_id)
+        except ValueError as e:
+            return {"status": "error", "saved": False, "reason": str(e)}
+        if role is not None and role not in ("user", "claude"):
+            return {"status": "error", "saved": False, "reason": "role must be \"user\" or \"claude\""}
+        body = processor.sanitize_surrogates(content).strip()
+        if not body:
             return {"status": "error", "saved": False, "reason": "empty content"}
-        if not processor.has_visible_text(content):
+        if not processor.has_visible_text(body):
             return {"status": "error", "saved": False, "reason": "empty content (no visible characters)"}
-        if cfg["skip_code_blocks"] and "```" in content:
+        if cfg.get("skip_code_blocks") and "```" in body:
             return {"status": "skipped_code", "saved": False}
-        body = processor.purify(content)
-        ttl = cfg["ttl_seconds"]
-        ts_iso, ts_epoch = _iso_epoch()
-        prefix = "[%s] " % role if role else ""
-        warn_novec = False
+        body = processor.purify(body)
+        self._require()
+        session = session_id.strip() or self.default_session
+        threshold = int(cfg["chunk_threshold"])
+        if len(body) <= threshold:
+            return self._save_single(body, agent_name, session, turn_id, role, imp, embed, no_model_wait)
+        return self._save_long(body, agent_name, session, turn_id, role, imp, embed, no_model_wait)
 
-        def vec_of(text):
-            nonlocal warn_novec
-            if not embed:
-                warn_novec = True
-                return None
-            v = processor.embed(text, cfg, query=False, no_wait=no_model_wait)
-            if v is None:
-                warn_novec = True
-            return v
+    def _base_fields(self, agent_name, session, turn_id):
+        ts, epoch = _utc_now()
+        return {
+            "timestamp": ts, "timestamp_epoch": repr(epoch),
+            "owner_id": self.cfg["owner_id"], "local_id": self.cfg["local_id"],
+            "agent_name": agent_name, "session_id": session, "turn_id": turn_id,
+        }
 
-        if len(body) <= cfg["chunk_threshold"]:
-            stored = prefix + body
-            guard = guard_key_for(MEM, stored, turn_id) if role else MEM_SHA + processor.sha1_hex(stored)
-            if self.r.exists(guard):
-                return {"status": "duplicate", "saved": False}
-            vec = vec_of(stored)
-            rec_id = _new_id()
-            fields = self._fields(rec_id, stored, agent_name, session_id, turn_id, importance, "", vec,
-                                  ts_iso, ts_epoch)
-            ok = self._run_save(guard, rec_id, ttl, [(MEM + rec_id, fields)])
-            if not ok:
-                return {"status": "duplicate", "saved": False}
-            res = {"status": "saved", "saved": True, "id": rec_id, "ttl_seconds": ttl}
-        else:
-            parent_content = prefix + body
-            guard = (guard_key_for(DOC, parent_content, turn_id) if role
-                     else DOC_SHA + processor.sha1_hex(parent_content))
-            existing = self.r.get(guard)
-            if existing is not None:
-                return {"status": "duplicate", "saved": False, "parent_id": _text(existing)}
-            chunks = processor.chunk_text(body, cfg["chunk_threshold"], cfg["chunk_overlap"])
-            n = len(chunks)
-            texts = []
-            for i, ch in enumerate(chunks, 1):
-                if role:
-                    texts.append(("[%s] %s" % (role, ch)) if n == 1 else ("[%s %d/%d] %s" % (role, i, n, ch)))
-                else:
-                    texts.append(ch)
-            vecs = [vec_of(t) for t in texts]
-            parent_id = _new_id()
-            chunk_ids = [_new_id() for _ in texts]
-            records = []
-            pf = {
-                "id": parent_id, "content": parent_content, "timestamp": ts_iso,
-                "timestamp_epoch": repr(ts_epoch), "owner_id": cfg["owner_id"], "local_id": cfg["local_id"],
-                "agent_name": agent_name, "session_id": session_id, "turn_id": turn_id,
-                "chunk_count": str(n), "chunk_ids": " ".join(chunk_ids),
-            }
-            records.append((DOC + parent_id, pf))
-            for cid, t, v in zip(chunk_ids, texts, vecs):
-                records.append((MEM + cid, self._fields(cid, t, agent_name, session_id, turn_id,
-                                                        importance, parent_id, v, ts_iso, ts_epoch)))
-            ok = self._run_save(guard, parent_id, ttl, records)
-            if not ok:
-                ex = self.r.get(guard)
-                d = {"status": "duplicate", "saved": False}
-                if ex is not None:
-                    d["parent_id"] = _text(ex)
-                return d
-            res = {"status": "saved", "saved": True, "parent_id": parent_id, "chunks": n,
-                   "saved_count": n, "ids": chunk_ids, "ttl_seconds": ttl}
-        if warn_novec:
-            res["warning"] = "embedding_unavailable"
-        return res
+    def _warnings(self, result, emb_missing):
+        warnings, details = [], []
+        if emb_missing:
+            warnings.append("embedding_unavailable")
+            details.append(processor.unavailable_message())
+        if self.cfg.get("_unreadable"):
+            warnings.append("config_unreadable")
+            details.append(config_unreadable_detail(self.cfg))
+        if warnings:
+            result["warning"] = "; ".join(warnings)
+            result["detail"] = " ".join(details)
+        return result
 
-    # ------------------------------------------------------------------ search
     @staticmethod
-    def _epoch_bounds(since, until):
+    def _argv(records):
+        out = []
+        for fields in records:
+            out.append(len(fields))
+            for k, v in fields.items():
+                out.append(k)
+                out.append(v)
+        return out
+
+    def _run_save(self, guard, rid, record_key, keys, argv):
+        """Run SAVE_WITH_GUARD. On a failure that is not a lost connection, release the guard when it
+        still holds this id and the record is absent, and return the error dict."""
+        try:
+            return self._scripts["save"](keys=[guard] + keys, args=argv), None
+        except CONN_ERRORS:
+            raise
+        except Exception as e:  # noqa: BLE001
+            try:
+                self._scripts["release"](keys=[guard, record_key], args=[rid])
+            except CONN_ERRORS:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+            return None, {"status": "error", "saved": False, "reason": f"{type(e).__name__}: {e}"}
+
+    def _save_single(self, body, agent_name, session, turn_id, role, imp, embed, no_model_wait):
+        cfg = self.cfg
+        stored = f"[{role}] {body}" if role else body
+        guard = guard_key(stored, turn_id if role else None, doc=False) if role else f"{SHA}{sha1_hex(stored)}"
+        if self.client.exists(guard):
+            return {"status": "duplicate", "saved": False}
+        vec = None
+        emb_missing = False
+        if embed:
+            vec = processor.embed(stored, "passage", no_model_wait=no_model_wait)
+            emb_missing = vec is None
+        rid = _new_id()
+        try:
+            fts, ngram = processor.index_texts(body)
+            fields = {"id": rid, "content": stored, "content_ngram": ngram, "content_fts": fts}
+            fields.update(self._base_fields(agent_name, session, turn_id))
+            fields.update({"importance": repr(float(imp)), "access_count": "0", "parent_id": ""})
+            if vec is not None:
+                fields["embedding"] = vec_to_bytes(vec)
+            ttl = int(cfg["ttl_seconds"])
+            argv = [rid, ttl] + self._argv([fields])
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "saved": False, "reason": f"{type(e).__name__}: {e}"}
+        res, err = self._run_save(guard, rid, MEM + rid, [MEM + rid], argv)
+        if err:
+            return err
+        if not res:
+            return {"status": "duplicate", "saved": False}
+        return self._warnings({"status": "saved", "saved": True, "id": rid, "ttl_seconds": ttl}, emb_missing)
+
+    def _save_long(self, body, agent_name, session, turn_id, role, imp, embed, no_model_wait):
+        cfg = self.cfg
+        stored_parent = f"[{role}] {body}" if role else body
+        guard = (guard_key(stored_parent, turn_id, doc=True) if role else f"{DOCSHA}{sha1_hex(stored_parent)}")
+        if self.client.exists(guard):
+            existing = _s(self.client.get(guard)) or None
+            out = {"status": "duplicate", "saved": False}
+            if existing:
+                out["parent_id"] = existing
+            return out
+        chunks = processor.chunk_text(body, int(cfg["chunk_threshold"]), int(cfg["chunk_overlap"]))
+        n = len(chunks)
+        if role:
+            stored_chunks = ([f"[{role}] {c}" for c in chunks] if n == 1
+                             else [f"[{role} {i + 1}/{n}] {c}" for i, c in enumerate(chunks)])
+        else:
+            stored_chunks = list(chunks)
+        vecs = [None] * n
+        emb_missing = False
+        if embed:
+            for i, sc in enumerate(stored_chunks):
+                v = processor.embed(sc, "passage", no_model_wait=no_model_wait)
+                if v is None:
+                    emb_missing = True
+                    vecs = [None] * n
+                    break
+                vecs[i] = v
+        pid = _new_id()
+        ids = [_new_id() for _ in range(n)]
+        try:
+            base = self._base_fields(agent_name, session, turn_id)
+            parent = {"id": pid, "content": stored_parent}
+            parent.update(base)
+            parent.update({"chunk_count": str(n), "chunk_ids": " ".join(ids)})
+            records = [parent]
+            for i in range(n):
+                fts, ngram = processor.index_texts(chunks[i])
+                f = {"id": ids[i], "content": stored_chunks[i], "content_ngram": ngram, "content_fts": fts}
+                f.update(base)
+                f.update({"importance": repr(float(imp)), "access_count": "0", "parent_id": pid})
+                if vecs[i] is not None:
+                    f["embedding"] = vec_to_bytes(vecs[i])
+                records.append(f)
+            ttl = int(cfg["ttl_seconds"])
+            keys = [DOC + pid] + [MEM + i for i in ids]
+            argv = [pid, ttl] + self._argv(records)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "saved": False, "reason": f"{type(e).__name__}: {e}"}
+        res, err = self._run_save(guard, pid, DOC + pid, keys, argv)
+        if err:
+            return err
+        if not res:
+            out = {"status": "duplicate", "saved": False}
+            existing = _s(self.client.get(guard)) or None
+            if existing:
+                out["parent_id"] = existing
+            return out
+        result = {"status": "saved", "saved": True, "parent_id": pid, "chunks": n, "saved_count": n,
+                  "ids": ids, "ttl_seconds": ttl}
+        return self._warnings(result, emb_missing)
+
+    # ── FT.SEARCH helpers ────────────────────────────────────────────────────
+
+    def _ft_search(self, query, return_fields, limit, offset=0, params=None, sortby=None,
+                   withscores=False, scorer=None):
+        args = ["FT.SEARCH", INDEX, query]
+        if withscores:
+            args.append("WITHSCORES")
+        if scorer:
+            args += ["SCORER", scorer]
+        if params:
+            args += ["PARAMS", 2 * len(params)]
+            for k, v in params.items():
+                args += [k, v]
+        args += ["RETURN", len(return_fields)] + list(return_fields)
+        if sortby:
+            args += ["SORTBY", sortby[0], sortby[1]]
+        args += ["LIMIT", offset, limit, "DIALECT", 2]
+        res = self.client.execute_command(*args)
+        return _parse_search_list(res, withscores)
+
+    @staticmethod
+    def _time_filter(since, until):
         if since is None and until is None:
             return ""
         lo = "-inf" if since is None else repr(float(since))
         hi = "+inf" if until is None else repr(float(until))
-        return "@timestamp_epoch:[%s %s]" % (lo, hi)
-
-    @staticmethod
-    def _parse_reply(reply, withscores):
-        out = []
-        if isinstance(reply, dict):
-            for item in reply.get(b"results", reply.get("results", [])):
-                ex = item.get(b"extra_attributes", item.get("extra_attributes", {}))
-                fields = {_text(k): v for k, v in ex.items()}
-                score = item.get(b"score", item.get("score"))
-                out.append((_text(item.get(b"id", item.get("id"))), score, fields))
-            return out
-        if not reply:
-            return out
-        i = 1
-        while i < len(reply):
-            key = _text(reply[i])
-            i += 1
-            score = None
-            if withscores:
-                score = reply[i]
-                i += 1
-            fl = reply[i] if i < len(reply) else []
-            i += 1
-            fields = {}
-            if isinstance(fl, (list, tuple)):
-                for j in range(0, len(fl) - 1, 2):
-                    fields[_text(fl[j])] = fl[j + 1]
-            out.append((key, score, fields))
-        return out
+        return f"@timestamp_epoch:[{lo} {hi}]"
 
     def _row(self, key, fields):
-        g = lambda n: _text(fields.get(n, b""))  # noqa: E731
-        d = {
-            "id": _bare(key), "content": g("content"), "timestamp": g("timestamp"),
-            "timestamp_epoch": g("timestamp_epoch"), "owner_id": g("owner_id"),
-            "agent_name": g("agent_name"), "session_id": g("session_id"), "turn_id": g("turn_id"),
-            "importance": g("importance") or "1.0", "access_count": g("access_count") or "0",
-            "parent_id": g("parent_id"),
-        }
-        return d
+        row = {k: _s(fields.get(k)) for k in ROW_FIELDS}
+        row["id"] = _doc_bare_id(key)
+        row["timestamp_epoch"] = _f(fields.get("timestamp_epoch"))
+        row["importance"] = _f(fields.get("importance"), 1.0)
+        row["access_count"] = _f(fields.get("access_count"), 0.0)
+        return row
 
-    def _vector_search(self, vec, n, bounds):
-        pre = bounds if bounds else "*"
-        q = "%s=>[KNN %d @embedding $vec AS __dist]" % (pre, n)
-        ret = _SEARCH_FIELDS + ["__dist"]
+    def _vector_search(self, qvec, k, since=None, until=None):
+        tf = self._time_filter(since, until)
+        prefix = f"({tf})" if tf else "*"
+        q = f"{prefix}=>[KNN {k} @embedding $vec AS __dist]"
         try:
-            reply = self.r.execute_command(
-                "FT.SEARCH", INDEX, q, "RETURN", str(len(ret)), *ret, "LIMIT", "0", str(n),
-                "DIALECT", "2", "PARAMS", "2", "vec", processor.pack_vector(vec))
-        except (redis.ConnectionError, redis.TimeoutError):
+            hits = self._ft_search(q, ROW_FIELDS + ["__dist"], k, params={"vec": vec_to_bytes(qvec)},
+                                   sortby=("__dist", "ASC"))
+        except CONN_ERRORS:
             raise
-        except redis.ResponseError as exc:
-            print("N3MC Lite: vector search failed (%s)" % exc, file=sys.stderr)
+        except redis.ResponseError as e:
+            sys.stderr.write(f"[n3mc-lite] vector search skipped: {e}\n")
             return []
-        rows = []
-        for key, _, fields in self._parse_reply(reply, False):
-            row = self._row(key, fields)
-            if row["owner_id"] != self.cfg["owner_id"]:
+        out = []
+        for key, _score, fields in hits:
+            if _s(fields.get("owner_id")) != self.cfg["owner_id"]:
                 continue
-            row["cos"] = processor.cos_sim_from_distance(_text(fields.get("__dist", b"1")))
-            rows.append(row)
-        return rows
+            row = self._row(key, fields)
+            row["cos"] = processor.cosine_from_distance(_s(fields.get("__dist"), "1"))
+            out.append(row)
+        return out
 
-    def _bm25_search(self, query, n, bounds):
-        terms = processor.drop_lone_cjk_tokens(processor.prepare_query(query)).split()
+    def _bm25_search(self, query, k, since=None, until=None):
+        terms = processor.bm25_terms(query)
         if not terms:
             return []
         q = "|".join(terms)
-        fts = "(@content:(%s) | @content_ngram:(%s))" % (q, q)
-        if bounds:
-            fts = "(%s) %s" % (fts, bounds)
-        ret = _SEARCH_FIELDS
-        reply = None
+        text = f"(@content_fts:({q}) | @content_ngram:({q}))"
+        tf = self._time_filter(since, until)
+        if tf:
+            text = f"({text}) {tf}"
+        hits = None
         for scorer in ("BM25", "BM25STD", None):
-            args = ["FT.SEARCH", INDEX, fts, "WITHSCORES"]
-            if scorer:
-                args += ["SCORER", scorer]
-            args += ["RETURN", str(len(ret)), *ret, "LIMIT", "0", str(n), "DIALECT", "2"]
             try:
-                reply = self.r.execute_command(*args)
+                hits = self._ft_search(text, ROW_FIELDS, k, withscores=True, scorer=scorer)
                 break
-            except (redis.ConnectionError, redis.TimeoutError):
+            except CONN_ERRORS:
                 raise
-            except redis.ResponseError as exc:
-                if scorer is not None and "scorer" in str(exc).lower():
+            except redis.ResponseError as e:
+                if scorer is not None and "scor" in str(e).lower():
                     continue
-                print("N3MC Lite: keyword search failed (%s)" % exc, file=sys.stderr)
+                sys.stderr.write(f"[n3mc-lite] keyword search skipped: {e}\n")
                 return []
-        rows = []
-        for key, score, fields in self._parse_reply(reply, True):
-            row = self._row(key, fields)
-            if row["owner_id"] != self.cfg["owner_id"]:
+        out = []
+        for key, score, fields in hits or []:
+            if _s(fields.get("owner_id")) != self.cfg["owner_id"]:
                 continue
-            try:
-                row["bm25"] = float(_text(score))
-            except (TypeError, ValueError):
-                row["bm25"] = 0.0
-            rows.append(row)
-        return rows
-
-    def _parents(self, pids):
-        if not pids:
-            return {}
-        pipe = self.r.pipeline(transaction=False)
-        for pid in pids:
-            pipe.hmget(DOC + pid, "content", "chunk_count", "chunk_ids", "turn_id")
-        out = {}
-        for pid, vals in zip(pids, pipe.execute()):
-            if vals and vals[0] is not None:
-                try:
-                    cc = int(_text(vals[1]) or 0)
-                except ValueError:
-                    cc = 0
-                out[pid] = {"content": _text(vals[0]), "chunk_count": cc,
-                            "chunk_ids": _text(vals[2]).split(), "turn_id": _text(vals[3])}
+            row = self._row(key, fields)
+            row["bm25"] = _f(score)
+            out.append(row)
         return out
 
-    def _repr(self, row):
-        rid = row["id"]
-        if row.get("_is_parent"):
-            ids = row.get("chunk_ids") or []
-            if not ids:
-                return None
-            rid = ids[0]
-        v, t = self.r.hmget(MEM + rid, "embedding", "content")
-        if v is None or t is None:
-            return None
-        return processor.unpack_vector(v), _text(t)
+    # ── search (spec §3.6, §3.11, §3.14) ─────────────────────────────────────
 
-    def search(self, query, effective_session=None, limit=None, since=None, until=None, no_model_wait=False):
-        """Hybrid search (3.14). Returns (rows, weak_rows, message); message is the model-unavailable text or ""."""
+    def _resolve_parents(self, cands):
+        pids = sorted({c["parent_id"] for c in cands if c.get("parent_id")})
+        docs = {}
+        if pids:
+            pipe = self.client.pipeline(transaction=False)
+            for pid in pids:
+                pipe.hmget(DOC + pid, "content", "chunk_count", "chunk_ids", "turn_id", "timestamp",
+                           "timestamp_epoch", "session_id", "owner_id")
+            for pid, vals in zip(pids, pipe.execute()):
+                if vals and vals[0] is not None:
+                    docs[pid] = vals
+        for c in cands:
+            c["_hit_key"] = c["id"]
+            pid = c.get("parent_id")
+            if pid and pid in docs:
+                v = docs[pid]
+                c["id"] = pid
+                c["content"] = _s(v[0])
+                c["_doc"] = True
+                c["chunk_count"] = int(_f(v[1], 0))
+                c["chunk_ids"] = _s(v[2]).split()
+                c["turn_id"] = _s(v[3])
+                c["timestamp"] = _s(v[4]) or c.get("timestamp", "")
+                c["timestamp_epoch"] = _f(v[5], c.get("timestamp_epoch", 0.0))
+                c["session_id"] = _s(v[6]) or c.get("session_id", "")
+            else:
+                c["_doc"] = False
+                c["chunk_count"] = 0
+                c["chunk_ids"] = []
+
+    def _representatives(self, rows):
+        """{row id: (vector, text)} for the version grouping (spec §3.14 step 4)."""
+        keys = []
+        for r in rows:
+            if r.get("_doc"):
+                if r.get("chunk_ids"):
+                    keys.append((r["id"], MEM + r["chunk_ids"][0]))
+            else:
+                keys.append((r["id"], MEM + r["id"]))
+        out = {}
+        if not keys:
+            return out
+        pipe = self.client.pipeline(transaction=False)
+        for _rid, k in keys:
+            pipe.hmget(k, "embedding", "content")
+        for (rid, _k), vals in zip(keys, pipe.execute()):
+            if vals and vals[0]:
+                out[rid] = (bytes_to_vec(vals[0]), _s(vals[1]))
+        return out
+
+    def search(self, query, limit=None, session_id=None, since=None, until=None, no_model_wait=False):
+        """(normal rows, weak rows, model message or None) — spec §3.14."""
+        self._require()
         cfg = self.cfg
-        if effective_session is None:
-            effective_session = self.default_session or ""
+        query = processor.sanitize_surrogates(query if isinstance(query, str) else "")
+        query = query[: int(cfg["search_query_max_chars"])]
         if limit is None:
-            limit = cfg["search_result_limit"]
-        bounds = self._epoch_bounds(since, until)
-        n = min(limit * 5, 100)
-        model_missing = False
-        vec = processor.embed(query, cfg, query=True, no_wait=no_model_wait)
-        if vec is None:
-            model_missing = True
+            limit = int(cfg["search_result_limit"])
+        limit = max(1, int(limit))
+        session = (session_id or "").strip() or self.default_session
+        k = min(limit * 5, 100)
+        qvec = processor.embed(query, "query", no_model_wait=no_model_wait)
+        message = None if qvec is not None else processor.unavailable_message()
         merged = {}
-        if vec is not None:
-            for r in self._vector_search(vec, n, bounds):
+        if qvec is not None:
+            for r in self._vector_search(qvec, k, since, until):
                 merged[r["id"]] = r
-        for r in self._bm25_search(query, n, bounds):
+        for r in self._bm25_search(query, k, since, until):
             if r["id"] in merged:
                 merged[r["id"]]["bm25"] = r["bm25"]
             else:
                 r["cos"] = None
                 merged[r["id"]] = r
-        for r in merged.values():
-            r.setdefault("bm25", None)
-        rows = list(merged.values())
-        main, weak = processor.build_results(rows, query, cfg, effective_session, limit,
-                                             self._parents, self._repr)
-        self._count_access(main[:max(0, cfg["ttl_refresh_top_k"])])
-        return main[:limit], weak, (processor.model_unavailable_message(cfg) if model_missing else "")
+        cands = list(merged.values())
+        self._resolve_parents(cands)
+        reps_cb = self._representatives
+        normal, weak = shape_results(cands, query, cfg, session, limit, reps_cb)
+        top_k = int(cfg["ttl_refresh_top_k"])
+        hits = [r["_hit_key"] for r in normal[:top_k]]
+        if hits:
+            pipe = self.client.pipeline(transaction=False)
+            for h in hits:
+                self._scripts["incr"](keys=[MEM + h], args=["access_count", 1], client=pipe)
+            pipe.execute()
+        return normal, weak, message
 
-    def _count_access(self, rows):
-        """access_count +1 on the matched chunk of ordinary rows (3.14 step 7). Never called for weak rows.
+    # ── list / recall (spec §4.3, §4.3.1) ────────────────────────────────────
 
-        A search changes no TTL (decided 2026-11-22, 3.3): every record is deleted 7 days after it was saved."""
-        if not rows:
-            return
-        pipe = self.r.pipeline(transaction=False)
-        for row in rows:
-            self._scripts["incr"](keys=[MEM + row["_chunk_id"]], args=["access_count", 1], client=pipe)
-        pipe.execute()
-
-    # ------------------------------------------------------------------ list / thread
     def _scan(self, pattern):
-        for key in self.r.scan_iter(match=pattern, count=1000):
-            k = _text(key)
-            if pattern == "mem:*" and k.startswith(MEM_SHA):
-                continue
-            if pattern == "doc:*" and k.startswith(DOC_SHA):
-                continue
-            yield k
+        for key in self.client.scan_iter(match=pattern, count=1000):
+            yield _s(key)
 
     def list_entries(self, limit):
-        """Newest first: singles (paged FT.SEARCH `*`) merged with parent documents (SCAN doc:*)."""
+        self._require()
         owner = self.cfg["owner_id"]
-        entries = []
-        singles = 0
+        singles = []
         offset = 0
-        while singles < limit:
-            reply = self.r.execute_command(
-                "FT.SEARCH", INDEX, "*", "RETURN", "5", "content", "timestamp", "owner_id", "parent_id",
-                "turn_id", "SORTBY", "timestamp_epoch", "DESC", "LIMIT", str(offset), "200", "DIALECT", "2")
-            got = self._parse_reply(reply, False)
-            if not got:
-                break
-            for key, _, f in got:
-                if _text(f.get("owner_id", b"")) != owner or _text(f.get("parent_id", b"")):
+        page = 200
+        while len(singles) < limit:
+            hits = self._ft_search("*", ["content", "timestamp", "owner_id", "parent_id"], page, offset=offset,
+                                   sortby=("timestamp_epoch", "DESC"))
+            for key, _sc, fields in hits:
+                if _s(fields.get("owner_id")) != owner or _s(fields.get("parent_id")):
                     continue
-                entries.append({"tag": "", "id": _bare(key), "timestamp": _text(f.get("timestamp", b"")),
-                                "content": _text(f.get("content", b""))})
-                singles += 1
-                if singles >= limit:
+                singles.append({"id": _doc_bare_id(key), "content": _s(fields.get("content")),
+                                "timestamp": _s(fields.get("timestamp")), "_doc": False})
+                if len(singles) >= limit:
                     break
-            offset += 200
-            if len(got) < 200:
+            if len(hits) < page:
                 break
-        for k in self._scan("doc:*"):
-            f = self.r.hmget(k, "id", "content", "timestamp", "owner_id", "chunk_count")
-            if f[0] is None or _text(f[3]) != owner:
-                continue
-            entries.append({"tag": "[doc×%s]" % (_text(f[4]) or "0"), "id": _text(f[0]),
-                            "timestamp": _text(f[2]), "content": _text(f[1]), "parent": True})
-        entries.sort(key=lambda e: e["timestamp"], reverse=True)
-        return entries[:limit]
+            offset += page
+        docs = []
+        keys = [k for k in self._scan(DOC + "*") if not k.startswith(DOCSHA)]
+        if keys:
+            pipe = self.client.pipeline(transaction=False)
+            for k in keys:
+                pipe.hmget(k, "content", "timestamp", "owner_id", "chunk_count")
+            for k, vals in zip(keys, pipe.execute()):
+                if not vals or vals[0] is None or _s(vals[2]) != owner:
+                    continue
+                docs.append({"id": k[len(DOC):], "content": _s(vals[0]), "timestamp": _s(vals[1]),
+                             "_doc": True, "chunk_count": int(_f(vals[3], 0))})
+        rows = singles[:limit] + docs
+        rows.sort(key=lambda r: r["timestamp"], reverse=True)
+        return rows[:limit]
 
-    def thread_entries(self):
-        """All display entries of this owner for recall_thread (chronological)."""
+    def all_entries(self):
+        """Every record of this owner for recall_thread: parent documents, single records, and chunks
+        whose parent is gone (spec §4.3.1)."""
+        self._require()
         owner = self.cfg["owner_id"]
+        docs = {}
+        keys = [k for k in self._scan(DOC + "*") if not k.startswith(DOCSHA)]
+        if keys:
+            pipe = self.client.pipeline(transaction=False)
+            for k in keys:
+                pipe.hmget(k, "content", "timestamp", "timestamp_epoch", "owner_id", "turn_id", "chunk_count")
+            for k, vals in zip(keys, pipe.execute()):
+                if vals and vals[0] is not None:
+                    docs[k[len(DOC):]] = vals
         out = []
-        keys_mem = list(self._scan("mem:*"))
-        keys_doc = list(self._scan("doc:*"))
-        pipe = self.r.pipeline(transaction=False)
-        for k in keys_doc:
-            pipe.hmget(k, "id", "content", "timestamp", "timestamp_epoch", "owner_id", "turn_id",
-                       "chunk_count")
-        docs = pipe.execute()
-        doc_ids = set()
-        for k, f in zip(keys_doc, docs):
-            if f[0] is None or _text(f[4]) != owner:
+        for did, vals in docs.items():
+            if _s(vals[3]) != owner:
                 continue
-            doc_ids.add(_text(f[0]))
-            out.append({"tag": "[doc×%s]" % (_text(f[6]) or "0"), "id": _text(f[0]),
-                        "timestamp": _text(f[2]), "epoch": _text(f[3]), "turn_id": _text(f[5]),
-                        "content": _text(f[1])})
-        pipe = self.r.pipeline(transaction=False)
-        for k in keys_mem:
-            pipe.hmget(k, "id", "content", "timestamp", "timestamp_epoch", "owner_id", "turn_id",
-                       "parent_id")
-        for f in pipe.execute():
-            if f[0] is None or _text(f[4]) != owner:
-                continue
-            pid = _text(f[6])
-            if pid and pid in doc_ids:
-                continue
-            if pid and self.r.exists(DOC + pid):
-                continue
-            out.append({"tag": "", "id": _text(f[0]), "timestamp": _text(f[2]), "epoch": _text(f[3]),
-                        "turn_id": _text(f[5]), "content": _text(f[1])})
-
-        def key(e):
-            try:
-                ep = float(e["epoch"])
-            except ValueError:
-                ep = 0.0
-            return (ep, e["id"])
-
-        out.sort(key=key)
+            out.append({"id": did, "content": _s(vals[0]), "timestamp": _s(vals[1]),
+                        "timestamp_epoch": _f(vals[2]), "turn_id": _s(vals[4]), "_doc": True,
+                        "chunk_count": int(_f(vals[5], 0))})
+        mkeys = [k for k in self._scan(MEM + "*") if not k.startswith(SHA)]
+        if mkeys:
+            pipe = self.client.pipeline(transaction=False)
+            for k in mkeys:
+                pipe.hmget(k, "content", "timestamp", "timestamp_epoch", "owner_id", "turn_id", "parent_id")
+            for k, vals in zip(mkeys, pipe.execute()):
+                if not vals or vals[0] is None or _s(vals[3]) != owner:
+                    continue
+                pid = _s(vals[5])
+                if pid and pid in docs:
+                    continue
+                out.append({"id": k[len(MEM):], "content": _s(vals[0]), "timestamp": _s(vals[1]),
+                            "timestamp_epoch": _f(vals[2]), "turn_id": _s(vals[4]), "_doc": False})
+        out.sort(key=lambda r: (r["timestamp_epoch"], r["id"]))
         return out
 
-    # ------------------------------------------------------------------ delete
-    def _parent_chunk_ids(self, pid, chunk_ids_field):
-        ids = chunk_ids_field.split() if chunk_ids_field else []
+    # ── delete (spec §3.5, §3.11, §4.3) ──────────────────────────────────────
+
+    def _chunk_ids_for(self, pid, data):
+        ids = _s(data.get(b"chunk_ids")).split()
         if ids:
             return ids
         found = []
         try:
-            reply = self.r.execute_command("FT.SEARCH", INDEX, "@parent_id:{%s}" % pid.replace("-", "\\-"),
-                                           "RETURN", "1", "parent_id", "LIMIT", "0", "1000", "DIALECT", "2")
-            for key, _, f in self._parse_reply(reply, False):
-                if _text(f.get("parent_id", b"")) == pid:
-                    found.append(_bare(key))
+            hits = self._ft_search(f"@parent_id:{{{pid}}}", ["parent_id"], 10000)
+            found = [_doc_bare_id(k) for k, _s2, f in hits if _s(f.get("parent_id")) == pid]
+        except CONN_ERRORS:
+            raise
         except redis.ResponseError:
             found = []
         if not found:
-            for k in self._scan("mem:*"):
-                if _text(self.r.hget(k, "parent_id")) == pid:
-                    found.append(_bare(k))
+            for k in self._scan(MEM + "*"):
+                if k.startswith(SHA):
+                    continue
+                try:
+                    if _s(self.client.hget(k, "parent_id")) == pid:
+                        found.append(k[len(MEM):])
+                except redis.ResponseError:
+                    continue
         return found
 
-    def delete_memory(self, ident: str):
-        ident = ident.strip()
-        for p in (DOC, MEM):
-            if ident.startswith(p):
-                ident = ident[len(p):]
-                break
-        owner = self.cfg["owner_id"]
-        r = self.r
-        if r.exists(DOC + ident):
-            f = r.hmget(DOC + ident, "owner_id", "content", "chunk_ids", "turn_id")
-            if _text(f[0]) != owner:
-                return {"status": "not_found", "id": ident}
-            ids = self._parent_chunk_ids(ident, _text(f[2]))
-            pipe = r.pipeline(transaction=True)
-            pipe.delete(DOC + ident)
-            pipe.delete(guard_key_for(DOC, _text(f[1]), _text(f[3])))
-            for c in ids:
-                pipe.delete(MEM + c)
-            pipe.execute()
-            return {"status": "deleted", "id": ident, "chunks_deleted": len(ids)}
-        if r.exists(MEM + ident):
-            f = r.hmget(MEM + ident, "owner_id", "content", "turn_id", "parent_id")
-            if _text(f[0]) != owner:
-                return {"status": "not_found", "id": ident}
-            if _text(f[3]):
-                r.delete(MEM + ident)  # a child chunk owns no guard (review #6)
-            else:
-                self._scripts["delete"](keys=[MEM + ident, guard_key_for(MEM, _text(f[1]), _text(f[2]))],
-                                        args=[ident])
-            return {"status": "deleted", "id": ident}
-        return {"status": "not_found", "id": ident}
+    def _delete_doc(self, pid, data):
+        content = _s(data.get(b"content"))
+        guard = guard_key(content, _s(data.get(b"turn_id")), doc=True)
+        chunks = self._chunk_ids_for(pid, data)
+        res = self._scripts["delete"](keys=[guard, DOC + pid] + [MEM + c for c in chunks], args=[pid])
+        return int(res[1]) if res else 0
 
-    def delete_by_session(self, session_id: str):
-        owner = self.cfg["owner_id"]
-        r = self.r
-        docs, chunks, singles = 0, 0, 0
-        pipe = r.pipeline(transaction=True)
-        deleted_chunk_ids = set()
-        doc_ids = {}
-        for k in self._scan("doc:*"):
-            f = r.hmget(k, "id", "owner_id", "session_id", "content", "chunk_ids", "turn_id")
-            if f[0] is None or _text(f[1]) != owner:
-                continue
-            doc_ids[_text(f[0])] = _text(f[2]) == session_id
-            if _text(f[2]) != session_id:
-                continue
-            pid = _text(f[0])
-            ids = self._parent_chunk_ids(pid, _text(f[4]))
-            pipe.delete(k)
-            pipe.delete(guard_key_for(DOC, _text(f[3]), _text(f[5])))
-            for c in ids:
-                pipe.delete(MEM + c)
-                deleted_chunk_ids.add(c)
-            docs += 1
-            chunks += len(ids)
-        for k in self._scan("mem:*"):
-            bare = _bare(k)
-            if bare in deleted_chunk_ids:
-                continue
-            f = r.hmget(k, "owner_id", "session_id", "content", "turn_id", "parent_id")
-            if f[0] is None or _text(f[0]) != owner or _text(f[1]) != session_id:
-                continue
-            if _text(f[4]):
-                pipe.delete(k)
-                chunks += 1          # an orphan chunk (its parent is gone); it owns no guard
-            else:
-                # the guard only when it points at this record (review #6)
-                self._scripts["delete"](keys=[MEM + bare, guard_key_for(MEM, _text(f[2]), _text(f[3]))],
-                                        args=[bare], client=pipe)
-                singles += 1
-        pipe.execute()
-        total = docs + chunks + singles
-        if total == 0:
-            return {"status": "not_found", "session_id": session_id, "deleted": 0}
-        return {"status": "deleted", "session_id": session_id, "documents_deleted": docs,
-                "chunks_deleted": chunks, "singles_deleted": singles, "deleted": total}
+    def _delete_single(self, rid, data):
+        content = _s(data.get(b"content"))
+        if _s(data.get(b"parent_id")):
+            return int(self.client.delete(MEM + rid))
+        guard = guard_key(content, _s(data.get(b"turn_id")), doc=False)
+        res = self._scripts["delete"](keys=[guard, MEM + rid], args=[rid])
+        return int(res[0]) if res else 0
 
-    # ------------------------------------------------------------------ repair
-    def repair(self, max_n=200, no_model_wait=False):
-        self.ensure_index()
-        if self.index_error:
-            return {"status": "error", "message": "FT.CREATE failed: %s" % self.index_error}
-        res = {"status": "ok", "message": "index ensured", "reembedded": 0, "remaining": 0}
+    def delete_memory(self, mem_id) -> dict:
+        self._require()
+        raw = mem_id.strip() if isinstance(mem_id, str) else ""
+        if raw.startswith(DOC) or raw.startswith(MEM):
+            raw = raw[4:]
+        if not raw or raw.startswith("sha:") or ":" in raw:
+            return {"status": "not_found", "id": raw}
         owner = self.cfg["owner_id"]
-        todo = []
-        for k in self._scan("mem:*"):
-            f = self.r.hmget(k, "owner_id", "content", "embedding")
-            if f[0] is None or _text(f[0]) != owner or f[2] is not None:
-                continue
-            todo.append((k, _text(f[1])))
-        unavailable = False
-        done = 0
-        for k, content in todo:
-            if done >= max_n:
-                break
-            vec = processor.embed(content, self.cfg, query=False, no_wait=no_model_wait)
-            if vec is None:
-                unavailable = True
-                break
-            ok = self._scripts["hset"](keys=[k], args=["embedding", processor.pack_vector(vec)])
-            if int(ok):
-                done += 1
-        res["reembedded"] = done
-        res["remaining"] = len(todo) - done
-        if unavailable:
-            res["warning"] = "embedding_unavailable"
-            res["detail"] = processor.model_unavailable_message(self.cfg)
-        return res
+        data = self.client.hgetall(DOC + raw)
+        if data:
+            if _s(data.get(b"owner_id")) != owner:
+                return {"status": "not_found", "id": raw}
+            n = self._delete_doc(raw, data)
+            return {"status": "deleted", "id": raw, "chunks_deleted": n}
+        try:
+            data = self.client.hgetall(MEM + raw)
+        except redis.ResponseError:
+            data = {}
+        if data:
+            if _s(data.get(b"owner_id")) != owner:
+                return {"status": "not_found", "id": raw}
+            self._delete_single(raw, data)
+            return {"status": "deleted", "id": raw}
+        return {"status": "not_found", "id": raw}
 
-    def close(self):
-        if self.r is not None:
+    def delete_by_session(self, session_id) -> dict:
+        self._require()
+        owner = self.cfg["owner_id"]
+        sid = session_id if isinstance(session_id, str) else ""
+        docs_deleted = chunks_deleted = singles_deleted = 0
+        for k in [k for k in self._scan(DOC + "*") if not k.startswith(DOCSHA)]:
+            data = self.client.hgetall(k)
+            if not data or _s(data.get(b"owner_id")) != owner or _s(data.get(b"session_id")) != sid:
+                continue
+            chunks_deleted += self._delete_doc(k[len(DOC):], data)
+            docs_deleted += 1
+        for k in [k for k in self._scan(MEM + "*") if not k.startswith(SHA)]:
             try:
-                self.r.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self.r = None
+                data = self.client.hgetall(k)
+            except redis.ResponseError:
+                continue
+            if not data or _s(data.get(b"owner_id")) != owner or _s(data.get(b"session_id")) != sid:
+                continue
+            rid = k[len(MEM):]
+            if _s(data.get(b"parent_id")):
+                chunks_deleted += int(self.client.delete(k))
+            else:
+                singles_deleted += self._delete_single(rid, data)
+        total = docs_deleted + chunks_deleted + singles_deleted
+        if total == 0:
+            return {"status": "not_found", "session_id": sid, "deleted": 0}
+        return {"status": "deleted", "session_id": sid, "documents_deleted": docs_deleted,
+                "chunks_deleted": chunks_deleted, "singles_deleted": singles_deleted, "deleted": total}
+
+    # ── repair (spec §3.10) ──────────────────────────────────────────────────
+
+    def repair(self, no_model_wait=False, max_reembed=200) -> dict:
+        self._require()
+        self._try_index()
+        if not self.index_ok:
+            return {"status": "error", "message": index_hint(self.url, self.index_error)}
+        owner = self.cfg["owner_id"]
+        model = processor.get_model(no_model_wait=no_model_wait)
+        reembedded = remaining = 0
+        keys = [k for k in self._scan(MEM + "*") if not k.startswith(SHA)]
+        for i in range(0, len(keys), 200):
+            batch = keys[i:i + 200]
+            pipe = self.client.pipeline(transaction=False)
+            for k in batch:
+                pipe.hmget(k, "owner_id", "content")
+                pipe.hexists(k, "embedding")
+            res = pipe.execute()
+            for j, k in enumerate(batch):
+                vals, has = res[2 * j], res[2 * j + 1]
+                if not vals or vals[0] is None or _s(vals[0]) != owner or has:
+                    continue
+                if model is None or reembedded >= max_reembed:
+                    remaining += 1
+                    continue
+                vec = processor.embed(_s(vals[1]), "passage", no_model_wait=no_model_wait)
+                if vec is None:
+                    remaining += 1
+                    continue
+                if self._scripts["hset"](keys=[k], args=["embedding", vec_to_bytes(vec)]):
+                    reembedded += 1
+        out = {"status": "ok", "message": "index ensured", "reembedded": reembedded, "remaining": remaining}
+        if model is None:
+            out["warning"] = "embedding_unavailable"
+            out["detail"] = processor.unavailable_message()
+        return out
+
+
+# ── result shaping (spec §3.14) — pure, testable without Redis ──────────────
+
+def _score_row(c, cos, query, cfg, session, now):
+    kw = c.get("_kw", 0.0)
+    bl = processor.b_local(c.get("importance", 1.0), c.get("access_count", 0), cfg)
+    decay = processor.time_decay(c.get("timestamp_epoch"), cfg["half_life_days"], now)
+    bs = cfg["b_session_match"] if (session and c.get("session_id") == session) else cfg["b_session_mismatch"]
+    f = processor.fused(cos, kw) * bl
+    s = f * decay * bs
+    bonus = 0.0
+    if cfg.get("lexical_rerank_enabled", True):
+        bonus = processor.rerank_bonus(query, c.get("content", ""), cfg)
+    return s + bonus, f + bonus, s
+
+
+def _newer_key(r):
+    return (r.get("timestamp_epoch", 0.0), r.get("id", ""))
+
+
+def shape_results(cands, query, cfg, session, limit, reps_cb=None, now=None):
+    """(normal rows, weak rows) from merged candidates that already went through the parent resolution.
+
+    Each candidate: id (resolved), content, timestamp_epoch, session_id, importance, access_count,
+    cos (actual cosine or None when only BM25 found it), bm25 (or None), _doc, chunk_ids, _hit_key."""
+    now = time.time() if now is None else now
+    vmin = float(cfg["vector_min_cos"])
+    max_bm25 = max([abs(c["bm25"]) for c in cands if c.get("bm25") is not None] or [0.0])
+    for c in cands:
+        c["_kw"] = processor.keyword_relevance(c.get("bm25"), max_bm25, float(cfg["bm25_min_threshold"]))
+    main = []
+    for c in cands:
+        cos = c.get("cos")
+        vec_ok = cos is not None and cos >= vmin
+        if not (vec_ok or c.get("bm25") is not None):
+            continue
+        r = dict(c)
+        r["_base"] = processor.fused(cos if vec_ok else 0.0, c["_kw"])
+        main.append(r)
+    # one hit per parent document: keep the best one (before the rerank, spec §3.11)
+    best = {}
+    for r in main:
+        cos_eff = r["cos"] if (r.get("cos") is not None and r["cos"] >= vmin) else 0.0
+        r["score"], r["filter_score"], r["_pre"] = _score_row(r, cos_eff, query, cfg, session, now)
+        prev = best.get(r["id"])
+        if prev is None or r["_pre"] > prev["_pre"]:
+            best[r["id"]] = r
+    rows = [r for r in best.values() if r["filter_score"] >= float(cfg["min_score"])]
+    rows.sort(key=lambda r: (r["score"], _newer_key(r)), reverse=True)
+    if cfg.get("version_order_enabled", True) and len(rows) > 1 and reps_cb is not None:
+        _version_order(rows, cfg, reps_cb)
+    ratio = float(cfg["relative_min_score_ratio"])
+    if rows and ratio > 0:
+        top = max(r["filter_score"] for r in rows)
+        rows = [r for r in rows if r.get("_version_group") or r["filter_score"] >= top * ratio]
+    normal = rows
+    weak = []
+    want = min(int(cfg["min_results"]), int(limit))
+    if want > 0 and query.strip() and len(normal) < want:
+        taken = {r["id"] for r in normal}
+        pool = {}
+        for c in cands:
+            if c["id"] in taken:
+                continue
+            w = dict(c)
+            w["score"], w["filter_score"], _pre = _score_row(w, c.get("cos") or 0.0, query, cfg, session, now)
+            if w["filter_score"] < 1e-6:
+                continue
+            prev = pool.get(w["id"])
+            if prev is None or w["filter_score"] > prev["filter_score"]:
+                pool[w["id"]] = w
+        ordered = sorted(pool.values(), key=lambda r: (r["filter_score"], _newer_key(r)), reverse=True)
+        for w in ordered[: want - len(normal)]:
+            w["_weak"] = True
+            weak.append(w)
+    return normal[:limit], weak
+
+
+def _version_order(rows, cfg, reps_cb):
+    reps = reps_cb(rows) or {}
+    min_chars = int(cfg["version_min_chars"])
+    thr = float(cfg["version_sim_threshold"])
+    elig = [i for i, r in enumerate(rows)
+            if r["id"] in reps and reps[r["id"]][0] and len(reps[r["id"]][1] or "") >= min_chars]
+    parent = {i: i for i in elig}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a_i, a in enumerate(elig):
+        for b in elig[a_i + 1:]:
+            if processor.cosine_similarity(reps[rows[a]["id"]][0], reps[rows[b]["id"]][0]) >= thr:
+                parent[find(a)] = find(b)
+    groups = {}
+    for i in elig:
+        groups.setdefault(find(i), []).append(i)
+    gno = 0
+    snapshot = list(rows)
+    for members in sorted(groups.values(), key=lambda m: min(m)):
+        if len(members) < 2:
+            continue
+        gno += 1
+        positions = sorted(members)
+        scores = [(snapshot[p]["score"], snapshot[p]["filter_score"]) for p in positions]
+        newest_first = sorted((snapshot[p] for p in positions), key=_newer_key, reverse=True)
+        for p, r, (s, fs) in zip(positions, newest_first, scores):
+            r["score"], r["filter_score"] = s, fs
+            r["_version_group"] = gno
+            rows[p] = r

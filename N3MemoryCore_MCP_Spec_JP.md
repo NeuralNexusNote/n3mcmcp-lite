@@ -277,7 +277,7 @@ n3memorycore-mcp-lite/
 ├── tests/                          # pytest suite (§9)
 │   ├── conftest.py
 │   ├── test_database.py  test_processor.py  test_server.py  test_regressions.py
-│   └── test_hooks.py  test_api.py  test_cli.py  test_mcp_client.py  test_context_limit.py  test_coexistence.py
+│   └── test_hooks.py  test_api.py  test_cli.py  test_mcp_client.py  test_context_limit.py  test_coexistence.py  test_safe_path.py
 └── examples/
     └── claude_desktop_config.json  # the desktop registration of §8 (no claude_code_mcp.json: Claude Code uses hooks)
 ```
@@ -822,7 +822,7 @@ Lite 版の `repair_memory` ツールは **冪等な薄い操作**：再度 `ens
 > - `list_memories` の **表示 ID**（ユーザー向け ID を裸 UUID で統一）
 > - `delete_memory` のカスケード（`@parent_id` SCAN フォールバックでも同様に裸 UUID 化）
 >
-> あわせて **`SCAN mem:*` は `mem:sha:*`（STRING 型）にも、`SCAN doc:*` は `docsha:*`（STRING 型）にもマッチする**。HASH フィールドを読む前にプレフィックスで除外するか `WRONGTYPE` 例外を捕捉すること（さもないと `HGET` が `WRONGTYPE` で落ちる）。
+> あわせて **`SCAN mem:*` は `mem:sha:*`（STRING 型）にもマッチする**（`SCAN doc:*` は `docsha:*` にはマッチしない）。HASH フィールドを読む前にプレフィックスで除外するか `WRONGTYPE` 例外を捕捉すること（さもないと `HGET` が `WRONGTYPE` で落ちる）。
 >
 > **親解決時の `chunk_count` 取得**：チャンクヒットを親に折りたたむ際、`doc:<pid>` から `content` だけでなく **`chunk_count`（と `chunk_ids`・`turn_id`）も取得**しないと、検索結果の `[doc×N]` タグが常に `[doc×0]` になる（1 パイプラインでまとめて取得すると効率的）。
 
@@ -1283,7 +1283,7 @@ stdio。サーバーは `stdin` から JSON-RPC 行を読み、`stdout` に応�
 | 設定 | サーバーと同じ `config.json` とデータフォルダ（`load_config()`、`N3MC_DATA_DIR`。§6、§7）。`server_port` が要る。**ツールの呼び出しのたびに、最初に読み直す**。読み直した設定を `ensure_server` と HTTP の要求の両方に使う。エントリーはクライアントのセッションのあいだずっと動くので、起動時に 1 回だけ読むと、`server_port` を変えたあとも毎回古いポートに送ってしまう。そのときファイルを読めなければ、最後に読めた設定を使い続ける（その後一度も読めていなければ、起動時の設定）。読めないまま読み直すと、呼び出しのたびに新しい仮の `owner_id` になるため |
 
 1. **stdout は MCP のもの。** `run()` は最初に stdin / stdout / stderr を UTF-8 に再設定する（§3.13 (1)）。stdout には MCP のメッセージ以外を書かない。警告、`_notify` の出力、ライブラリのメッセージは stderr に出す。
-2. **モデルなし、Redis なし。** このモジュールは `sentence_transformers` も `torch` も import しない（直接にも、`processor.py` のモデルのコードを通しても）。下の直接保存を除き、Redis への接続も開かない。§3.9 の `import_backend()` とバックグラウンドのモデルのロードは、ここでは行わない。
+2. **モデルなし、Redis なし。** このモジュールは `sentence_transformers` も `torch` も import しない（直接にも、`processor.py` のモデルのコードを通しても）。下の直接保存を除き、Redis への接続も開かない。§3.9 の `import_backend()` とバックグラウンドのモデルのロードは、ここでは行わない。直接保存が使うモジュール（`database.py` と、コンパイル済みの `psutil` を読み込む `redis`）と `psutil` は、`stdio_server()` を始める前に import する。Windows では、stdio が stdin のパイプを読んでいる間にワーカースレッドでコンパイル済みのモジュールを import すると、入口が止まることがある（§3.9 と同じ危険）。
 3. **サーバーの起動。** 始まった直後に、`run()` は `ensure_server(cfg)` を**バックグラウンドのスレッドで** 1 回呼ぶ。そのため `initialize` にはすぐに応答する（サーバーの起動には最大 60 秒かかりうる、§3.15）。`_start_server` は子プロセスの stdout を `DEVNULL` に、stderr を `server.log` に送る。そのため子プロセスが MCP の流れに書き込むことはない。
 4. **`initialize` / `tools/list`** には手元で応答する：§5 (1) の指示と、§5 (3) の 7 つのツールの定義（`tooldefs.py`。サーバーと共用）。これらはサーバーなしで動く。
 5. **入力の確認を切る**：ハンドラは `server.call_tool(validate_input=False)` で登録する。入っている `mcp` がその引数を拒んだら（`TypeError`）、`server.call_tool()` で登録する。新しい `mcp` 1.x は、ハンドラが動く前に引数をスキーマで確かめる。そうすると Lite 自身の文（たとえば §4.3 の `importance must be numeric` の JSON）が SDK のものに置き換わってしまう。
@@ -2954,7 +2954,7 @@ kept only in `audit.log`.
 | **コマンドの形を取り除いた**内容（下記）が、今のテンプレートか前のテンプレート（`_KNOWN_RULES_MD_HASHES`）と同じ | バックアップし（`n3mc-lite-behavior.md.bak-n3mc-lite-<YYYYmmddHHMMSS>`）、置き換えたテンプレートを書く。Python のパスが違うとき、もう一方のインストールの形のとき、固定した版が古いときも、これに当たる |
 | それ以外（利用者が直したもの） | **置き換えない。** `rules_md_edited:<hash>` を出す：`The rules file <absolute path> has been edited by hand, so it was not updated. Merge the new template manually if needed.` `<hash>` = ファイルの絶対パスの SHA-256 の、先頭 12 桁の 16 進数 |
 
-- 内容は改行を LF にそろえて比べる。**コマンドの形を取り除く**：`(?:"[^"\n]*"|\S+) -m n3mc_mcp\.cli` と `uvx --from n3memorycore-mcp-lite==\S+ n3mc-lite` に当たる部分をすべて `{cli}` に置き換える。その結果を `_RULES_MD_TEMPLATE` そのものと比べ、前のテンプレートとは、SHA-256 の先頭 16 桁の 16 進数を `_KNOWN_RULES_MD_HASHES` と比べる。v1 は最初のテンプレートなので、この集合は空から始まる。`uvx` の形の固定した版も取り除くので、新しいリリースのたびに、プラグインの利用者のファイルが直したもののように見えることはない。
+- 内容は改行を LF にそろえて比べる。**コマンドの形を取り除く**：``(?:"[^"\n]*"|[^\s`]+) -m n3mc_mcp\.cli`` と `uvx --from n3memorycore-mcp-lite==\S+ n3mc-lite` に当たる部分をすべて `{cli}` に置き換える。その結果を `_RULES_MD_TEMPLATE` そのものと比べ、前のテンプレートとは、SHA-256 の先頭 16 桁の 16 進数を `_KNOWN_RULES_MD_HASHES` と比べる。v1 は最初のテンプレートなので、この集合は空から始まる。`uvx` の形の固定した版も取り除くので、新しいリリースのたびに、プラグインの利用者のファイルが直したもののように見えることはない。
 - **テンプレートを変えるときは、いつも目印のバージョンを上げ、前の（置き換える前の）テンプレートのハッシュを `_KNOWN_RULES_MD_HASHES` に足す。**
 - 同じフォルダの一時ファイルを通して書き、`os.replace` する。
 - **コマンドの形を埋める理由**：プラグインのインストールには、`python -m` が見つけられるパッケージがない（コードは `uvx` の環境にある）。pip のインストールには、`uvx` を起動する理由がない。そのファイルを書いた形が、そのプロジェクトで動く形である。

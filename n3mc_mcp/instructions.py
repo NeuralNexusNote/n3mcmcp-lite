@@ -1,8 +1,7 @@
-"""Behavioral instructions delivered at initialize (spec section 5 (1)).
+"""The behavioral instructions delivered at initialize (spec §5 (1)): this text exactly, with one
+final newline. Not paraphrased, not reordered, not translated."""
 
-The text is verbatim from the specification. Do not reword or reorder."""
-
-INSTRUCTIONS = '''N3MemoryCore — Lite (Ephemeral Memory)
+INSTRUCTIONS = """N3MemoryCore — Lite (Ephemeral Memory)
 
 This MCP server gives you hybrid-search memory (vector + BM25) backed by
 Redis Stack. It is the free *Lite* build of N3MemoryCore: every entry
@@ -268,4 +267,4 @@ BEHAVIORAL RULES
     empty. Use one only when it is actually relevant to the question; if it
     is not, ignore it and do not mention it (do not say that unrelated
     memories were found).
-'''
+"""

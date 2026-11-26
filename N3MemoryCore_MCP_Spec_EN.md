@@ -280,7 +280,7 @@ n3memorycore-mcp-lite/
 ├── tests/                          # pytest suite (§9)
 │   ├── conftest.py
 │   ├── test_database.py  test_processor.py  test_server.py  test_regressions.py
-│   └── test_hooks.py  test_api.py  test_cli.py  test_mcp_client.py  test_context_limit.py  test_coexistence.py
+│   └── test_hooks.py  test_api.py  test_cli.py  test_mcp_client.py  test_context_limit.py  test_coexistence.py  test_safe_path.py
 └── examples/
     └── claude_desktop_config.json  # the desktop registration of §8 (no claude_code_mcp.json: Claude Code uses hooks)
 ```
@@ -827,7 +827,7 @@ When a `save_memory` body exceeds `chunk_threshold` (default 400 chars), the ser
 > - `list_memories` **display ID** (unify the user-facing ID to the bare UUID)
 > - `delete_memory` cascade (also normalize to bare UUID in the `@parent_id` SCAN fallback)
 >
-> Also note that **`SCAN mem:*` matches `mem:sha:*` (STRING type) and `SCAN doc:*` matches `docsha:*` (STRING type)**. Exclude them by prefix before reading HASH fields, or catch the `WRONGTYPE` exception (otherwise `HGET` fails with `WRONGTYPE`).
+> Also note that **`SCAN mem:*` matches `mem:sha:*` (STRING type)** (`SCAN doc:*` does not match `docsha:*`). Exclude them by prefix before reading HASH fields, or catch the `WRONGTYPE` exception (otherwise `HGET` fails with `WRONGTYPE`).
 >
 > **Fetching `chunk_count` during parent resolution**: when folding a chunk hit into its parent, fetch not only `content` but also **`chunk_count` (and `chunk_ids` / `turn_id`)** from `doc:<pid>`, otherwise the `[doc×N]` tag in the results is always `[doc×0]` (fetching them in a single pipeline is efficient).
 
@@ -1298,7 +1298,7 @@ Its mechanics are those of the MCP entry of N3MC MCP Pro v1.0.0 §4.6; its tools
 | Configuration | the same `config.json` and data folder as the server (`load_config()`, `N3MC_DATA_DIR`; §6, §7) — it needs `server_port`. **Read again at the start of every tool call**, and that reading is used for both `ensure_server` and the HTTP request: the entry runs for a whole client session, and with the settings read once at start a changed `server_port` would send every call to the old port. When the file cannot be read at that moment, the last readable settings stay in use (the settings the entry started with, if none was readable since): an unreadable read would bring a new temporary `owner_id` on every call |
 
 1. **stdout belongs to MCP.** `run()` first reconfigures stdin / stdout / stderr to UTF-8 (§3.13 (1)). Nothing but MCP messages is written to stdout; warnings, `_notify` output and library messages go to stderr.
-2. **No model, no Redis.** The module imports neither `sentence_transformers` nor `torch` (directly or through `processor.py`'s model code), and opens no Redis connection, except for the direct save below. `import_backend()` and the background model load of §3.9 are not run here.
+2. **No model, no Redis.** The module imports neither `sentence_transformers` nor `torch` (directly or through `processor.py`'s model code), and opens no Redis connection, except for the direct save below. `import_backend()` and the background model load of §3.9 are not run here. The modules of the direct save (`database.py` and `redis`, which loads the compiled `psutil`) and `psutil` are imported before `stdio_server()` starts: on Windows, importing a compiled module in a worker thread while stdio reads the stdin pipe can hang the entry (the same hazard as in §3.9).
 3. **Starting the server.** Right after start, `run()` calls `ensure_server(cfg)` once **in a background thread**, so `initialize` is answered at once (a server start can take up to 60 s, §3.15). `_start_server` sends the child's stdout to `DEVNULL` and stderr to `server.log`, so the child never writes into the MCP stream.
 4. **`initialize` / `tools/list`** are answered locally: the instructions of §5 (1) and the seven Tool definitions of §5 (3) (`tooldefs.py`, shared with the server). They work without the server.
 5. **Input check off**: register the handler with `server.call_tool(validate_input=False)`; when the installed `mcp` refuses that argument (`TypeError`), register it with `server.call_tool()`. Newer `mcp` 1.x versions check the arguments against the schema before the handler runs, which would replace Lite's own texts (for example the `importance must be numeric` JSON of §4.3) with the SDK's.
@@ -2966,7 +2966,7 @@ kept only in `audit.log`.
 | The content **with its command forms taken out** (below) equals the current template or a previous one (`_KNOWN_RULES_MD_HASHES`) | Back it up (`n3mc-lite-behavior.md.bak-n3mc-lite-<YYYYmmddHHMMSS>`), then write the rendered template. This covers another Python path, the other installation form and an older pinned version |
 | Anything else (edited by the user) | **Do not replace it.** Emit `rules_md_edited:<hash>`: `The rules file <absolute path> has been edited by hand, so it was not updated. Merge the new template manually if needed.` `<hash>` = the first 12 hex characters of the SHA-256 of the file's absolute path |
 
-- Content is compared with line endings normalized to LF. **Taking the command forms out**: replace every match of `(?:"[^"\n]*"|\S+) -m n3mc_mcp\.cli` and of `uvx --from n3memorycore-mcp-lite==\S+ n3mc-lite` with `{cli}`; the result is compared with `_RULES_MD_TEMPLATE` itself and, for a previous template, by the first 16 hex characters of its SHA-256 with `_KNOWN_RULES_MD_HASHES`. v1 is the first template, so the set starts empty. Because the pinned version of the `uvx` form is taken out, a new release does not make every plugin user's file look edited.
+- Content is compared with line endings normalized to LF. **Taking the command forms out**: replace every match of ``(?:"[^"\n]*"|[^\s`]+) -m n3mc_mcp\.cli`` and of `uvx --from n3memorycore-mcp-lite==\S+ n3mc-lite` with `{cli}`; the result is compared with `_RULES_MD_TEMPLATE` itself and, for a previous template, by the first 16 hex characters of its SHA-256 with `_KNOWN_RULES_MD_HASHES`. v1 is the first template, so the set starts empty. Because the pinned version of the `uvx` form is taken out, a new release does not make every plugin user's file look edited.
 - **Whenever the template changes, bump the marker version and add the hash of the previous unrendered template to `_KNOWN_RULES_MD_HASHES`.**
 - Write through a temporary file in the same folder and `os.replace`.
 - **Why the command form is filled in**: a plugin installation has no package that `python -m` could find (the code lives in `uvx`'s environment), and a pip installation has no reason to start `uvx`. The form that wrote the file is the one that works in that project.

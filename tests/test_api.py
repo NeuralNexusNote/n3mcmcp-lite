@@ -1,5 +1,5 @@
-"""Layer 6: resident server endpoints and process management (TestClient, temp data folder)."""
-
+"""Layer 6: the resident server's endpoints and process management (spec §3.15, §4.5).
+app.py's TestClient with the fake embedding and a temporary data folder."""
 import inspect
 import json
 import re
@@ -7,241 +7,310 @@ import threading
 import time
 
 import pytest
+from fastapi.testclient import TestClient
 
-from n3mc_mcp import app as app_mod
-from n3mc_mcp import config, paths
-from n3mc_mcp.tools import _NUDGE_AFTER_SAVE, _NUDGE_GENERIC
+import conftest
+from conftest import parse_json
+from n3mc_mcp import cli, config, lite_hook, lite_stop_hook, paths, processor, tools
+from n3mc_mcp.config import compute_code_version, read_config_raw
+from n3mc_mcp.database import Database
+from n3mc_mcp.tools import ToolRunner
+
+ENDPOINTS = [("get", "/health"), ("post", "/shutdown"), ("post", "/buffer"), ("post", "/search"),
+             ("post", "/repair"), ("post", "/tools/list_memories")]
 
 
-def port_of(cfg):
-    return cfg["server_port"]
+@pytest.fixture
+def offline_app(app_factory, cfg):
+    """An app whose Database cannot reach Redis (enough for the header checks)."""
+    return app_factory(Database(dict(cfg, redis_url=conftest.UNREACHABLE_URL)))
+
+
+def H(cfg, host=None, **extra):
+    h = {"Host": host or f"127.0.0.1:{cfg['server_port']}"}
+    h.update(extra)
+    return h
 
 
 class TestHealth:
-    def test_fields(self, client, cfg):
-        h = client.get("/health").json()
-        assert h["status"] == "ok" and h["root"] == paths.data_dir()
-        assert re.fullmatch(r"[0-9a-f]{16}", h["code_version"]) and isinstance(h["pid"], int)
-        assert h["redis"].startswith(("127.0.0.1:", "localhost:")) and "@" not in h["redis"]   # CI uses localhost:6390
+    def test_fields(self, offline_app, cfg):
+        r = TestClient(offline_app).get("/health", headers=H(cfg)).json()
+        assert r["status"] == "ok" and paths.same_folder(r["root"], paths.data_dir())
+        assert re.fullmatch(r"[0-9a-f]{16}", r["code_version"]) and isinstance(r["pid"], int)
+        assert r["redis"] == "127.0.0.1:1/0"
 
-    def test_code_version_follows_config_content_not_formatting(self, client):
-        path = paths.config_path()
-        v0 = config.code_version()
-        data = json.load(open(path, encoding="utf-8"))
-        open(path, "w", encoding="utf-8").write(json.dumps(dict(reversed(list(data.items()))), indent=4))
-        assert config.code_version() == v0
-        data["min_results"] = 7
-        open(path, "w", encoding="utf-8").write(json.dumps(data))
-        assert config.code_version() != v0
-
-
-class TestServerVersionIsFixedAtStart:
-    def test_health_keeps_the_start_version_after_a_config_edit(self, client):
-        started = client.get("/health").json()["code_version"]
-        path = paths.config_path()
-        data = json.load(open(path, encoding="utf-8"))
-        data["min_results"] = 9
-        open(path, "w", encoding="utf-8").write(json.dumps(data))
-        assert config.code_version() != started                      # a new call would see a different version
-        assert client.get("/health").json()["code_version"] == started   # the running server keeps its own
-
-    def test_pid_file_removed_only_when_own(self, isolate):
-        import os
-        open(paths.pid_path(), "w").write(str(os.getpid()))
-        assert paths.remove_pid_file_if_own() is True and not os.path.exists(paths.pid_path())
-        open(paths.pid_path(), "w").write("1")
-        assert paths.remove_pid_file_if_own() is False and os.path.exists(paths.pid_path())
+    def test_code_version_follows_config(self):
+        a = compute_code_version(b'{"a": 1, "b": 2}')
+        assert a == compute_code_version(b'{\n  "b": 2,\n  "a": 1\n}\n')
+        assert a != compute_code_version(b'{"a": 1, "b": 3}')
+        assert compute_code_version(b"{bad") != compute_code_version(None)
 
 
 class TestHostHeader:
-    @pytest.mark.parametrize("path,method", [("/health", "GET"), ("/search", "POST"), ("/buffer", "POST"),
-                                             ("/repair", "POST"), ("/shutdown", "POST"), ("/tools/list_memories", "POST")])
-    def test_evil_host_is_403(self, client, path, method):
-        r = client.request(method, path, json={}, headers={"Host": "evil.example"})
-        assert r.status_code == 403
+    @pytest.mark.parametrize("method,path", ENDPOINTS)
+    def test_evil_host(self, offline_app, cfg, method, path):
+        c = TestClient(offline_app)
+        assert getattr(c, method)(path, headers=H(cfg, "evil.example")).status_code == 403
 
-    def test_good_hosts(self, client, cfg):
-        p = port_of(cfg)
-        assert client.get("/health", headers={"Host": "127.0.0.1:%d" % p}).status_code == 200
-        assert client.get("/health", headers={"Host": "localhost:%d" % p}).status_code == 200
+    @pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+    def test_local_hosts(self, offline_app, cfg, host):
+        r = TestClient(offline_app).get("/health", headers=H(cfg, f"{host}:{cfg['server_port']}"))
+        assert r.status_code == 200
 
+    @pytest.mark.parametrize("method,path", ENDPOINTS)
     @pytest.mark.parametrize("origin", ["http://evil.example", "null"])
-    def test_origin_is_403(self, client, cfg, origin):
-        h = {"Host": "127.0.0.1:%d" % port_of(cfg), "Origin": origin}
-        assert client.get("/health", headers=h).status_code == 403
-        assert client.post("/tools/list_memories", json={}, headers=h).status_code == 403
-        assert client.get("/health", headers={"Host": "127.0.0.1:%d" % port_of(cfg)}).status_code == 200
+    def test_origin_refused(self, offline_app, cfg, method, path, origin):
+        c = TestClient(offline_app)
+        assert getattr(c, method)(path, headers=H(cfg, Origin=origin)).status_code == 403
+
+    def test_without_origin_passes(self, offline_app, cfg):
+        assert TestClient(offline_app).get("/health", headers=H(cfg)).status_code == 200
+
+    def test_cli_sends_no_origin(self, monkeypatch):
+        sent = []
+
+        class Resp:
+            status = 200
+
+            def read(self):
+                return b"{}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(cli, "_port_free", lambda p: False)
+        monkeypatch.setattr(cli._OPENER, "open", lambda req, timeout=5: (sent.append(req), Resp())[1])
+        cli._request("POST", 1234, "/search", {"q": 1})
+        headers = {k.lower(): v for k, v in sent[0].header_items()}
+        assert "origin" not in headers and headers["host"] == "127.0.0.1:1234"
 
 
 class TestPlainDef:
-    def test_endpoints_are_sync(self, client):
-        for route in client.app.routes:
-            if getattr(route, "path", "") in ("/buffer", "/search", "/repair", "/tools/{name}"):
-                assert not inspect.iscoroutinefunction(route.endpoint), route.path
+    def test_plain_def(self, offline_app):
+        eps = {r.path: r.endpoint for r in offline_app.routes if hasattr(r, "endpoint")}
+        for path in ("/buffer", "/search", "/repair", "/tools/{name}"):
+            assert not inspect.iscoroutinefunction(eps[path]), path
 
 
-class TestReviewFixes:
-    def test_l5_repair_already_running(self, client, svc, db):
-        assert svc.repair_lock.acquire(blocking=False)
-        try:
-            r = client.post("/repair", json={})
-        finally:
-            svc.repair_lock.release()
-        assert r.json() == {"status": "ok", "message": "repair already running", "reembedded": 0, "remaining": 0}
+class TestServerProcessEdgeCases:
+    def test_server_on_other_port_is_stopped(self, monkeypatch, cfg):
+        other = cfg["server_port"] + 7
+        root = str(paths.data_dir())
+        stops, starts = [], []
+        monkeypatch.setattr(cli, "_health", lambda p: {"status": "ok", "root": root} if p == other else None)
+        monkeypatch.setattr(cli, "_pid_state", lambda: ("own", 4242))
+        monkeypatch.setattr(cli, "_listening_ports", lambda pid: {other})
+        monkeypatch.setattr(cli, "_request_shutdown", lambda p, r: (stops.append(p), (200, {}))[1])
+        monkeypatch.setattr(cli, "_wait_port_free", lambda p, t=15: True)
+        monkeypatch.setattr(cli, "_start_server", lambda c, w=60: (starts.append(1), False)[1])
+        cli.ensure_server(cfg, max_wait=0)
+        assert stops == [other] and starts == [1]
 
-    def test_m3_no_model_wait_returns_fast_and_saves_without_vector(self, cfg, redis_client, monkeypatch, client, fake_embed):
-        from n3mc_mcp import processor
-        monkeypatch.setattr(processor, "embed", fake_embed.real)
-        monkeypatch.setattr(processor, "_model", None)
-        monkeypatch.setattr(processor, "_last_error", None)
-        monkeypatch.setattr(processor, "MODEL_WAIT_SECONDS", 30)
-        monkeypatch.setattr(processor, "_bg_thread", None)
-        monkeypatch.setattr(processor, "_load_locked", lambda name: None)   # no real model load
-        started, release = threading.Event(), threading.Event()
+    def test_foreign_server_on_other_port_untouched(self, monkeypatch, cfg):
+        other = cfg["server_port"] + 7
+        stops = []
+        monkeypatch.setattr(cli, "_health", lambda p: {"status": "ok", "root": "/elsewhere"} if p == other else None)
+        monkeypatch.setattr(cli, "_listening_ports", lambda pid: {other})
+        monkeypatch.setattr(cli, "_request_shutdown", lambda p, r: stops.append(p))
+        assert cli._handle_other_port(4242, cfg) is False and stops == []
 
-        def hold():
-            with processor._model_lock:
-                started.set()
-                release.wait(20)
+    @pytest.mark.parametrize("exc", [SystemExit(1), RuntimeError("bind failed")])
+    def test_run_server_failure_recorded(self, monkeypatch, cfg, exc):
+        def boom(*a, **k):
+            raise exc
 
-        t = threading.Thread(target=hold)
-        t.start()
-        started.wait(5)
-        try:
-            t0 = time.time()
-            r = client.post("/buffer", json={"content": "hook message", "role": "user", "turn_id": "t",
-                                             "no_model_wait": True})
-            s = client.post("/search", json={"query": "hook message", "no_model_wait": True})
-            assert time.time() - t0 < 5
-            assert r.json()["saved"] is True and r.json()["warning"] == "embedding_unavailable"
-            assert "still loading" in s.json()["text"]
-        finally:
-            release.set()
-            t.join()
-
-    def test_l4_later_save_clears_save_failed(self, svc, db, wired, cfg):
-        from n3mc_mcp import cli
-        cli._notify("save_failed", "A record could not be saved (x). Current memories may be lost.")
-        assert "save_failed" in cli._read_notices()
-        cli._hook_save(cfg, True, "a good message", "user", "sid", "turn-1")
-        assert "save_failed" not in cli._read_notices()
-
-    def test_m2_run_server_failure_marks(self, cfg, monkeypatch):
-        from n3mc_mcp import cli
-        monkeypatch.setattr(cli, "_run_server", lambda c, v=None: (_ for _ in ()).throw(SystemExit(1)))
-        with pytest.raises(SystemExit):
+        monkeypatch.setattr(processor, "import_backend", lambda: None)
+        monkeypatch.setattr(Database, "ensure_connected", lambda self, enforce=True: "ok")
+        import uvicorn
+        monkeypatch.setattr(uvicorn, "run", boom)
+        with pytest.raises(type(exc)):
             cli.run_server()
-        assert (open(paths.start_failed_path()).read())
-        assert "server_start_failed" in cli._read_notices()
+        assert paths.start_failed_path().exists()
+        assert "server_start_failed" in json.loads(paths.notices_path().read_text(encoding="utf-8"))
+        starts = []
+        monkeypatch.setattr(cli, "_popen", lambda *a, **k: starts.append(1))
+        assert cli.ensure_server(cfg, max_wait=0) is False and starts == []
 
-    def test_m2_clean_exit_writes_nothing(self, cfg, monkeypatch):
-        from n3mc_mcp import cli
-        monkeypatch.setattr(cli, "_run_server", lambda c, v=None: None)
-        cli.run_server()
-        import os
-        assert not os.path.exists(paths.start_failed_path())
+    def test_run_server_normal_end(self, monkeypatch):
+        monkeypatch.setattr(processor, "import_backend", lambda: None)
+        monkeypatch.setattr(Database, "ensure_connected", lambda self, enforce=True: "ok")
+        import uvicorn
+        monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+        assert cli.run_server() == 0
+        assert not paths.start_failed_path().exists() and not paths.pid_path().exists()
+
+    def test_model_lock(self, monkeypatch):
+        monkeypatch.setattr(processor, "_model", None)
+        monkeypatch.setattr(processor, "MODEL_WAIT_SECONDS", 0.5)
+        monkeypatch.setattr(processor, "start_background_load", lambda: None)
+        processor._model_lock.acquire()
+        try:
+            t0 = time.monotonic()
+            assert processor.get_model(no_model_wait=True) is None
+            assert time.monotonic() - t0 < 0.1
+            t0 = time.monotonic()
+            assert processor.get_model() is None
+            assert time.monotonic() - t0 >= 0.4
+        finally:
+            processor._model_lock.release()
+
+    def test_no_model_wait_endpoints(self, monkeypatch, server_client, cfg, rconn):
+        monkeypatch.setattr(processor, "_model", None)
+        monkeypatch.setattr(processor, "start_background_load", lambda: None)
+        processor._model_lock.acquire()
+        try:
+            t0 = time.monotonic()
+            r = server_client.post("/buffer", json={"content": "fast save", "role": "user", "turn_id": "t",
+                                                    "no_model_wait": True}, headers=H(cfg)).json()
+            s = server_client.post("/search", json={"query": "fast save", "no_model_wait": True},
+                                   headers=H(cfg)).json()
+            assert time.monotonic() - t0 < 1.5
+            assert r["saved"] and not rconn.hexists("mem:" + r["id"], "embedding")
+            assert "still loading" in s["text"]
+        finally:
+            processor._model_lock.release()
+
+    def test_save_clears_save_failed(self, monkeypatch, server_client, cfg, rconn):
+        paths.notify("save_failed", "A record could not be saved (X: y). Current memories may be lost.")
+        cli._hook_save(cfg, True, "a later save", "user", "s", "t")
+        assert "save_failed" not in json.loads(paths.notices_path().read_text(encoding="utf-8"))
+
+    def test_repair_already_running(self, monkeypatch, server_client, cfg, db):
+        gate, entered = threading.Event(), threading.Event()
+        real = db.repair
+
+        def slow(**kw):
+            entered.set()
+            gate.wait(5)
+            return real(**kw)
+
+        monkeypatch.setattr(db, "repair", slow)
+        th = threading.Thread(target=lambda: server_client.post("/repair", json={}, headers=H(cfg)))
+        th.start()
+        entered.wait(5)
+        second = server_client.post("/repair", json={}, headers=H(cfg)).json()
+        gate.set()
+        th.join()
+        assert second["message"] == "repair already running"
+
+    def test_search_argument_sanitised(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(cli, "ensure_server", lambda cfg, max_wait=60: True)
+        monkeypatch.setattr(cli, "_post", lambda p, path, body, timeout=30: (sent.append(body), (200, {"text": "x"}))[1])
+        cli.main(["--search", "abc" + chr(0xD800)])
+        assert sent[0]["query"] == "abc"
+
+    def test_stop_entry_shares_child_timeout(self, monkeypatch):
+        deadlines = []
+        monkeypatch.setattr(lite_hook, "read_stdin", lambda: b"{}")
+        monkeypatch.setattr(lite_hook, "run_step", lambda args, d, dl: deadlines.append(dl))
+        t0 = time.monotonic()
+        lite_stop_hook.main()
+        assert len(deadlines) == 2 and deadlines[0] == deadlines[1]
+        assert deadlines[0] - t0 <= lite_hook.CHILD_TIMEOUT + 0.1
 
 
 class TestBufferEndpoint:
-    def test_roles_and_prefix(self, client, cfg, redis_client):
-        r = client.post("/buffer", json={"content": "hello there", "role": "user", "turn_id": "T", "session_id": "S",
-                                         "agent_name": "claude-code"})
-        assert r.status_code == 200 and r.json()["status"] == "saved"
-        key = b"mem:" + r.json()["id"].encode()
-        assert redis_client.hget(key, "content") == b"[user] hello there"
-        assert redis_client.hget(key, "agent_name") == b"claude-code"
-        assert redis_client.hget(key, "session_id") == b"S"
+    @pytest.mark.parametrize("role", ["user", "claude"])
+    def test_role_prefix(self, server_client, cfg, rconn, role):
+        r = server_client.post("/buffer", json={"content": "hello", "role": role, "turn_id": "t"},
+                               headers=H(cfg)).json()
+        assert r["status"] == "saved"
+        assert rconn.hget("mem:" + r["id"], "content").decode() == f"[{role}] hello"
 
-    def test_redis_down_is_503(self, svc, client, monkeypatch):
-        from n3mc_mcp.database import BackendUnreachable
-        monkeypatch.setattr(svc.db, "ensure_connected", lambda enforce=True: (_ for _ in ()).throw(BackendUnreachable("hint here")))
-        r = client.post("/buffer", json={"content": "x", "role": "user", "turn_id": "T"})
-        assert r.status_code == 503
-        assert r.json() == {"status": "error", "saved": False, "reason": "hint here"}
+    def test_redis_down(self, offline_app, cfg):
+        r = TestClient(offline_app).post("/buffer", json={"content": "x", "role": "user"}, headers=H(cfg))
+        assert r.status_code == 503 and "docker start redis-stack" in r.json()["reason"]
 
 
 class TestSearchEndpoint:
-    def test_text_and_limits(self, client, svc, db):
-        for i in range(12):
-            svc.save({"content": "alpha beta topic number %d " % i + "filler " * 80})
-        svc.cfg["_notices"].clear()
-        full = client.post("/search", json={"query": "alpha beta topic"}).json()["text"]
-        assert full.startswith("# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\nSearch query: alpha beta topic")
-        limited = client.post("/search", json={"query": "alpha beta topic", "max_chars": 2500}).json()["text"]
-        assert len(limited) < len(full)
+    def test_block_and_limits(self, server_client, cfg, db):
+        for i in range(30):
+            db.save_memory(f"limit test record {i} " + "padding text " * 30)
+        full = server_client.post("/search", json={"query": "limit test record"}, headers=H(cfg)).json()["text"]
+        small = server_client.post("/search", json={"query": "limit test record", "max_chars": 3000},
+                                   headers=H(cfg)).json()["text"]
+        assert full.startswith("# Recalled Memory Context\nSource: N3MC Lite (7-day working memory)\n")
+        assert len(full) > len(small) and "omitted to keep this block" in small and "omitted" not in full
 
-    def test_unreadable_since_is_400(self, client, db):
-        r = client.post("/search", json={"query": "x", "since": "yesterday"})
+    def test_bad_since(self, server_client, cfg):
+        r = server_client.post("/search", json={"query": "x", "since": "yesterday"}, headers=H(cfg))
         assert r.status_code == 400 and r.json()["detail"].startswith("Error: since must be")
 
-    def test_redis_down_is_503(self, svc, client, monkeypatch):
-        from n3mc_mcp.database import BackendUnreachable
-        monkeypatch.setattr(svc.db, "ensure_connected", lambda enforce=True: (_ for _ in ()).throw(BackendUnreachable("down")))
-        r = client.post("/search", json={"query": "x"})
-        assert r.status_code == 503 and r.json() == {"detail": "down"}
+    def test_redis_down(self, offline_app, cfg):
+        r = TestClient(offline_app).post("/search", json={"query": "x"}, headers=H(cfg))
+        assert r.status_code == 503
+
+
+def _noscore(text):
+    return re.sub(r" score=[0-9.]+", "", text)
 
 
 class TestToolsEndpoint:
-    def test_each_tool_with_and_without_nudge(self, client, svc, db):
-        a = client.post("/tools/save_memory?nudge=1", json={"content": "tool endpoint text"}).json()["text"]
-        b = client.post("/tools/save_memory?nudge=0", json={"content": "tool endpoint text two"}).json()["text"]
-        assert a.endswith(_NUDGE_AFTER_SAVE) and not b.endswith(_NUDGE_AFTER_SAVE)
-        assert json.loads(a[:a.index("\n\n---")])["status"] == "saved"
-        l = client.post("/tools/list_memories?nudge=0", json={}).json()["text"]
-        assert "tool endpoint text" in l
-        s0 = client.post("/tools/search_memory?nudge=0", json={"query": "tool endpoint"}).json()["text"]
-        s1 = client.post("/tools/search_memory?nudge=1", json={"query": "tool endpoint"}).json()["text"]
-        assert "tool endpoint text" in s0 and "tool endpoint text" in s1
-        assert "_Reminder:" in s1 and "_Reminder:" not in s0
-        for name in ("recall_thread", "delete_memory", "delete_memories_by_session", "repair_memory"):
-            body = {"turn_id": "x"} if name == "recall_thread" else {"id": "x"} if name == "delete_memory" else \
-                {"session_id": "x"} if name.startswith("delete_memories") else {}
-            assert client.post("/tools/%s?nudge=0" % name, json=body).json()["text"]
+    def _tool(self, client, cfg, name, args, nudge):
+        return client.post(f"/tools/{name}?nudge={nudge}", json=args, headers=H(cfg)).json()["text"]
 
-    def test_unknown_and_non_object(self, client, db):
-        assert client.post("/tools/nope?nudge=0", json={}).json()["text"] == "Error: unknown tool 'nope'"
-        assert client.post("/tools/nope", json={}).json()["text"].endswith(_NUDGE_GENERIC)
-        assert client.post("/tools/list_memories?nudge=0", json=[1, 2]).json()["text"] == "_No memories stored._"
+    def test_same_text_as_handlers(self, server_client, cfg, db):
+        cfg["_notices"].clear()      # process notices are shown once; keep both runners equal
+        r = parse_json(self._tool(server_client, cfg, "save_memory", {"content": "tool text", "turn_id": "tt"}, 1))
+        ref = ToolRunner(cfg, db)
+        for name, args in [("search_memory", {"query": "tool text"}), ("list_memories", {}),
+                           ("recall_thread", {"turn_id": "tt"}), ("repair_memory", {})]:
+            with_nudge = self._tool(server_client, cfg, name, args, 1)
+            without = self._tool(server_client, cfg, name, args, 0)
+            # BM25 scores of a tiny corpus move after any write, so the score= values are left out
+            assert _noscore(with_nudge) == _noscore(ref.call(name, args, nudge=True))
+            assert _noscore(without) == _noscore(ToolRunner(cfg, db).call(name, args, nudge=False))
+        assert self._tool(server_client, cfg, "save_memory", {"content": "tool text"}, 1).endswith(tools._NUDGE_AFTER_SAVE)
+        out = self._tool(server_client, cfg, "delete_memory", {"id": r["id"]}, 0)
+        assert parse_json(out)["status"] == "deleted" and not out.endswith(tools._NUDGE_GENERIC)
+        out = self._tool(server_client, cfg, "delete_memories_by_session", {"session_id": "none"}, 1)
+        assert out.endswith(tools._NUDGE_GENERIC)
 
-    def test_search_follows_context_max_chars(self, client, svc, db):
-        for i in range(12):
-            svc.save({"content": "limit topic %d " % i + "padding " * 120})
-        svc.cfg["context_max_chars"] = 2500
-        svc.cfg["min_score"] = 0.0
-        svc.cfg["relative_min_score_ratio"] = 0.0
-        t = client.post("/tools/search_memory?nudge=1", json={"query": "limit topic", "limit": 20}).json()["text"]
-        from n3mc_mcp import context
-        assert context.context_size(t) + 2 <= 2500
+    def test_unknown_and_non_object(self, server_client, cfg):
+        assert self._tool(server_client, cfg, "nope", {}, 0) == "Error: unknown tool 'nope'"
+        r = server_client.post("/tools/list_memories?nudge=0", content="[1, 2]", headers=H(cfg)).json()
+        assert r["text"] == "_No memories stored._"
+
+    def test_search_context_limit(self, server_client, cfg, db):
+        cfg["context_max_chars"] = 2000
+        for i in range(10):
+            db.save_memory(f"bounded output record {i} " + "word " * 80)
+        out = self._tool(server_client, cfg, "search_memory", {"query": "bounded output record"}, 1)
+        from n3mc_mcp.context import context_size
+        assert context_size(out) + 2 <= 2000 and out.endswith(tools._NUDGE_AFTER_SEARCH)
 
 
 class TestShutdown:
-    def test_other_root_forbidden(self, client):
-        assert client.post("/shutdown", json={"root": "C:/somewhere/else"}).status_code == 403
+    def test_other_root(self, offline_app, cfg):
+        r = TestClient(offline_app).post("/shutdown", json={"root": "/somewhere/else"}, headers=H(cfg))
+        assert r.status_code == 403
 
-    def test_own_root_ok(self, client):
-        calls = []
-        client.app.state.exit_fn = lambda: calls.append(1)
-        assert client.post("/shutdown", json={"root": paths.data_dir()}).json() == {"status": "ok"}
-        time.sleep(0.6)
-        assert calls == [1]
+    def test_own_root(self, app_factory, cfg):
+        app = app_factory(Database(dict(cfg, redis_url=conftest.UNREACHABLE_URL)))
+        r = TestClient(app).post("/shutdown", json={"root": str(paths.data_dir())}, headers=H(cfg))
+        assert r.json() == {"status": "ok"}
+        time.sleep(0.5)
+        assert app_factory.exits == [1]
 
 
 class TestConcurrency:
-    def test_parallel_saves_and_searches(self, client, svc, db):
-        errors = []
+    def test_parallel(self, server_client, cfg, rconn):
+        results = []
 
         def work(i):
-            try:
-                assert client.post("/buffer", json={"content": "parallel message %d" % i, "role": "user", "turn_id": "T%d" % i}).status_code == 200
-                assert client.post("/search", json={"query": "parallel message"}).status_code == 200
-            except Exception as exc:  # noqa: BLE001
-                errors.append(exc)
+            a = server_client.post("/tools/save_memory?nudge=0", json={"content": f"parallel {i}"}, headers=H(cfg))
+            b = server_client.post("/search", json={"query": f"parallel {i}"}, headers=H(cfg))
+            c = server_client.post("/tools/save_memory?nudge=0", json={"content": "same for all"}, headers=H(cfg))
+            results.append((a.status_code, b.status_code, c.status_code, parse_json(a.json()["text"])["saved"]))
 
         ts = [threading.Thread(target=work, args=(i,)) for i in range(8)]
         [t.start() for t in ts]
         [t.join() for t in ts]
-        assert errors == []
-        for _ in range(2):
-            client.post("/buffer", json={"content": "same twice", "role": "user", "turn_id": "TT"})
-        keys = [k for k in db.r.keys("mem:*") if not k.startswith(b"mem:sha:")]
-        assert len(keys) == 9
+        assert len(results) == 8 and all(r[:3] == (200, 200, 200) and r[3] for r in results)
+        same = [k for k in rconn.keys("mem:*") if not k.startswith(b"mem:sha:")
+                and rconn.hget(k, "content") == b"same for all"]
+        assert len(same) == 1
