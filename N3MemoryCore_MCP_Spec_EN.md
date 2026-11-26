@@ -1,4 +1,4 @@
-# N3MemoryCore MCP-Lite v2.0.2 [Volatile Memory — hooks for Claude Code, MCP for other apps]
+# N3MemoryCore MCP-Lite v2.1.0 [Volatile Memory — hooks for Claude Code, MCP for other apps]
 > A NeuralNexusNote™ product — **Lite (ephemeral) build**
 
 > **What is this variant?** The Lite build is the free, marketplace-targeted edition of N3MemoryCore MCP. Storage is **Redis Stack (RediSearch)**, every entry carries a **7-day TTL**, and nothing persists beyond that window. Think of it as working memory — the **Pro build** uses SQLite + sqlite-vec to store memories permanently.
@@ -182,7 +182,7 @@ If you just want to run it quickly from the published package:
      ```
    - **uvx** (zero-install, isolated env — requires [`uv`](https://docs.astral.sh/uv/)), for the Claude desktop app:
      ```bash
-     uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-workingmemory
+     uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-workingmemory
      ```
    - **Claude Code plugin marketplace** (no pip/uvx command required — the plugin runs the MCP entry through `uvx` for you, but `uv` must still be on PATH):
      ```
@@ -259,7 +259,7 @@ n3memorycore-mcp-lite/
 ├── LICENSE / NOTICE / CHANGELOG.md / PHILOSOPHY.md
 ├── N3MemoryCore_MCP_Spec_EN.md / _JP.md   # this specification
 ├── n3mc_mcp/                       # Python package
-│   ├── __init__.py                 # Version marker (__version__ = "2.0.2")
+│   ├── __init__.py                 # Version marker (__version__ = "2.1.0")
 │   ├── __main__.py                 # Entry point: python -m n3mc_mcp (= the MCP thin client, run())
 │   ├── server.py                   # MCP thin client: stdio, tools/list, forwards tools/call to the resident server (§4.6); run()
 │   ├── tooldefs.py                 # The seven Tool definitions of §5 (3), shared by the thin client and the resident server
@@ -304,13 +304,13 @@ The resident server is started as `python -m n3mc_mcp.cli --run-server` (§3.15)
 
 **`pyproject.toml`**: in the published repository, keep the current file (hatchling build backend, metadata, keywords, classifiers, `[tool.hatch…]` sections) and change only the items below. **When Method A generates into an empty folder**, write this file and then apply the same items: `[build-system]` `requires = ["hatchling>=1.21.0"]`, `build-backend = "hatchling.build"`; `[project]` `name = "n3memorycore-mcp-lite"`, `description = "N3MemoryCore MCP Lite - ephemeral 7-day hybrid-search memory over Redis Stack"`, `readme = { file = "README.md", content-type = "text/markdown" }`, `license = { file = "LICENSE" }`, `requires-python = ">=3.10"`, `authors = [{ name = "NeuralNexusNote" }]`, the dependencies below; `[tool.hatch.build.targets.wheel]` `packages = ["n3mc_mcp"]`. Without the files that `readme` and `license` point to, hatchling cannot build the metadata and `pip install -e .` fails, so Method A also writes `README.md` (a short user guide written from this spec) and `LICENSE` (the full text of the Apache License 2.0). Keywords, classifiers and URLs are optional for a local installation. The plugin files (`plugins/…/plugin.json`, `.claude-plugin/marketplace.json`) belong to the published repository only; Method A does not create them.
 
-- `version = "2.0.2"`.
+- `version = "2.1.0"`.
 - `dependencies`: the current six (`mcp>=1.0.0,<2.0.0`, `redis>=5.0.0,<8.0.0`, `sentence-transformers>=2.7.0`, `uuid-utils>=0.6.0`, `platformdirs>=4.0.0`, `numpy>=1.26.0`) plus `fastapi>=0.110`, `uvicorn>=0.27`, `pydantic>=2.0`, `psutil>=5.9` (Free's lower bounds).
 - `[project.optional-dependencies] dev`: add `httpx>=0.27` (FastAPI `TestClient`).
 - `[project.scripts]`: the five scripts of the table above.
 - The classifier `Operating System :: OS Independent` becomes `Operating System :: Microsoft :: Windows` and `Operating System :: POSIX :: Linux` (macOS is not a target).
 
-`.claude-plugin/marketplace.json` `metadata.version` and `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` `version` are the package version (`2.0.2`). **The `uvx` commands are pinned to the same version**: every `uvx --from n3memorycore-mcp-lite==<version>` in this document (the plugin's MCP entry, the rules file's `{cli}`, the desktop registration) names the package version; a release changes all of them together with the two `version` fields. Without the pin, the plugin and a pip installation could run different versions, whose servers have different `code_version`s and replace each other (§4.6).
+`.claude-plugin/marketplace.json` `metadata.version` and `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` `version` are the package version (`2.1.0`). **The `uvx` commands are pinned to the same version**: every `uvx --from n3memorycore-mcp-lite==<version>` in this document (the plugin's MCP entry, the rules file's `{cli}`, the desktop registration) names the package version; a release changes all of them together with the two `version` fields. Without the pin, the plugin and a pip installation could run different versions, whose servers have different `code_version`s and replace each other (§4.6).
 
 **Files kept as they are (not generated from this specification)**: `SECURITY.md`, `CONTRIBUTING.md`, `.github/` (issue and PR templates, `workflows/test.yml`, `workflows/pypi-publish.yml`), `server.json` (MCP registry entry), `.gitignore`, the evaluation scripts `tests/eval_*.py`, and `tests/test_cross_session.py`. Regenerating the code must not delete or rewrite them. When the CI matrix in `.github/workflows/test.yml` is edited by hand, it lists Windows and Linux only.
 
@@ -1324,7 +1324,7 @@ See §8 "Claude Desktop". In Claude Code it is registered by the plugin `n3mc-wo
 
 - **In applications without hooks, saving is up to the model** (§11). The instructions and reminders ask it to save; full conversations are kept only in Claude Code.
 - **The resident server must be able to run** (Python with the dependencies of §2). When it cannot start, searches return the error above and saves go in without vectors.
-- **One installation for all clients.** The hooks, the CLI and the thin client must run the same code: a copy of another version has another `code_version`, and each would replace the other's server on every call (§3.15). Register the desktop app with the absolute path of the same scripts folder the hooks use, or — for plugin users — with the same `uvx --from n3memorycore-mcp-lite==2.0.2 …` form (§8). The plugin's `uvx` commands are pinned to the package version (§2), so the plugin and the desktop app run the same version as long as both use this release.
+- **One installation for all clients.** The hooks, the CLI and the thin client must run the same code: a copy of another version has another `code_version`, and each would replace the other's server on every call (§3.15). Register the desktop app with the absolute path of the same scripts folder the hooks use, or — for plugin users — with the same `uvx --from n3memorycore-mcp-lite==2.1.0 …` form (§8). The plugin's `uvx` commands are pinned to the package version (§2), so the plugin and the desktop app run the same version as long as both use this release.
 
 ---
 
@@ -2084,7 +2084,7 @@ Plugin users (no pip installation; the hooks run through `uvx`):
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"],
+      "args": ["--from", "n3memorycore-mcp-lite==2.1.0", "n3mc-workingmemory"],
       "env": {
         "N3MC_AGENT_NAME": "claude-desktop"
       }
@@ -2124,7 +2124,7 @@ Requires `uv` on PATH. `plugins/n3mc-workingmemory/.claude-plugin/plugin.json` k
   "mcpServers": {
     "n3mc-workingmemory": {
       "command": "uvx",
-      "args": ["--from", "n3memorycore-mcp-lite==2.0.2", "n3mc-workingmemory"]
+      "args": ["--from", "n3memorycore-mcp-lite==2.1.0", "n3mc-workingmemory"]
     }
   }
 }
@@ -2159,7 +2159,7 @@ python "${CLAUDE_PLUGIN_ROOT}/hooks/install_permissions.py" || py "${CLAUDE_PLUG
 `<FALLBACK>` is the text of the fallback JSON in "Auto-approve" below (with its `\"` escapes).
 
 - The resident server is started by the MCP entry with its own `sys.executable` (`-m n3mc_mcp.cli --run-server`, §3.15), i.e. inside the `uvx` environment.
-- `--uvx` tells hook entries that run through `uvx` (registered by hand as `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite-hook --uvx`) to write the rules file with the `uvx --from n3memorycore-mcp-lite==2.0.2 n3mc-lite` command form (§12). Without it the `python -m n3mc_mcp.cli` form is used (pip installations).
+- `--uvx` tells hook entries that run through `uvx` (registered by hand as `uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-lite-hook --uvx`) to write the rules file with the `uvx --from n3memorycore-mcp-lite==2.1.0 n3mc-lite` command form (§12). Without it the `python -m n3mc_mcp.cli` form is used (pip installations).
 - **Start-up time of `uvx` (Windows 11, uv 0.11.7, package already in the uv cache; median of 10 runs after one warm-up)**: `python -c pass` with the system Python 125 ms; `uvx --from n3memorycore-mcp-lite==2.0.2 python -c pass` 316 ms; `uvx --from n3memorycore-mcp-lite==1.12.2 python -c "import n3mc_mcp.config"` 503 ms. So `uvx` adds about 0.19 s to each start (the plugin's MCP entry starts once per session). Not measured: a run that must download or refresh the package, and Linux. The `uvx` command is pinned to the package version (§2).
 
 **(b) pip**
@@ -2478,7 +2478,7 @@ No model. The thin client's handlers are called as functions with the HTTP sende
 
 | Test class | What it covers |
 |---|---|
-| `TestThinNames` | `n3mc-workingmemory` and `n3mc-mcp-lite` map to `n3mc_mcp.__main__:run`; `serverInfo.name` is `n3mc-workingmemory`; `pyproject.toml` declares version `2.0.2` and `mcp>=1.0.0,<2.0.0` |
+| `TestThinNames` | `n3mc-workingmemory` and `n3mc-mcp-lite` map to `n3mc_mcp.__main__:run`; `serverInfo.name` is `n3mc-workingmemory`; `pyproject.toml` declares version `2.1.0` and `mcp>=1.0.0,<2.0.0` |
 | `TestThinTools` | `tools/list` gives the seven definitions of §5 (3) verbatim without a server; the instructions are the text of §5 (1) verbatim; the handler is registered with `validate_input=False` (or without it when refused) |
 | `TestForwarding` | Each tool is sent as `POST /tools/<name>?nudge=1` with its arguments, and the answer's text is returned unchanged (byte for byte); `session_id` is filled for `search_memory` / `save_memory` only when missing (argument → `N3MC_SESSION_ID` → the process UUID, the same for every call); `agent_name` is filled (argument → `N3MC_AGENT_NAME` → `clientInfo.name` → empty; a blank argument with no other source becomes empty, never the spaces); an exception in the handler gives exactly `Error: <message>` + `_NUDGE_GENERIC`; no result has `isError` set; `importance: "nan"` reaches the server and gets Lite's JSON (no SDK validation error) |
 | `TestThinNoServer` | With no server / still starting / start failed / another folder's server: `save_memory` saves directly (no `embedding` field, `warning` and `detail` of §4.6); the other tools return the texts of §4.6; Redis down too → the backend error JSON; `delete_memory` / `delete_memories_by_session` and `--delete` / `--delete-session`: not sent → "Nothing was deleted", completed → the normal answer, answer lost after the delete (timeout patched in) → `"status": "unknown"` |
