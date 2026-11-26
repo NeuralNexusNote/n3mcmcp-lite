@@ -796,7 +796,7 @@ class Database:
                 cands[r["id"]] = dict(r)
         max_bm25 = max((abs(r.get("_bm25", 0.0)) for r in bm_rows), default=0.0)
         thr = float(cfg.get("bm25_min_threshold", 0.1))
-        floor = float(cfg.get("vector_min_cos", 0.85))
+        floor = float(cfg.get("vector_min_cos", 0.83))
         now = time.time()
         normal_c, all_c = [], []
         for cid, r in cands.items():

@@ -964,10 +964,10 @@ verbatim 契約を破る可能性を最小化するための設計判断であ�
 
 ### 3.14 検索結果の整形
 
-KNN の候補をそのまま全部順位付けしてはならない。`multilingual-e5` では無関係なレコードでもほぼどのクエリに対してもコサイン 0.80〜0.85 になるため、`search_memory` は関連の薄い行を長々と返し、事実や文書の更新版が古い版より下に来ることがある（古い版は `access_count` を蓄積している）。そこで `search_memory` は候補を次の順で整形する：
+KNN の候補をそのまま全部順位付けしてはならない。`multilingual-e5` では無関係なレコードでもほぼどのクエリに対してもコサイン 0.80 かそれより少し上になるため、`search_memory` は関連の薄い行を長々と返し、事実や文書の更新版が古い版より下に来ることがある（古い版は `access_count` を蓄積している）。そこで `search_memory` は候補を次の順で整形する：
 
 1. **時間窓（事前フィルタ）** — `since` / `until` はランキング後ではなく、KNN と BM25 のクエリ内で適用する（[§4.3.1](#431-取り出し拡張ツールretrieval-extensions) 参照）。
-2. **ベクトル下限** — `cos_sim < vector_min_cos`（既定 `0.85`）のベクトル候補を落とす。落ちた行も BM25 経由では入りうる（`cos_sim = 0.0` として）。**0.85 は `multilingual-e5-base` で計測した値。`embedding_model` を変えたら計測し直すこと。**
+2. **ベクトル下限** — `cos_sim < vector_min_cos`（既定 `0.83`）のベクトル候補を落とす。落ちた行も BM25 経由では入りうる（`cos_sim = 0.0` として）。**0.83 は `multilingual-e5-base` で計測した値（0.85 では、言い換えの問いの正しい記録がコサイン 0.83〜0.85 で落ちやすい。0.80 以下では無関係な行が急に増える）。`embedding_model` を変えたら計測し直すこと。**
 3. **融合スコア** — §3.6 の式、続いて親ドキュメント解決（§3.11）、語彙リランク（§3.6）、`filter_score` に対する `min_score` の足切り（§3.6）。
 4. **新しい版を先頭へ**（`version_order_enabled`、既定 `true`） — ユーザーが設定や事実を作り直すと、旧版と新版の両方が保存され（近似重複は拒否しない、§3.8）、両方が返ってくる。
    - 各結果の**代表埋め込み**を取る：独立行は自身の `embedding`、親ドキュメントは先頭チャンク（`chunk_ids[0]`）の `embedding`。代表テキスト（独立行の `content`、または先頭チャンクの `content`）が `version_min_chars`（既定 `100`）より短い行は対象外 — 短い行同士は似すぎていて、版違いと別の事実を区別できない。
@@ -1933,7 +1933,7 @@ _SOFT_BREAKS = (
   "bm25_min_threshold":       0.1,
   "search_result_limit":      20,
   "min_score":                0.2,
-  "vector_min_cos":           0.85,
+  "vector_min_cos":           0.83,
   "relative_min_score_ratio": 0.6,
   "min_results":              3,
   "version_order_enabled":    true,
@@ -1965,7 +1965,7 @@ _SOFT_BREAKS = (
 - `redis_url` — 接続 URL。環境変数 `N3MC_REDIS_URL` がこのフィールドより優先。
 - `ttl_seconds` — 新規メモリと sha ガードに適用する TTL（既定 7 日）。下げるのは問題ないが、1 週間を大きく超える値に上げると Lite の目的が崩れる。
 - `search_result_limit` — `search_memory` が返す最大件数。
-- `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 検索結果の整形（[§3.14](#314-検索結果の整形)）。`vector_min_cos`（0.85）と `version_sim_threshold`（0.98）は `multilingual-e5-base` で計測した値。別の `embedding_model` では計測し直すこと。`vector_min_cos` の妥当な範囲は 0.80〜0.88（低くすると再現率が上がり関連の薄い行も増える、高くすると結果が短くなり関連行も落ちやすい）。変更は MCP サーバープロセスの再起動時に反映される（MCP クライアントを再起動する）。
+- `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — 検索結果の整形（[§3.14](#314-検索結果の整形)）。`vector_min_cos`（0.83）と `version_sim_threshold`（0.98）は `multilingual-e5-base` で計測した値。別の `embedding_model` では計測し直すこと。`vector_min_cos` の妥当な範囲は 0.80〜0.88（低くすると再現率が上がり関連の薄い行も増える、高くすると結果が短くなり関連行も落ちやすい）。変更は MCP サーバープロセスの再起動時に反映される（MCP クライアントを再起動する）。
 - `min_results` — 下限を通った結果がこの件数に満たないとき、足りない分を**弱い候補**（下限で落ちた候補）で補う。別の見出しの下に出し、`access_count` は数えない（既定 `3`、[§3.14](#314-検索結果の整形) の手順 6）。`0` で補充しない。MCP サーバーのプロセスを起動し直すと効く。
 - `dedup_threshold` と `context_char_limit`（v1.6.x）は**廃止** — 既存の `config.json` にあっても無視される（削除する必要はない）。
 - `min_score` — `filter_score`（`time_decay` と `b_session` を掛けないスコア、[§3.6](#36-ランキング式)）がこの値未満の結果を除外（既定 `0.2`）。`0.0` で無効化。**フィルタは語彙リランク（[§3.6](#36-ランキング式)）の後に適用される** — フレーズ一致・coverage の加点を受けたスコアで判定するため、融合スコアが閾値直下でもリランク加点で救済されうる。
@@ -1988,7 +1988,7 @@ _SOFT_BREAKS = (
 |---|---|
 | ファイルが無い | 新しい `owner_id` / `local_id` 付きの既定値で**排他的に**作成する（下記）。別のプロセスが先に作っていたら、そのファイルを使う |
 | JSON として不正、またはトップレベルがオブジェクトでない | **ファイルを変更しない。** 既定値で動き、このプロセスに限り新しい UUID を使う（保存しない）。通知 `config_unreadable` を出す（文面: `config_unreadable: <path> could not be read (<理由>) …`） |
-| 値の型が誤っている（例：`"vector_min_cos": "0.83"`、引用符付きの数値）、または許される範囲（下の表）の外 | **その項目だけ**無視して（既定値を使い）、他の項目は使う。ファイルは変更しない。項目名を挙げた通知 `config_type` を出す |
+| 値の型が誤っている（例：`"vector_min_cos": "0.80"`、引用符付きの数値）、または許される範囲（下の表）の外 | **その項目だけ**無視して（既定値を使い）、他の項目は使う。ファイルは変更しない。項目名を挙げた通知 `config_type` を出す |
 | 読める | 欠損フィールドを既定値で埋めて保存（欠けた `owner_id` / `local_id` は下の「`config.json` の書き込み」のロックの中で補う） |
 
 - 型チェック（`config_value_ok(key, value, chunk_threshold=None)`。`chunk_threshold` は有効な値で、`chunk_overlap` に必要）：既定値が bool なら bool のみ、文字列なら文字列のみ受け付ける。数値は下の表に従う（bool は数値として扱わない）。既定値の無いフィールド（`owner_id`、`local_id`）と未知のフィールドはチェックしない。

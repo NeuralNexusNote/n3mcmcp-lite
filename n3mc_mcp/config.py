@@ -20,7 +20,7 @@ DEFAULTS = {
     "bm25_min_threshold": 0.1,
     "search_result_limit": 20,
     "min_score": 0.2,
-    "vector_min_cos": 0.85,
+    "vector_min_cos": 0.83,
     "relative_min_score_ratio": 0.6,
     "min_results": 3,
     "version_order_enabled": True,

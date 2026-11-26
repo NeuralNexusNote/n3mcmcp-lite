@@ -979,10 +979,10 @@ would only run on data that the user already accepted as ephemeral.
 
 ### 3.14 Search Result Shaping
 
-Do not simply rank every KNN candidate. With `multilingual-e5`, even unrelated records sit at cosine 0.80–0.85 to almost any query, so `search_memory` would return long lists of loosely related rows, and an updated version of a fact or document could rank below the old one (the old one has accumulated `access_count`). `search_memory` therefore shapes its candidates in this order:
+Do not simply rank every KNN candidate. With `multilingual-e5`, even unrelated records sit at cosine 0.80 or a little above to almost any query, so `search_memory` would return long lists of loosely related rows, and an updated version of a fact or document could rank below the old one (the old one has accumulated `access_count`). `search_memory` therefore shapes its candidates in this order:
 
 1. **Time window (pre-filter)** — `since` / `until` are applied inside the KNN and BM25 queries (see [§4.3.1](#431-retrieval-extension-tools)), not after ranking.
-2. **Vector floor** — drop vector candidates whose `cos_sim < vector_min_cos` (default `0.85`). A dropped row can still enter through BM25 (with `cos_sim = 0.0`). **0.85 was measured with `multilingual-e5-base`; re-measure it when `embedding_model` is changed.**
+2. **Vector floor** — drop vector candidates whose `cos_sim < vector_min_cos` (default `0.83`). A dropped row can still enter through BM25 (with `cos_sim = 0.0`). **0.83 was measured with `multilingual-e5-base` (at 0.85 the right record of a paraphrased question, at cosine 0.83–0.85, is often dropped; at 0.80 and below, unrelated rows increase sharply); re-measure it when `embedding_model` is changed.**
 3. **Fusion score** — §3.6 formula, then parent-document resolution (§3.11), then lexical rerank (§3.6), then the `min_score` floor (§3.6) on `filter_score`.
 4. **Newest version first** (`version_order_enabled`, default `true`) — when the user re-makes a setting or a fact, both the old and the new version are stored (near-duplicates are not rejected, §3.8) and both come back.
    - For each result take a **representative embedding**: a standalone row uses its own `embedding`; a parent document uses the `embedding` of its first chunk (`chunk_ids[0]`). Skip rows whose representative text (the standalone `content`, or the first chunk's `content`) is shorter than `version_min_chars` (default `100`) — short rows are too similar to each other to tell versions from different facts.
@@ -1947,7 +1947,7 @@ Complete schema (missing fields auto-filled with defaults below):
   "bm25_min_threshold":       0.1,
   "search_result_limit":      20,
   "min_score":                0.2,
-  "vector_min_cos":           0.85,
+  "vector_min_cos":           0.83,
   "relative_min_score_ratio": 0.6,
   "min_results":              3,
   "version_order_enabled":    true,
@@ -1979,7 +1979,7 @@ An existing `config.json` from a 1.x version lacks the last three keys; it gets 
 - `redis_url` — connection URL. `N3MC_REDIS_URL` env var overrides this field.
 - `ttl_seconds` — TTL applied to every new memory and its sha-guard (default 7 d). Lowering it is fine; raising it far beyond a week defeats the purpose of the Lite.
 - `search_result_limit` — max results returned by `search_memory`.
-- `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — search result shaping ([§3.14](#314-search-result-shaping)). `vector_min_cos` (0.85) and `version_sim_threshold` (0.98) were measured with `multilingual-e5-base`; re-measure them for another `embedding_model`. A sensible `vector_min_cos` range is 0.80–0.88 (lower: more recall, more loosely related rows; higher: shorter results, related rows dropped more easily). Changes take effect when the MCP server process restarts (restart the MCP client).
+- `vector_min_cos` / `relative_min_score_ratio` / `version_order_enabled` / `version_sim_threshold` / `version_min_chars` — search result shaping ([§3.14](#314-search-result-shaping)). `vector_min_cos` (0.83) and `version_sim_threshold` (0.98) were measured with `multilingual-e5-base`; re-measure them for another `embedding_model`. A sensible `vector_min_cos` range is 0.80–0.88 (lower: more recall, more loosely related rows; higher: shorter results, related rows dropped more easily). Changes take effect when the MCP server process restarts (restart the MCP client).
 - `min_results` — when fewer results than this pass the floors, the shortfall is filled with **weak matches** — candidates the floors dropped, shown under a separate heading and not counted in `access_count` (default `3`; [§3.14](#314-search-result-shaping) step 6). Set to `0` to disable the fill. Changes take effect when the MCP server process restarts.
 - `dedup_threshold` and `context_char_limit` (v1.6.x) are **removed** — ignored if present in an existing `config.json` (no need to delete them).
 - `min_score` — excludes results whose `filter_score` (the score without `time_decay` and `b_session`, [§3.6](#36-ranking-formula)) is below this value (default `0.2`). Set to `0.0` to disable. **The filter is applied after lexical rerank ([§3.6](#36-ranking-formula))** — it judges the score including phrase/coverage boosts, so a candidate just below the threshold at fusion time can be rescued by the rerank boost.
@@ -2002,7 +2002,7 @@ An existing `config.json` from a 1.x version lacks the last three keys; it gets 
 |---|---|
 | File missing | Create it **exclusively** with the defaults and fresh `owner_id` / `local_id` (below). If another process created it first, use that file instead |
 | Not valid JSON, or the top level is not an object | **Do not modify the file.** Run on defaults; use fresh UUIDs for this process only (not saved). Emit notice `config_unreadable` (text: `config_unreadable: <path> could not be read (<reason>) …`) |
-| A value has the wrong type (e.g. `"vector_min_cos": "0.83"`, a quoted number) or is outside its allowed range (table below) | Ignore **only that item** (use its default) and use the others. Do not modify the file. Emit notice `config_type` naming the items |
+| A value has the wrong type (e.g. `"vector_min_cos": "0.80"`, a quoted number) or is outside its allowed range (table below) | Ignore **only that item** (use its default) and use the others. Do not modify the file. Emit notice `config_type` naming the items |
 | Readable | Fill missing fields with defaults and save (a missing `owner_id` / `local_id` is filled under the lock of "Writing `config.json`" below) |
 
 - Type check (`config_value_ok(key, value, chunk_threshold=None)`; `chunk_threshold` is the value in effect, needed for `chunk_overlap`): if the default is a bool, accept only bools; if a string, only strings; numbers follow the table below (a bool is never a number). Fields without a default (`owner_id`, `local_id`) and unknown fields are not checked.

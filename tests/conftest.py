@@ -70,7 +70,7 @@ REAL_POPEN = _cli._popen_server
 # ── Deterministic stand-in embeddings ────────────────────────────────────────
 
 DIM = 768
-BIAS = 2.0   # cos of unrelated texts = BIAS² / (BIAS² + 1) = 0.8 (below vector_min_cos 0.85)
+BIAS = 2.0   # cos of unrelated texts = BIAS² / (BIAS² + 1) = 0.8 (below vector_min_cos 0.83)
 
 
 def fake_vector(text):

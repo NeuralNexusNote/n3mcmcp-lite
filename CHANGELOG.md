@@ -10,6 +10,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [Unreleased]
 
 ### Changed
+- **The default `vector_min_cos` is 0.83 (was 0.85).** With
+  `multilingual-e5-base`, the right record of a paraphrased question often
+  sits at cosine 0.83–0.85 and was shown only as a weak match; at 0.80 and
+  below, unrelated rows increase sharply. A new `config.json` gets 0.83. A
+  `config.json` written by an earlier version already holds
+  `"vector_min_cos": 0.85` and keeps it: change it to 0.83 by hand and
+  restart the MCP client (or stop the server with `n3mc-lite --stop-server`).
 - The specification's "What changed in v2.0.0" table also lists three
   changes that v1.12.2 users see: a search no longer extends a TTL, the
   full-text index field is `content_fts` (the index is created again once),

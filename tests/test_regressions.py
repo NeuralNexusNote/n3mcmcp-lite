@@ -199,9 +199,9 @@ class TestConfig:
         assert c["_config_unreadable"] and any(n.startswith("config_unreadable") for n in c["_notices"])
 
     def test_wrong_type_ignored(self, isolate):
-        _write_cfg(isolate, vector_min_cos="0.83")
+        _write_cfg(isolate, vector_min_cos="0.80")
         c = CF.load_config()
-        assert c["vector_min_cos"] == 0.85
+        assert c["vector_min_cos"] == 0.83
         assert any("vector_min_cos" in n for n in c["_notices"])
 
     def test_bool_is_not_number(self, isolate):
@@ -312,7 +312,7 @@ class TestConfigCreate:
         assert set(out) == {disk}
 
     def test_fill_ids_concurrently(self, isolate):
-        p = _write_cfg(isolate, vector_min_cos=0.83)
+        p = _write_cfg(isolate, vector_min_cos=0.80)
         out = []
 
         def go():
@@ -326,7 +326,7 @@ class TestConfigCreate:
             t.join()
         disk = json.loads(p.read_text(encoding="utf-8"))
         assert set(out) == {(disk["owner_id"], disk["local_id"])}
-        assert disk["vector_min_cos"] == 0.83
+        assert disk["vector_min_cos"] == 0.80
 
     def test_update_uses_replace(self, isolate, monkeypatch):
         calls = []
